@@ -46,3 +46,37 @@ for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed"
     torch.cuda.synchronize()
     print("ok k_dw", lay.last_info.get("dw_staging"), "cfg", lay.last_info.get("dw_cfg"), "stages", stages, prec,
           "B", B, flush=True)
+
+# backward-compute variants (epilogues, fallbacks, dX warp dispatch)
+cuda_ops.DW_INDEXED_STAGES = 2
+for pooling, dxe, dwe, prec, B, H, bad in [
+        ("mean", "mask", "mask", "split", 40, 20011, None), ("mean", "fast", "fast", "bf16", 24, 20011, None),
+        ("mean", "auto", "auto", "split", 40, 20011, float("nan")),  # non-finite: in-kernel / separate-launch fallback
+        ({"type": "mean", "activation": "identity"}, "mask", "mask", "split", 8, 20011, None),
+        ({"type": "logmeanexp", "temperature": 0.5}, "fast", "fast", "split", 40, 20011, None),
+        ({"type": "logmeanexp", "temperature": 0.5}, "auto", "auto", "bf16", 40, 20011, float("inf")),
+        ({"type": "power_mean", "p": 2}, "fast", "fast", "split", 40, 20011, None),
+        ("mean", "auto", "auto", "split", 40, 8000, None),  # 16 dX warps (< 32 work units per unit)
+        ("mean", "mask", "fast", "split", 40, 40011, None),  # 32 dX warps (40 work units per unit)
+        ({"type": "logmeanexp", "temperature": 0.5}, "fast", "fast", "split", 24, 40011, float("nan")),
+        ("mean", "mask", "mask", "bf16", 40, 40011, float("-inf"))]:
+    lay = SparsePoolingLayer(1024, H, 16, shared_neurons=64, pooling=pooling, device="cuda", bias_std=0.1,
+                             backend="cuda", plan=PhysicalPlan(block_m=32, grad_precision=prec,
+                                                               cuda_dx_epilogue=dxe, cuda_dw_epilogue=dwe))
+    x = torch.randn(B, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    y = lay(x).float()
+    g = torch.randn_like(y)
+    if bad is not None:
+        g[3, 5] = bad
+    y.backward(g)
+    torch.cuda.synchronize()
+    i = lay.last_info
+    print("ok bwd", lay.cfg.describe(), prec, "dx", i.get("dx_epilogue"), i.get("dx_warps"), "dw", i.get("dw_epilogue"),
+          "B", B, "nonfinite" if bad is not None else "", flush=True)
+for C, dxe in ((8, "mask"), (8, "fast")):  # C = 8: only the dX epilogue applies
+    lay = SparsePoolingLayer(1024, 20011, 16, shared_neurons=C, pooling="mean", device="cuda", bias_std=0.1,
+                             backend="cuda", plan=PhysicalPlan(block_m=32, cuda_dx_epilogue=dxe))
+    x = torch.randn(40, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    lay(x).float().square().sum().backward()
+    torch.cuda.synchronize()
+    print("ok bwd C=8", dxe, lay.last_info.get("dx_epilogue"), flush=True)

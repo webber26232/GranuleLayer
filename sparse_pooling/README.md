@@ -178,6 +178,12 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
     at H = 100M), with warp-level instead of CTA-level synchronisation; results are bitwise
     identical to `k_dw` and 1.4× faster (`PhysicalPlan.cuda_dw_staging = "full"` restores
     the original kernel).  Details: `results/MEMORY_TRAFFIC_OPTIMIZATION.md`.
+  * dZ epilogues (`PhysicalPlan.cuda_{dx,dw}_epilogue`, default `"auto"`): for Mean, LME and
+    integer-p power mean the token-validity select and the multiply by act'(z) are dropped; for
+    Mean, dZ is one of two values per token, so its BF16 hi/lo split is computed per token and
+    each element needs only a bit mask.  Gradients are bitwise identical to the generic path
+    (FTZ and non-finite coefficients included, via a device-side fallback flag).  Details:
+    `results/BACKWARD_COMPUTE_OPTIMIZATION.md`.
 * dZ enters the tensor-core products as hi + lo BF16 pair (`grad_precision="split"`,
   ~16-bit mantissa, gradients within ~3e-6 of FP32 autograd) or a single BF16
   (`"bf16"`, the usual mixed-precision semantics, ~1.5e-3).  Accumulation is FP32 always.

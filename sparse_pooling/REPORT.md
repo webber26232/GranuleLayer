@@ -246,7 +246,10 @@ Per-kernel timing, a source-derived traffic model and ablations are in
 changes are now the C = 64 defaults: indexed, warp-local input staging in `k_dw` (dW 1096 →
 775 ms, bitwise-identical gradients) and 32-warp `k_dx` CTAs (939 → 806 ms).  Full step at
 H = 100M, C = 64, Mean(ReLU), split: 2357 → 1904 ms (1.24×, interleaved A/B).  The tables in
-§2 above predate these changes.
+§2 above predate these changes.  Phase 2 ([`results/BACKWARD_COMPUTE_OPTIMIZATION.md`](results/BACKWARD_COMPUTE_OPTIMIZATION.md)):
+exact pooling-specialised dZ epilogues (per-token BF16 hi/lo + bit masks for Mean), measured
+per-operator defaults and a work-unit-based dX warp dispatch take the same step from 1964 to
+1814 ms in a same-session A/B against `dw-indexed-staging` (1.08×; dX 1.13×, dW 1.07×).
 
 ## 9. Re-measurement after the hardware repair
 
