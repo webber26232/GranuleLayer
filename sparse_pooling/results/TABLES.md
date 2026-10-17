@@ -3,158 +3,158 @@
 
 ### Final comparison, H = 100M, B = 8192, C = 8
 
-H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 18:56:58)
+H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 23:53:43)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Max | 8 | 1 | save_winners | 467.6 | 13.1 | 480.7 | 502.8 | 8.80 GiB | 64.0 MiB | 16293 | 28.0 | cuda/triton | yes (tests) |
-| Max (recompute winners) | 8 | 1 | minimal_stats | 398.4 | 481.8 | 880.2 | 905.5 | 8.89 GiB | 32.0 MiB | 9046 | 32.9 | cuda/triton | yes (tests) |
-| Top-8 Mean | 8 | 1 | save_winners | 1066.1 | 96.2 | 1162.3 | 1191.2 | 9.76 GiB | 544.0 MiB | 6877 | 12.3 | cuda/triton | yes (tests) |
-| Top-8 Mean (recompute) | 8 | 1 | recompute_stats | 1072.7 | 1174.6 | 2247.3 | 2286.6 | 9.79 GiB | 0.0 MiB | 3583 | 12.2 | cuda/triton | yes (tests) |
-| Mean(ReLU) | 8 | 1 | minimal_stats | 391.9 | 4502.5 | 4894.5 | 4973.9 | 8.79 GiB | 32.0 MiB | 1647 | 33.4 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 721.5 | 5539.2 | 6260.7 | 6566.5 | 8.88 GiB | 32.0 MiB | 1248 | 18.2 | cuda/cuda | yes (tests) | (re-run)
-| Softmax-weighted b=1 | 8 | 1 | minimal_stats | 862.7 | 6143.1 | 7005.9 | 7041.5 | 8.91 GiB | 64.0 MiB | 1163 | 15.2 | cuda/cuda | yes (tests) | (re-run)
-| Softmax-weighted b=1 (recompute) | 8 | 1 | recompute_stats | 870.5 | 7043.2 | 7913.7 | 7940.2 | 8.94 GiB | 0.0 MiB | 1032 | 15.1 | cuda/cuda | yes (tests) | (re-run)
-| Power mean p=2 | 8 | 1 | minimal_stats | 631.9 | 5775.2 | 6407.1 | 6424.3 | 8.92 GiB | 32.0 MiB | 1275 | 20.7 | cuda/cuda | yes (tests) | (re-run)
-| Max -> Mean | 8 | 2 | save_winners | 571.1 | 75.1 | 646.2 | 687.3 | 9.62 GiB | 384.0 MiB | 11920 | 23.0 | cuda/triton | yes (tests) |
-| Top-8 -> LogMeanExp | 8 | 2 | save_winners | 2438.7 | 567.8 | 3006.5 | 3007.7 | 12.48 GiB | 1728.0 MiB | 2724 | 5.4 | cuda/triton | yes (tests) | (re-run)
-| Mean(ReLU) -> LogMeanExp | 8 | 2 | minimal_stats | 555.3 | 5002.6 | 5557.8 | 5605.8 | 9.68 GiB | 192.0 MiB | 1461 | 23.6 | cuda/cuda | yes (tests) | (re-run)
-| Max+affine -> Max | 8 | 2 | save_winners | 575.3 | 23.6 | 598.9 | 628.7 | 9.90 GiB | 384.0 MiB | 13030 | 22.8 | cuda/triton | yes (tests) |
+| Max | 8 | 1 | save_winners | 475.1 | 11.5 | 486.5 | 513.2 | 8.80 GiB | 64.0 MiB | 15963 | 27.6 | cuda/triton | yes (tests) |
+| Max (recompute winners) | 8 | 1 | minimal_stats | 423.1 | 484.6 | 907.6 | 935.2 | 8.89 GiB | 32.0 MiB | 8760 | 31.0 | cuda/triton | yes (tests) |
+| Top-8 Mean | 8 | 1 | save_winners | 1080.9 | 79.3 | 1160.2 | 1179.7 | 9.26 GiB | 288.0 MiB | 6944 | 12.1 | cuda/triton | yes (tests) |
+| Top-8 Mean (recompute) | 8 | 1 | recompute_stats | 1080.6 | 1154.7 | 2235.3 | 2261.7 | 9.29 GiB | 0.0 MiB | 3622 | 12.1 | cuda/triton | yes (tests) |
+| Mean(ReLU) | 8 | 1 | minimal_stats | 386.1 | 4472.7 | 4858.8 | 4898.4 | 8.79 GiB | 32.0 MiB | 1672 | 33.9 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 723.9 | 5344.8 | 6068.7 | 6114.3 | 8.88 GiB | 32.0 MiB | 1340 | 18.1 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 | 8 | 1 | minimal_stats | 806.5 | 5561.2 | 6367.7 | 6402.9 | 8.91 GiB | 64.0 MiB | 1279 | 16.3 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 (recompute) | 8 | 1 | recompute_stats | 806.2 | 6382.6 | 7188.8 | 7225.0 | 8.94 GiB | 0.0 MiB | 1134 | 16.3 | cuda/cuda | yes (tests) |
+| Power mean p=2 | 8 | 1 | minimal_stats | 582.4 | 5190.2 | 5772.6 | 5810.5 | 8.92 GiB | 32.0 MiB | 1410 | 22.5 | cuda/cuda | yes (tests) |
+| Max -> Mean | 8 | 2 | save_winners | 552.4 | 62.7 | 615.0 | 625.6 | 9.62 GiB | 384.0 MiB | 13094 | 23.7 | cuda/triton | yes (tests) |
+| Top-8 -> LogMeanExp | 8 | 2 | save_winners | 2151.6 | 487.4 | 2639.0 | 2667.9 | 12.48 GiB | 1728.0 MiB | 3071 | 6.1 | cuda/triton | yes (tests) |
+| Mean(ReLU) -> LogMeanExp | 8 | 2 | minimal_stats | 464.2 | 4481.1 | 4945.3 | 4988.6 | 9.68 GiB | 192.0 MiB | 1642 | 28.2 | cuda/cuda | yes (tests) |
+| Max+affine -> Max | 8 | 2 | save_winners | 552.2 | 19.9 | 572.1 | 585.8 | 9.90 GiB | 384.0 MiB | 13984 | 23.7 | cuda/triton | yes (tests) |
 
 
 ### Final comparison, H = 100M, B = 8192, C = 64
 
-H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 19:02:17)
+H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 23:58:30)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Max | 64 | 1 | save_winners | 389.2 | 12.8 | 402.0 | 432.9 | 8.65 GiB | 64.0 MiB | 18922 | 33.7 | cuda/triton | yes (tests) |
-| Max (recompute winners) | 64 | 1 | minimal_stats | 275.9 | 416.6 | 692.5 | 720.4 | 8.74 GiB | 32.0 MiB | 11372 | 47.5 | cuda/triton | yes (tests) |
-| Top-8 Mean | 64 | 1 | save_winners | 1205.9 | 92.1 | 1298.0 | 1318.0 | 9.61 GiB | 544.0 MiB | 6215 | 10.9 | cuda/triton | yes (tests) |
-| Top-8 Mean (recompute) | 64 | 1 | recompute_stats | 1207.6 | 1301.5 | 2509.1 | 2521.4 | 9.64 GiB | 0.0 MiB | 3249 | 10.9 | cuda/triton | yes (tests) |
-| Mean(ReLU) | 64 | 1 | minimal_stats | 310.3 | 2217.4 | 2527.6 | 2555.6 | 8.64 GiB | 32.0 MiB | 3205 | 42.2 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 617.4 | 2488.7 | 3106.1 | 3207.5 | 8.73 GiB | 32.0 MiB | 2554 | 21.2 | cuda/cuda | yes (tests) | (re-run)
-| Softmax-weighted b=1 | 64 | 1 | minimal_stats | 716.4 | 2818.3 | 3534.7 | 3573.1 | 8.76 GiB | 64.0 MiB | 2293 | 18.3 | cuda/cuda | yes (tests) | (re-run)
-| Softmax-weighted b=1 (recompute) | 64 | 1 | recompute_stats | 726.4 | 3557.9 | 4284.3 | 4321.8 | 8.79 GiB | 0.0 MiB | 1895 | 18.0 | cuda/cuda | yes (tests) | (re-run)
-| Power mean p=2 | 64 | 1 | minimal_stats | 520.3 | 2523.0 | 3043.3 | 3080.6 | 8.77 GiB | 32.0 MiB | 2659 | 25.2 | cuda/cuda | yes (tests) | (re-run)
-| Max -> Mean | 64 | 2 | save_winners | 499.6 | 73.2 | 572.8 | 581.7 | 9.47 GiB | 384.0 MiB | 14082 | 26.2 | cuda/triton | yes (tests) |
-| Top-8 -> LogMeanExp | 64 | 2 | save_winners | 3814.8 | 534.5 | 4349.4 | 4280.0 | 12.32 GiB | 1728.0 MiB | 1914 | 3.4 | cuda/triton | yes (tests) | (re-run)
-| Mean(ReLU) -> LogMeanExp | 64 | 2 | minimal_stats | 374.0 | 2202.1 | 2576.2 | 2643.5 | 9.53 GiB | 192.0 MiB | 3099 | 35.0 | cuda/cuda | yes (tests) | (re-run)
-| Max+affine -> Max | 64 | 2 | save_winners | 489.3 | 23.6 | 512.9 | 541.7 | 9.75 GiB | 384.0 MiB | 15122 | 26.8 | cuda/triton | yes (tests) |
+| Max | 64 | 1 | save_winners | 378.0 | 10.7 | 388.7 | 409.9 | 8.65 GiB | 64.0 MiB | 19986 | 34.7 | cuda/triton | yes (tests) |
+| Max (recompute winners) | 64 | 1 | minimal_stats | 257.4 | 389.9 | 647.3 | 667.4 | 8.74 GiB | 32.0 MiB | 12274 | 50.9 | cuda/triton | yes (tests) |
+| Top-8 Mean | 64 | 1 | save_winners | 1075.9 | 76.7 | 1152.7 | 1177.4 | 9.11 GiB | 288.0 MiB | 6958 | 12.2 | cuda/triton | yes (tests) |
+| Top-8 Mean (recompute) | 64 | 1 | recompute_stats | 1073.9 | 1151.5 | 2225.4 | 2254.9 | 9.14 GiB | 0.0 MiB | 3633 | 12.2 | cuda/triton | yes (tests) |
+| Mean(ReLU) | 64 | 1 | minimal_stats | 291.2 | 2035.1 | 2326.2 | 2360.8 | 8.64 GiB | 32.0 MiB | 3470 | 45.0 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 594.0 | 2307.0 | 2901.0 | 2910.3 | 8.73 GiB | 32.0 MiB | 2815 | 22.1 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 | 64 | 1 | minimal_stats | 656.5 | 2580.0 | 3236.5 | 3278.6 | 8.76 GiB | 64.0 MiB | 2499 | 20.0 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 (recompute) | 64 | 1 | recompute_stats | 652.5 | 3232.7 | 3885.3 | 3916.3 | 8.79 GiB | 0.0 MiB | 2092 | 20.1 | cuda/cuda | yes (tests) |
+| Power mean p=2 | 64 | 1 | minimal_stats | 467.4 | 2304.4 | 2771.7 | 2799.7 | 8.77 GiB | 32.0 MiB | 2926 | 28.0 | cuda/cuda | yes (tests) |
+| Max -> Mean | 64 | 2 | save_winners | 458.3 | 64.1 | 522.5 | 538.9 | 9.47 GiB | 384.0 MiB | 15202 | 28.6 | cuda/triton | yes (tests) |
+| Top-8 -> LogMeanExp | 64 | 2 | save_winners | 3362.2 | 461.1 | 3823.3 | 3850.8 | 12.32 GiB | 1728.0 MiB | 2127 | 3.9 | cuda/triton | yes (tests) |
+| Mean(ReLU) -> LogMeanExp | 64 | 2 | minimal_stats | 359.5 | 2057.3 | 2416.8 | 2450.3 | 9.53 GiB | 192.0 MiB | 3343 | 36.5 | cuda/cuda | yes (tests) |
+| Max+affine -> Max | 64 | 2 | save_winners | 458.6 | 19.9 | 478.5 | 498.7 | 9.75 GiB | 384.0 MiB | 16427 | 28.6 | cuda/triton | yes (tests) |
 
 
 ### Single-BF16 dZ gradients, C = 8
 
-H = 100,000,000, B = 8192, grad precision = bf16, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 19:06:16)
+H = 100,000,000, B = 8192, grad precision = bf16, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-17 00:02:04)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Mean(ReLU) | 8 | 1 | minimal_stats | 400.1 | 4798.9 | 5199.0 | 5255.8 | 8.79 GiB | 32.0 MiB | 1559 | 32.8 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 779.5 | 5715.6 | 6495.1 | 6504.4 | 8.88 GiB | 32.0 MiB | 1259 | 16.8 | cuda/cuda | yes (tests) |
-| Softmax-weighted b=1 | 8 | 1 | minimal_stats | 878.7 | 5944.0 | 6822.7 | 6849.5 | 8.91 GiB | 64.0 MiB | 1196 | 14.9 | cuda/cuda | yes (tests) |
-| Power mean p=2 | 8 | 1 | minimal_stats | 634.6 | 5696.9 | 6331.5 | 6336.3 | 8.92 GiB | 32.0 MiB | 1293 | 20.7 | cuda/cuda | yes (tests) |
+| Mean(ReLU) | 8 | 1 | minimal_stats | 380.3 | 4257.9 | 4638.2 | 4681.8 | 8.79 GiB | 32.0 MiB | 1750 | 34.5 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 719.4 | 5070.3 | 5789.8 | 5823.9 | 8.88 GiB | 32.0 MiB | 1407 | 18.2 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 | 8 | 1 | minimal_stats | 806.3 | 5311.2 | 6117.4 | 6162.8 | 8.91 GiB | 64.0 MiB | 1329 | 16.3 | cuda/cuda | yes (tests) |
+| Power mean p=2 | 8 | 1 | minimal_stats | 579.6 | 5053.8 | 5633.4 | 5670.0 | 8.92 GiB | 32.0 MiB | 1445 | 22.6 | cuda/cuda | yes (tests) |
 
 
 ### Single-BF16 dZ gradients, C = 64
 
-H = 100,000,000, B = 8192, grad precision = bf16, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-16 19:08:04)
+H = 100,000,000, B = 8192, grad precision = bf16, optimizer step included in 'step' = True  (NVIDIA GeForce RTX 3090, 2026-10-17 00:03:41)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Mean(ReLU) | 64 | 1 | minimal_stats | 296.0 | 1702.0 | 1997.9 | 2063.2 | 8.64 GiB | 32.0 MiB | 3970 | 44.3 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 653.4 | 2051.6 | 2705.0 | 2741.3 | 8.73 GiB | 32.0 MiB | 2988 | 20.1 | cuda/cuda | yes (tests) |
-| Softmax-weighted b=1 | 64 | 1 | minimal_stats | 726.7 | 2449.9 | 3176.6 | 3204.0 | 8.76 GiB | 64.0 MiB | 2557 | 18.0 | cuda/cuda | yes (tests) |
-| Power mean p=2 | 64 | 1 | minimal_stats | 519.1 | 2037.5 | 2556.5 | 2583.9 | 8.77 GiB | 32.0 MiB | 3170 | 25.3 | cuda/cuda | yes (tests) |
+| Mean(ReLU) | 64 | 1 | minimal_stats | 288.8 | 1592.8 | 1881.6 | 1904.9 | 8.64 GiB | 32.0 MiB | 4300 | 45.4 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 592.3 | 1868.5 | 2460.8 | 2501.6 | 8.73 GiB | 32.0 MiB | 3275 | 22.1 | cuda/cuda | yes (tests) |
+| Softmax-weighted b=1 | 64 | 1 | minimal_stats | 654.1 | 2193.8 | 2847.9 | 2861.4 | 8.76 GiB | 64.0 MiB | 2863 | 20.0 | cuda/cuda | yes (tests) |
+| Power mean p=2 | 64 | 1 | minimal_stats | 463.8 | 1816.5 | 2280.3 | 2312.8 | 8.77 GiB | 32.0 MiB | 3542 | 28.3 | cuda/cuda | yes (tests) |
 
 
 ### LogMeanExp temperatures (no optimizer)
 
-H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-16 19:16:04)
+H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-17 00:10:49)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| LogMeanExp t=0.1 | 8 | 1 | minimal_stats | 762.4 | 5851.0 | 6613.3 | 6634.6 | 5.53 GiB | 32.0 MiB | 1235 | 17.2 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.25 | 8 | 1 | minimal_stats | 784.4 | 5967.5 | 6751.8 | 6729.7 | 5.53 GiB | 32.0 MiB | 1217 | 16.7 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 783.6 | 5958.3 | 6741.9 | 6725.4 | 5.53 GiB | 32.0 MiB | 1218 | 16.7 | cuda/cuda | yes (tests) |
-| LogMeanExp t=1.0 | 8 | 1 | minimal_stats | 784.2 | 5968.3 | 6752.5 | 6727.3 | 5.53 GiB | 32.0 MiB | 1218 | 16.7 | cuda/cuda | yes (tests) |
-| LogMeanExp t=2.0 | 8 | 1 | minimal_stats | 781.3 | 5957.9 | 6739.1 | 6725.2 | 5.53 GiB | 32.0 MiB | 1218 | 16.8 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.1 | 64 | 1 | minimal_stats | 652.5 | 2538.9 | 3191.4 | 3181.3 | 5.37 GiB | 32.0 MiB | 2575 | 20.1 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.25 | 64 | 1 | minimal_stats | 660.3 | 2569.6 | 3229.9 | 3225.1 | 5.37 GiB | 32.0 MiB | 2540 | 19.9 | cuda/cuda | yes (tests) |
-| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 663.2 | 2576.2 | 3239.4 | 3235.4 | 5.37 GiB | 32.0 MiB | 2532 | 19.8 | cuda/cuda | yes (tests) |
-| LogMeanExp t=1.0 | 64 | 1 | minimal_stats | 664.9 | 2580.1 | 3245.0 | 3230.5 | 5.37 GiB | 32.0 MiB | 2536 | 19.7 | cuda/cuda | yes (tests) |
-| LogMeanExp t=2.0 | 64 | 1 | minimal_stats | 663.0 | 2588.2 | 3251.2 | 3240.6 | 5.37 GiB | 32.0 MiB | 2528 | 19.8 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.1 | 8 | 1 | minimal_stats | 713.5 | 5215.7 | 5929.2 | 5929.8 | 5.53 GiB | 32.0 MiB | 1381 | 18.4 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.25 | 8 | 1 | minimal_stats | 719.2 | 5304.7 | 6023.9 | 6022.0 | 5.53 GiB | 32.0 MiB | 1360 | 18.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 8 | 1 | minimal_stats | 718.6 | 5294.6 | 6013.1 | 6023.7 | 5.53 GiB | 32.0 MiB | 1360 | 18.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=1.0 | 8 | 1 | minimal_stats | 718.8 | 5301.4 | 6020.3 | 6009.1 | 5.53 GiB | 32.0 MiB | 1363 | 18.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=2.0 | 8 | 1 | minimal_stats | 717.6 | 5304.0 | 6021.6 | 6003.0 | 5.53 GiB | 32.0 MiB | 1365 | 18.3 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.1 | 64 | 1 | minimal_stats | 591.8 | 2280.3 | 2872.0 | 2864.3 | 5.37 GiB | 32.0 MiB | 2860 | 22.1 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.25 | 64 | 1 | minimal_stats | 590.2 | 2278.5 | 2868.7 | 2878.6 | 5.37 GiB | 32.0 MiB | 2846 | 22.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=0.5 | 64 | 1 | minimal_stats | 590.7 | 2290.8 | 2881.5 | 2882.8 | 5.37 GiB | 32.0 MiB | 2842 | 22.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=1.0 | 64 | 1 | minimal_stats | 590.4 | 2291.6 | 2882.0 | 2878.5 | 5.37 GiB | 32.0 MiB | 2846 | 22.2 | cuda/cuda | yes (tests) |
+| LogMeanExp t=2.0 | 64 | 1 | minimal_stats | 590.1 | 2288.3 | 2878.5 | 2879.6 | 5.37 GiB | 32.0 MiB | 2845 | 22.2 | cuda/cuda | yes (tests) |
 
 
 ### Top-K sizes (no optimizer)
 
-H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-16 19:21:32)
+H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-17 00:15:40)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Top-2 Mean | 8 | 1 | save_winners | 974.4 | 24.7 | 999.0 | 1004.9 | 5.53 GiB | 96.0 MiB | 8152 | 13.5 | cuda/triton | yes (tests) |
-| Top-4 Mean | 8 | 1 | save_winners | 1075.0 | 47.7 | 1122.7 | 1117.3 | 5.65 GiB | 160.0 MiB | 7332 | 12.2 | cuda/triton | yes (tests) |
-| Top-8 Mean | 8 | 1 | save_winners | 1215.9 | 94.9 | 1310.8 | 1302.1 | 5.90 GiB | 288.0 MiB | 6291 | 10.8 | cuda/triton | yes (tests) |
-| Top-16 Mean | 8 | 1 | save_winners | 2042.7 | 188.1 | 2230.8 | 2210.7 | 6.40 GiB | 544.0 MiB | 3706 | 6.4 | cuda/triton | yes (tests) |
-| Top-32 Mean | 8 | 1 | save_winners | 5759.4 | 373.9 | 6133.4 | 6146.1 | 7.40 GiB | 1056.0 MiB | 1333 | 2.3 | triton/triton | yes (tests) |
-| Top-2 Mean | 64 | 1 | save_winners | 821.6 | 24.1 | 845.7 | 842.2 | 5.37 GiB | 96.0 MiB | 9727 | 16.0 | cuda/triton | yes (tests) |
-| Top-4 Mean | 64 | 1 | save_winners | 891.6 | 46.3 | 937.9 | 930.2 | 5.50 GiB | 160.0 MiB | 8807 | 14.7 | cuda/triton | yes (tests) |
-| Top-8 Mean | 64 | 1 | save_winners | 1225.6 | 91.1 | 1316.7 | 1308.3 | 5.75 GiB | 288.0 MiB | 6261 | 10.7 | cuda/triton | yes (tests) |
-| Top-16 Mean | 64 | 1 | save_winners | 2705.9 | 181.0 | 2886.9 | 2829.2 | 6.25 GiB | 544.0 MiB | 2895 | 4.8 | cuda/triton | yes (tests) |
-| Top-32 Mean | 64 | 1 | save_winners | 7093.9 | 356.8 | 7450.7 | 7444.8 | 7.25 GiB | 1056.0 MiB | 1100 | 1.8 | triton/triton | yes (tests) |
+| Top-2 Mean | 8 | 1 | save_winners | 898.0 | 20.5 | 918.5 | 915.7 | 5.53 GiB | 96.0 MiB | 8946 | 14.6 | cuda/triton | yes (tests) |
+| Top-4 Mean | 8 | 1 | save_winners | 969.7 | 39.8 | 1009.5 | 1005.6 | 5.65 GiB | 160.0 MiB | 8147 | 13.5 | cuda/triton | yes (tests) |
+| Top-8 Mean | 8 | 1 | save_winners | 1074.2 | 79.2 | 1153.4 | 1151.3 | 5.90 GiB | 288.0 MiB | 7116 | 12.2 | cuda/triton | yes (tests) |
+| Top-16 Mean | 8 | 1 | save_winners | 1808.2 | 158.9 | 1967.2 | 1962.3 | 6.40 GiB | 544.0 MiB | 4175 | 7.2 | cuda/triton | yes (tests) |
+| Top-32 Mean | 8 | 1 | save_winners | 5198.9 | 318.2 | 5517.0 | 5519.2 | 7.40 GiB | 1056.0 MiB | 1484 | 2.5 | triton/triton | yes (tests) |
+| Top-2 Mean | 64 | 1 | save_winners | 727.2 | 20.1 | 747.3 | 743.0 | 5.37 GiB | 96.0 MiB | 11025 | 18.0 | cuda/triton | yes (tests) |
+| Top-4 Mean | 64 | 1 | save_winners | 786.5 | 38.8 | 825.3 | 819.0 | 5.50 GiB | 160.0 MiB | 10003 | 16.7 | cuda/triton | yes (tests) |
+| Top-8 Mean | 64 | 1 | save_winners | 1071.4 | 76.7 | 1148.1 | 1146.0 | 5.75 GiB | 288.0 MiB | 7148 | 12.2 | cuda/triton | yes (tests) |
+| Top-16 Mean | 64 | 1 | save_winners | 2343.4 | 153.2 | 2496.6 | 2495.3 | 6.25 GiB | 544.0 MiB | 3283 | 5.6 | cuda/triton | yes (tests) |
+| Top-32 Mean | 64 | 1 | save_winners | 6390.8 | 304.1 | 6694.9 | 6692.9 | 7.25 GiB | 1056.0 MiB | 1224 | 2.1 | triton/triton | yes (tests) |
 
 
 ### Power-mean exponents (no optimizer)
 
-H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-16 19:25:44)
+H = 100,000,000, B = 8192, grad precision = split, optimizer step included in 'step' = False  (NVIDIA GeForce RTX 3090, 2026-10-17 00:19:26)
 
 | Pooling | C | Levels | Policy | Forward ms | Backward ms | Fwd+Bwd ms | Step ms | Peak VRAM | Ckpt | tokens/s | fwd TFLOPs | backends | Correct? |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Power mean p=1 | 8 | 1 | minimal_stats | 542.3 | 5491.8 | 6034.1 | 6123.8 | 5.57 GiB | 32.0 MiB | 1338 | 24.2 | cuda/cuda | yes (tests) |
-| Power mean p=2 | 8 | 1 | minimal_stats | 628.9 | 5799.7 | 6428.6 | 6431.3 | 5.57 GiB | 32.0 MiB | 1274 | 20.8 | cuda/cuda | yes (tests) |
-| Power mean p=4 | 8 | 1 | minimal_stats | 702.5 | 5963.1 | 6665.6 | 6658.9 | 5.57 GiB | 32.0 MiB | 1230 | 18.7 | cuda/cuda | yes (tests) |
-| Power mean p=8 | 8 | 1 | minimal_stats | 799.5 | 6456.9 | 7256.4 | 7209.8 | 5.57 GiB | 32.0 MiB | 1136 | 16.4 | cuda/cuda | yes (tests) |
+| Power mean p=1 | 8 | 1 | minimal_stats | 514.7 | 4969.0 | 5483.7 | 5484.1 | 5.57 GiB | 32.0 MiB | 1494 | 25.5 | cuda/cuda | yes (tests) |
+| Power mean p=2 | 8 | 1 | minimal_stats | 583.0 | 5167.4 | 5750.5 | 5751.7 | 5.57 GiB | 32.0 MiB | 1424 | 22.5 | cuda/cuda | yes (tests) |
+| Power mean p=4 | 8 | 1 | minimal_stats | 638.8 | 5332.0 | 5970.8 | 5970.0 | 5.57 GiB | 32.0 MiB | 1372 | 20.5 | cuda/cuda | yes (tests) |
+| Power mean p=8 | 8 | 1 | minimal_stats | 723.1 | 5735.5 | 6458.6 | 6460.9 | 5.57 GiB | 32.0 MiB | 1268 | 18.1 | cuda/cuda | yes (tests) |
 
 
 ### Scaling with hidden width and batch (C = 16, split-precision gradients)
 
 | H | B | Pooling | Forward ms | Backward ms | Fwd+Bwd ms | Peak VRAM | fwd TFLOPs |
 |---:|---:|---|---:|---:|---:|---:|---:|
-| 1,000,000 | 256 | Max | 0.7 | 0.6 | 1.3 | 0.06 GiB | 6.2 |
-| 1,000,000 | 256 | Top-8 Mean | 6.9 | 2.3 | 9.2 | 0.08 GiB | 0.6 |
-| 1,000,000 | 256 | LogMeanExp t=0.5 | 0.7 | 2.6 | 3.4 | 0.06 GiB | 5.5 |
-| 1,000,000 | 1024 | Max | 2.3 | 1.4 | 3.8 | 0.08 GiB | 7.0 |
-| 1,000,000 | 1024 | Top-8 Mean | 26.0 | 8.1 | 34.1 | 0.14 GiB | 0.6 |
-| 1,000,000 | 1024 | LogMeanExp t=0.5 | 2.4 | 6.3 | 8.7 | 0.09 GiB | 6.9 |
-| 1,000,000 | 4096 | Max | 14.7 | 4.9 | 19.6 | 0.17 GiB | 4.4 |
-| 1,000,000 | 4096 | Top-8 Mean | 107.4 | 30.7 | 138.2 | 0.40 GiB | 0.6 |
-| 1,000,000 | 4096 | LogMeanExp t=0.5 | 15.6 | 21.5 | 37.1 | 0.21 GiB | 4.2 |
-| 1,000,000 | 8192 | Max | 29.1 | 9.6 | 38.7 | 0.29 GiB | 4.5 |
-| 1,000,000 | 8192 | Top-8 Mean | 206.8 | 62.0 | 268.7 | 0.74 GiB | 0.6 |
-| 1,000,000 | 8192 | LogMeanExp t=0.5 | 30.2 | 41.7 | 71.9 | 0.37 GiB | 4.3 |
-| 10,000,000 | 256 | Max | 1.9 | 0.7 | 2.6 | 0.52 GiB | 21.8 |
-| 10,000,000 | 256 | Top-8 Mean | 10.3 | 2.9 | 13.2 | 0.54 GiB | 4.0 |
-| 10,000,000 | 256 | LogMeanExp t=0.5 | 2.3 | 12.7 | 15.0 | 0.53 GiB | 18.0 |
-| 10,000,000 | 1024 | Max | 6.7 | 1.7 | 8.4 | 0.54 GiB | 24.3 |
-| 10,000,000 | 1024 | Top-8 Mean | 38.6 | 10.0 | 48.6 | 0.60 GiB | 4.2 |
-| 10,000,000 | 1024 | LogMeanExp t=0.5 | 8.8 | 45.6 | 54.4 | 0.55 GiB | 18.5 |
-| 10,000,000 | 4096 | Max | 37.1 | 5.9 | 43.0 | 0.63 GiB | 17.7 |
-| 10,000,000 | 4096 | Top-8 Mean | 151.2 | 39.1 | 190.2 | 0.86 GiB | 4.3 |
-| 10,000,000 | 4096 | LogMeanExp t=0.5 | 39.2 | 188.5 | 227.7 | 0.67 GiB | 16.7 |
-| 10,000,000 | 8192 | Max | 74.1 | 11.5 | 85.6 | 0.75 GiB | 17.7 |
-| 10,000,000 | 8192 | Top-8 Mean | 303.9 | 77.8 | 381.7 | 1.20 GiB | 4.3 |
-| 10,000,000 | 8192 | LogMeanExp t=0.5 | 78.6 | 385.1 | 463.7 | 0.83 GiB | 16.7 |
-| 100,000,000 | 256 | Max | 13.0 | 0.7 | 13.7 | 5.13 GiB | 31.5 |
-| 100,000,000 | 256 | Top-8 Mean | 33.1 | 3.2 | 36.3 | 5.14 GiB | 12.4 |
-| 100,000,000 | 256 | LogMeanExp t=0.5 | 18.9 | 118.0 | 136.8 | 5.13 GiB | 21.7 |
-| 100,000,000 | 1024 | Max | 56.1 | 2.0 | 58.1 | 5.15 GiB | 29.2 |
-| 100,000,000 | 1024 | Top-8 Mean | 130.6 | 11.2 | 141.9 | 5.21 GiB | 12.5 |
-| 100,000,000 | 1024 | LogMeanExp t=0.5 | 79.1 | 434.8 | 513.9 | 5.16 GiB | 20.7 |
-| 100,000,000 | 4096 | Max | 229.0 | 6.2 | 235.2 | 5.24 GiB | 28.6 |
-| 100,000,000 | 4096 | Top-8 Mean | 531.5 | 42.9 | 574.3 | 5.47 GiB | 12.3 |
-| 100,000,000 | 4096 | LogMeanExp t=0.5 | 324.5 | 1809.1 | 2133.6 | 5.28 GiB | 20.2 |
-| 100,000,000 | 8192 | Max | 465.1 | 12.0 | 477.1 | 5.36 GiB | 28.2 |
-| 100,000,000 | 8192 | Top-8 Mean | 1121.7 | 85.6 | 1207.2 | 5.81 GiB | 11.7 |
-| 100,000,000 | 8192 | LogMeanExp t=0.5 | 668.4 | 3784.0 | 4452.4 | 5.44 GiB | 19.6 |
+| 1,000,000 | 256 | Max | 0.6 | 0.6 | 1.2 | 0.06 GiB | 6.7 |
+| 1,000,000 | 256 | Top-8 Mean | 6.6 | 2.0 | 8.6 | 0.08 GiB | 0.6 |
+| 1,000,000 | 256 | LogMeanExp t=0.5 | 0.7 | 2.5 | 3.2 | 0.06 GiB | 5.6 |
+| 1,000,000 | 1024 | Max | 2.0 | 1.2 | 3.3 | 0.08 GiB | 8.1 |
+| 1,000,000 | 1024 | Top-8 Mean | 25.9 | 6.7 | 32.6 | 0.14 GiB | 0.6 |
+| 1,000,000 | 1024 | LogMeanExp t=0.5 | 2.3 | 6.1 | 8.4 | 0.09 GiB | 7.1 |
+| 1,000,000 | 4096 | Max | 12.7 | 4.0 | 16.8 | 0.17 GiB | 5.1 |
+| 1,000,000 | 4096 | Top-8 Mean | 96.7 | 25.6 | 122.3 | 0.40 GiB | 0.7 |
+| 1,000,000 | 4096 | LogMeanExp t=0.5 | 13.0 | 21.1 | 34.2 | 0.21 GiB | 5.0 |
+| 1,000,000 | 8192 | Max | 25.2 | 7.9 | 33.1 | 0.29 GiB | 5.2 |
+| 1,000,000 | 8192 | Top-8 Mean | 191.7 | 51.1 | 242.8 | 0.74 GiB | 0.7 |
+| 1,000,000 | 8192 | LogMeanExp t=0.5 | 25.9 | 41.2 | 67.2 | 0.37 GiB | 5.1 |
+| 10,000,000 | 256 | Max | 1.7 | 0.7 | 2.4 | 0.52 GiB | 24.1 |
+| 10,000,000 | 256 | Top-8 Mean | 10.1 | 2.4 | 12.6 | 0.54 GiB | 4.0 |
+| 10,000,000 | 256 | LogMeanExp t=0.5 | 2.3 | 12.6 | 14.8 | 0.53 GiB | 18.1 |
+| 10,000,000 | 1024 | Max | 6.3 | 1.5 | 7.8 | 0.54 GiB | 26.0 |
+| 10,000,000 | 1024 | Top-8 Mean | 36.7 | 8.3 | 45.0 | 0.60 GiB | 4.5 |
+| 10,000,000 | 1024 | LogMeanExp t=0.5 | 8.6 | 45.0 | 53.6 | 0.55 GiB | 19.0 |
+| 10,000,000 | 4096 | Max | 29.8 | 4.8 | 34.6 | 0.63 GiB | 22.0 |
+| 10,000,000 | 4096 | Top-8 Mean | 147.4 | 32.6 | 180.1 | 0.86 GiB | 4.4 |
+| 10,000,000 | 4096 | LogMeanExp t=0.5 | 38.1 | 180.7 | 218.9 | 0.67 GiB | 17.2 |
+| 10,000,000 | 8192 | Max | 59.6 | 9.5 | 69.1 | 0.75 GiB | 22.0 |
+| 10,000,000 | 8192 | Top-8 Mean | 293.6 | 65.0 | 358.7 | 1.20 GiB | 4.5 |
+| 10,000,000 | 8192 | LogMeanExp t=0.5 | 78.6 | 373.1 | 451.7 | 0.83 GiB | 16.7 |
+| 100,000,000 | 256 | Max | 12.8 | 0.6 | 13.4 | 5.13 GiB | 32.0 |
+| 100,000,000 | 256 | Top-8 Mean | 32.5 | 2.7 | 35.2 | 5.14 GiB | 12.6 |
+| 100,000,000 | 256 | LogMeanExp t=0.5 | 19.0 | 116.8 | 135.8 | 5.13 GiB | 21.6 |
+| 100,000,000 | 1024 | Max | 55.6 | 1.5 | 57.1 | 5.15 GiB | 29.4 |
+| 100,000,000 | 1024 | Top-8 Mean | 128.6 | 9.3 | 137.9 | 5.21 GiB | 12.7 |
+| 100,000,000 | 1024 | LogMeanExp t=0.5 | 77.2 | 422.2 | 499.4 | 5.16 GiB | 21.2 |
+| 100,000,000 | 4096 | Max | 225.4 | 5.2 | 230.6 | 5.24 GiB | 29.1 |
+| 100,000,000 | 4096 | Top-8 Mean | 511.8 | 36.1 | 547.9 | 5.47 GiB | 12.8 |
+| 100,000,000 | 4096 | LogMeanExp t=0.5 | 311.9 | 1697.0 | 2008.9 | 5.28 GiB | 21.0 |
+| 100,000,000 | 8192 | Max | 449.7 | 9.9 | 459.6 | 5.36 GiB | 29.1 |
+| 100,000,000 | 8192 | Top-8 Mean | 1021.6 | 71.9 | 1093.6 | 5.81 GiB | 12.8 |
+| 100,000,000 | 8192 | LogMeanExp t=0.5 | 625.2 | 3448.7 | 4074.0 | 5.44 GiB | 21.0 |
 
 
 ### Configuration sweep, forward only (H = 10,000,000, B = 8192)
@@ -163,160 +163,160 @@ Traffic columns are analytic L2->SM bytes per forward (weights/bias, index recor
 
 | C | Pool | Backend | Batch tile | Splits | Input layout | Scheduling | Forward ms | TFLOPs | Workspace | Weight GB | Index GB | Gather GB |
 |---:|---|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|
-| 8 | max | cuda | 16 | 1 | feature_major | token_stationary | 73.2 | 17.9 | 0.0 MiB | 92.4 | 10.27 | 164 |
-| 8 | max | cuda | 16 | 8 | feature_major | token_stationary | 228.0 | 5.7 | 512.0 MiB | 92.4 | 10.27 | 164 |
-| 8 | max | cuda | 32 | 1 | feature_major | token_stationary | 69.4 | 18.9 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | cuda | 32 | 1 | token_major | token_stationary | 106.3 | 12.3 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | cuda | 32 | 8 | feature_major | token_stationary | 272.4 | 4.8 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | cuda | 32 | 8 | token_major | token_stationary | 573.8 | 2.3 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | triton | 32 | 1 | feature_major | token_stationary | 289.9 | 4.5 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | triton | 32 | 8 | feature_major | token_stationary | 295.7 | 4.4 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | triton | 32 | 8 | feature_major | weight_stationary | 348.8 | 3.8 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | max | triton | 64 | 1 | feature_major | token_stationary | 160.7 | 8.2 | 0.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | max | triton | 64 | 8 | feature_major | token_stationary | 177.2 | 7.4 | 512.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | max | triton | 64 | 8 | feature_major | weight_stationary | 188.3 | 7.0 | 512.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | max | triton | 128 | 1 | feature_major | token_stationary | 158.4 | 8.3 | 0.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | max | triton | 128 | 8 | feature_major | token_stationary | 173.3 | 7.6 | 512.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | max | triton | 128 | 8 | feature_major | weight_stationary | 159.0 | 8.2 | 512.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | max | triton | 256 | 1 | feature_major | token_stationary | 161.2 | 8.1 | 0.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | max | triton | 256 | 8 | feature_major | token_stationary | 173.3 | 7.6 | 512.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | max | triton | 256 | 8 | feature_major | weight_stationary | 138.1 | 9.5 | 512.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | max | triton | 64 | 1 | token_major | token_stationary | 6712.4 | 0.2 | 0.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | lme | cuda | 16 | 1 | feature_major | token_stationary | 100.1 | 13.1 | 0.0 MiB | 92.4 | 10.27 | 164 |
-| 8 | lme | cuda | 16 | 8 | feature_major | token_stationary | 270.6 | 4.8 | 512.0 MiB | 92.4 | 10.27 | 164 |
-| 8 | lme | cuda | 32 | 1 | feature_major | token_stationary | 89.3 | 14.7 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | cuda | 32 | 1 | token_major | token_stationary | 139.5 | 9.4 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | cuda | 32 | 8 | feature_major | token_stationary | 256.2 | 5.1 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | cuda | 32 | 8 | token_major | token_stationary | 641.0 | 2.0 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | triton | 32 | 1 | feature_major | token_stationary | 410.5 | 3.2 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | triton | 32 | 8 | feature_major | token_stationary | 419.7 | 3.1 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | triton | 32 | 8 | feature_major | weight_stationary | 449.4 | 2.9 | 512.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | lme | triton | 64 | 1 | feature_major | token_stationary | 172.8 | 7.6 | 0.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | lme | triton | 64 | 8 | feature_major | token_stationary | 199.7 | 6.6 | 512.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | lme | triton | 64 | 8 | feature_major | weight_stationary | 214.8 | 6.1 | 512.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | lme | triton | 128 | 1 | feature_major | token_stationary | 163.9 | 8.0 | 0.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | lme | triton | 128 | 8 | feature_major | token_stationary | 195.1 | 6.7 | 512.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | lme | triton | 128 | 8 | feature_major | weight_stationary | 193.5 | 6.8 | 512.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | lme | triton | 256 | 1 | feature_major | token_stationary | 162.7 | 8.1 | 0.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | lme | triton | 256 | 8 | feature_major | token_stationary | 194.0 | 6.8 | 512.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | lme | triton | 256 | 8 | feature_major | weight_stationary | 171.8 | 7.6 | 512.0 MiB | 5.8 | 0.64 | 164 |
-| 8 | lme | triton | 64 | 1 | token_major | token_stationary | 6311.4 | 0.2 | 0.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 324.2 | 4.0 | 0.0 MiB | 92.4 | 10.27 | 164 |
+| 8 | max | cuda | 16 | 1 | feature_major | token_stationary | 66.0 | 19.9 | 0.0 MiB | 92.4 | 10.27 | 164 |
+| 8 | max | cuda | 16 | 8 | feature_major | token_stationary | 193.7 | 6.8 | 512.0 MiB | 92.4 | 10.27 | 164 |
+| 8 | max | cuda | 32 | 1 | feature_major | token_stationary | 63.1 | 20.8 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | cuda | 32 | 1 | token_major | token_stationary | 93.3 | 14.0 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | cuda | 32 | 8 | feature_major | token_stationary | 219.1 | 6.0 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | cuda | 32 | 8 | token_major | token_stationary | 520.0 | 2.5 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | triton | 32 | 1 | feature_major | token_stationary | 281.3 | 4.7 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | triton | 32 | 8 | feature_major | token_stationary | 284.5 | 4.6 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | triton | 32 | 8 | feature_major | weight_stationary | 312.7 | 4.2 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | max | triton | 64 | 1 | feature_major | token_stationary | 139.7 | 9.4 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | max | triton | 64 | 8 | feature_major | token_stationary | 144.4 | 9.1 | 512.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | max | triton | 64 | 8 | feature_major | weight_stationary | 160.2 | 8.2 | 512.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | max | triton | 128 | 1 | feature_major | token_stationary | 121.8 | 10.8 | 0.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | max | triton | 128 | 8 | feature_major | token_stationary | 133.6 | 9.8 | 512.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | max | triton | 128 | 8 | feature_major | weight_stationary | 132.1 | 9.9 | 512.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | max | triton | 256 | 1 | feature_major | token_stationary | 120.5 | 10.9 | 0.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | max | triton | 256 | 8 | feature_major | token_stationary | 131.5 | 10.0 | 512.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | max | triton | 256 | 8 | feature_major | weight_stationary | 115.2 | 11.4 | 512.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | max | triton | 64 | 1 | token_major | token_stationary | 3951.3 | 0.3 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | lme | cuda | 16 | 1 | feature_major | token_stationary | 98.2 | 13.4 | 0.0 MiB | 92.4 | 10.27 | 164 |
+| 8 | lme | cuda | 16 | 8 | feature_major | token_stationary | 235.1 | 5.6 | 512.0 MiB | 92.4 | 10.27 | 164 |
+| 8 | lme | cuda | 32 | 1 | feature_major | token_stationary | 86.4 | 15.2 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | cuda | 32 | 1 | token_major | token_stationary | 130.4 | 10.1 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | cuda | 32 | 8 | feature_major | token_stationary | 206.8 | 6.3 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | cuda | 32 | 8 | token_major | token_stationary | 561.6 | 2.3 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | triton | 32 | 1 | feature_major | token_stationary | 384.1 | 3.4 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | triton | 32 | 8 | feature_major | token_stationary | 387.4 | 3.4 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | triton | 32 | 8 | feature_major | weight_stationary | 412.0 | 3.2 | 512.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | lme | triton | 64 | 1 | feature_major | token_stationary | 165.9 | 7.9 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | lme | triton | 64 | 8 | feature_major | token_stationary | 173.4 | 7.6 | 512.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | lme | triton | 64 | 8 | feature_major | weight_stationary | 182.2 | 7.2 | 512.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | lme | triton | 128 | 1 | feature_major | token_stationary | 140.9 | 9.3 | 0.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | lme | triton | 128 | 8 | feature_major | token_stationary | 154.5 | 8.5 | 512.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | lme | triton | 128 | 8 | feature_major | weight_stationary | 141.6 | 9.3 | 512.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | lme | triton | 256 | 1 | feature_major | token_stationary | 131.4 | 10.0 | 0.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | lme | triton | 256 | 8 | feature_major | token_stationary | 151.2 | 8.7 | 512.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | lme | triton | 256 | 8 | feature_major | weight_stationary | 138.3 | 9.5 | 512.0 MiB | 5.8 | 0.64 | 164 |
+| 8 | lme | triton | 64 | 1 | token_major | token_stationary | 3710.1 | 0.4 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 283.3 | 4.6 | 0.0 MiB | 92.4 | 10.27 | 164 |
 | 8 | top8 | cuda | 16 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 92.4 | 10.27 | 164 |
-| 8 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 341.5 | 3.8 | 0.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | top8 | cuda | 32 | 1 | token_major | token_stationary | 401.3 | 3.3 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 297.0 | 4.4 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | top8 | cuda | 32 | 1 | token_major | token_stationary | 343.5 | 3.8 | 0.0 MiB | 46.2 | 5.13 | 164 |
 | 8 | top8 | cuda | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 5.13 | 164 |
 | 8 | top8 | cuda | 32 | 8 | token_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | top8 | triton | 32 | 1 | feature_major | token_stationary | 832.4 | 1.6 | 0.0 MiB | 46.2 | 5.13 | 164 |
+| 8 | top8 | triton | 32 | 1 | feature_major | token_stationary | 753.7 | 1.7 | 0.0 MiB | 46.2 | 5.13 | 164 |
 | 8 | top8 | triton | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 5.13 | 164 |
 | 8 | top8 | triton | 32 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 5.13 | 164 |
-| 8 | top8 | triton | 64 | 1 | feature_major | token_stationary | 482.7 | 2.7 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 8 | top8 | triton | 64 | 1 | feature_major | token_stationary | 437.6 | 3.0 | 0.0 MiB | 23.1 | 2.57 | 164 |
 | 8 | top8 | triton | 64 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.1 | 2.57 | 164 |
 | 8 | top8 | triton | 64 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.1 | 2.57 | 164 |
-| 8 | top8 | triton | 128 | 1 | feature_major | token_stationary | 483.5 | 2.7 | 0.0 MiB | 11.6 | 1.28 | 164 |
+| 8 | top8 | triton | 128 | 1 | feature_major | token_stationary | 437.6 | 3.0 | 0.0 MiB | 11.6 | 1.28 | 164 |
 | 8 | top8 | triton | 128 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 1.28 | 164 |
 | 8 | top8 | triton | 128 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 1.28 | 164 |
-| 8 | top8 | triton | 64 | 1 | token_major | token_stationary | 5368.1 | 0.2 | 0.0 MiB | 23.1 | 2.57 | 164 |
-| 16 | max | cuda | 16 | 1 | feature_major | token_stationary | 68.2 | 19.2 | 0.0 MiB | 92.4 | 5.13 | 82 |
-| 16 | max | cuda | 16 | 8 | feature_major | token_stationary | 231.4 | 5.7 | 512.0 MiB | 92.4 | 5.13 | 82 |
-| 16 | max | cuda | 32 | 1 | feature_major | token_stationary | 65.9 | 19.9 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | cuda | 32 | 1 | token_major | token_stationary | 104.8 | 12.5 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | cuda | 32 | 8 | feature_major | token_stationary | 268.6 | 4.9 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | cuda | 32 | 8 | token_major | token_stationary | 568.0 | 2.3 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | triton | 32 | 1 | feature_major | token_stationary | 202.1 | 6.5 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | triton | 32 | 8 | feature_major | token_stationary | 209.0 | 6.3 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | triton | 32 | 8 | feature_major | weight_stationary | 265.0 | 4.9 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | max | triton | 64 | 1 | feature_major | token_stationary | 134.2 | 9.8 | 0.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | max | triton | 64 | 8 | feature_major | token_stationary | 139.0 | 9.4 | 512.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | max | triton | 64 | 8 | feature_major | weight_stationary | 150.9 | 8.7 | 512.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | max | triton | 128 | 1 | feature_major | token_stationary | 84.8 | 15.5 | 0.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | max | triton | 128 | 8 | feature_major | token_stationary | 93.2 | 14.1 | 512.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | max | triton | 128 | 8 | feature_major | weight_stationary | 101.5 | 12.9 | 512.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | max | triton | 256 | 1 | feature_major | token_stationary | 82.0 | 16.0 | 0.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | max | triton | 256 | 8 | feature_major | token_stationary | 91.2 | 14.4 | 512.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | max | triton | 256 | 8 | feature_major | weight_stationary | 88.7 | 14.8 | 512.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | lme | cuda | 16 | 1 | feature_major | token_stationary | 87.4 | 15.0 | 0.0 MiB | 92.4 | 5.13 | 82 |
-| 16 | lme | cuda | 16 | 8 | feature_major | token_stationary | 264.1 | 5.0 | 512.0 MiB | 92.4 | 5.13 | 82 |
-| 16 | lme | cuda | 32 | 1 | feature_major | token_stationary | 82.3 | 15.9 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | cuda | 32 | 1 | token_major | token_stationary | 135.2 | 9.7 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | cuda | 32 | 8 | feature_major | token_stationary | 265.4 | 4.9 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | cuda | 32 | 8 | token_major | token_stationary | 615.4 | 2.1 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | triton | 32 | 1 | feature_major | token_stationary | 263.4 | 5.0 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | triton | 32 | 8 | feature_major | token_stationary | 272.2 | 4.8 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | triton | 32 | 8 | feature_major | weight_stationary | 310.9 | 4.2 | 512.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | lme | triton | 64 | 1 | feature_major | token_stationary | 183.3 | 7.2 | 0.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | lme | triton | 64 | 8 | feature_major | token_stationary | 189.3 | 6.9 | 512.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | lme | triton | 64 | 8 | feature_major | weight_stationary | 200.3 | 6.5 | 512.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | lme | triton | 128 | 1 | feature_major | token_stationary | 107.4 | 12.2 | 0.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | lme | triton | 128 | 8 | feature_major | token_stationary | 116.3 | 11.3 | 512.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | lme | triton | 128 | 8 | feature_major | weight_stationary | 118.2 | 11.1 | 512.0 MiB | 11.6 | 0.64 | 82 |
-| 16 | lme | triton | 256 | 1 | feature_major | token_stationary | 93.7 | 14.0 | 0.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | lme | triton | 256 | 8 | feature_major | token_stationary | 111.7 | 11.7 | 512.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | lme | triton | 256 | 8 | feature_major | weight_stationary | 115.4 | 11.4 | 512.0 MiB | 5.8 | 0.32 | 82 |
-| 16 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 308.6 | 4.2 | 0.0 MiB | 92.4 | 5.13 | 82 |
+| 8 | top8 | triton | 64 | 1 | token_major | token_stationary | 3214.5 | 0.4 | 0.0 MiB | 23.1 | 2.57 | 164 |
+| 16 | max | cuda | 16 | 1 | feature_major | token_stationary | 62.6 | 20.9 | 0.0 MiB | 92.4 | 5.13 | 82 |
+| 16 | max | cuda | 16 | 8 | feature_major | token_stationary | 201.0 | 6.5 | 512.0 MiB | 92.4 | 5.13 | 82 |
+| 16 | max | cuda | 32 | 1 | feature_major | token_stationary | 58.3 | 22.5 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | cuda | 32 | 1 | token_major | token_stationary | 87.6 | 15.0 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | cuda | 32 | 8 | feature_major | token_stationary | 216.7 | 6.0 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | cuda | 32 | 8 | token_major | token_stationary | 514.6 | 2.5 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | triton | 32 | 1 | feature_major | token_stationary | 192.3 | 6.8 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | triton | 32 | 8 | feature_major | token_stationary | 198.4 | 6.6 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | triton | 32 | 8 | feature_major | weight_stationary | 240.2 | 5.5 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | max | triton | 64 | 1 | feature_major | token_stationary | 128.2 | 10.2 | 0.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | max | triton | 64 | 8 | feature_major | token_stationary | 132.7 | 9.9 | 512.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | max | triton | 64 | 8 | feature_major | weight_stationary | 139.5 | 9.4 | 512.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | max | triton | 128 | 1 | feature_major | token_stationary | 79.5 | 16.5 | 0.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | max | triton | 128 | 8 | feature_major | token_stationary | 82.6 | 15.9 | 512.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | max | triton | 128 | 8 | feature_major | weight_stationary | 84.0 | 15.6 | 512.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | max | triton | 256 | 1 | feature_major | token_stationary | 66.5 | 19.7 | 0.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | max | triton | 256 | 8 | feature_major | token_stationary | 72.2 | 18.2 | 512.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | max | triton | 256 | 8 | feature_major | weight_stationary | 68.1 | 19.3 | 512.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | lme | cuda | 16 | 1 | feature_major | token_stationary | 85.4 | 15.3 | 0.0 MiB | 92.4 | 5.13 | 82 |
+| 16 | lme | cuda | 16 | 8 | feature_major | token_stationary | 224.8 | 5.8 | 512.0 MiB | 92.4 | 5.13 | 82 |
+| 16 | lme | cuda | 32 | 1 | feature_major | token_stationary | 77.6 | 16.9 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | cuda | 32 | 1 | token_major | token_stationary | 120.9 | 10.8 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | cuda | 32 | 8 | feature_major | token_stationary | 205.5 | 6.4 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | cuda | 32 | 8 | token_major | token_stationary | 552.3 | 2.4 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | triton | 32 | 1 | feature_major | token_stationary | 246.3 | 5.3 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | triton | 32 | 8 | feature_major | token_stationary | 251.8 | 5.2 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | triton | 32 | 8 | feature_major | weight_stationary | 287.4 | 4.6 | 512.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | lme | triton | 64 | 1 | feature_major | token_stationary | 172.9 | 7.6 | 0.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | lme | triton | 64 | 8 | feature_major | token_stationary | 179.6 | 7.3 | 512.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | lme | triton | 64 | 8 | feature_major | weight_stationary | 189.5 | 6.9 | 512.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | lme | triton | 128 | 1 | feature_major | token_stationary | 104.3 | 12.6 | 0.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | lme | triton | 128 | 8 | feature_major | token_stationary | 111.9 | 11.7 | 512.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | lme | triton | 128 | 8 | feature_major | weight_stationary | 111.6 | 11.7 | 512.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | lme | triton | 256 | 1 | feature_major | token_stationary | 89.9 | 14.6 | 0.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | lme | triton | 256 | 8 | feature_major | token_stationary | 97.8 | 13.4 | 512.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | lme | triton | 256 | 8 | feature_major | weight_stationary | 108.2 | 12.1 | 512.0 MiB | 5.8 | 0.32 | 82 |
+| 16 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 274.5 | 4.8 | 0.0 MiB | 92.4 | 5.13 | 82 |
 | 16 | top8 | cuda | 16 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 92.4 | 5.13 | 82 |
-| 16 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 324.6 | 4.0 | 0.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | top8 | cuda | 32 | 1 | token_major | token_stationary | 390.6 | 3.4 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 291.5 | 4.5 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | top8 | cuda | 32 | 1 | token_major | token_stationary | 339.0 | 3.9 | 0.0 MiB | 46.2 | 2.57 | 82 |
 | 16 | top8 | cuda | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 2.57 | 82 |
 | 16 | top8 | cuda | 32 | 8 | token_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | top8 | triton | 32 | 1 | feature_major | token_stationary | 651.4 | 2.0 | 0.0 MiB | 46.2 | 2.57 | 82 |
+| 16 | top8 | triton | 32 | 1 | feature_major | token_stationary | 591.9 | 2.2 | 0.0 MiB | 46.2 | 2.57 | 82 |
 | 16 | top8 | triton | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 2.57 | 82 |
 | 16 | top8 | triton | 32 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.2 | 2.57 | 82 |
-| 16 | top8 | triton | 64 | 1 | feature_major | token_stationary | 657.9 | 2.0 | 0.0 MiB | 23.1 | 1.28 | 82 |
+| 16 | top8 | triton | 64 | 1 | feature_major | token_stationary | 587.3 | 2.2 | 0.0 MiB | 23.1 | 1.28 | 82 |
 | 16 | top8 | triton | 64 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.1 | 1.28 | 82 |
 | 16 | top8 | triton | 64 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.1 | 1.28 | 82 |
-| 16 | top8 | triton | 128 | 1 | feature_major | token_stationary | 467.5 | 2.8 | 0.0 MiB | 11.6 | 0.64 | 82 |
+| 16 | top8 | triton | 128 | 1 | feature_major | token_stationary | 415.2 | 3.2 | 0.0 MiB | 11.6 | 0.64 | 82 |
 | 16 | top8 | triton | 128 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 0.64 | 82 |
 | 16 | top8 | triton | 128 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 0.64 | 82 |
-| 32 | max | cuda | 16 | 1 | feature_major | token_stationary | 62.3 | 21.0 | 0.0 MiB | 93.0 | 2.58 | 41 |
-| 32 | max | cuda | 16 | 8 | feature_major | token_stationary | 234.1 | 5.6 | 512.0 MiB | 93.0 | 2.58 | 41 |
-| 32 | max | cuda | 32 | 1 | feature_major | token_stationary | 65.6 | 20.0 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | cuda | 32 | 1 | token_major | token_stationary | 103.4 | 12.7 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | cuda | 32 | 8 | feature_major | token_stationary | 271.1 | 4.8 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | cuda | 32 | 8 | token_major | token_stationary | 577.2 | 2.3 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | triton | 32 | 1 | feature_major | token_stationary | 158.1 | 8.3 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | triton | 32 | 8 | feature_major | token_stationary | 162.6 | 8.1 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | triton | 32 | 8 | feature_major | weight_stationary | 161.3 | 8.1 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | max | triton | 64 | 1 | feature_major | token_stationary | 104.8 | 12.5 | 0.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | max | triton | 64 | 8 | feature_major | token_stationary | 107.7 | 12.2 | 512.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | max | triton | 64 | 8 | feature_major | weight_stationary | 102.8 | 12.8 | 512.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | max | triton | 128 | 1 | feature_major | token_stationary | 79.7 | 16.4 | 0.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | max | triton | 128 | 8 | feature_major | token_stationary | 84.8 | 15.5 | 512.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | max | triton | 128 | 8 | feature_major | weight_stationary | 73.8 | 17.8 | 512.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | max | triton | 256 | 1 | feature_major | token_stationary | 54.2 | 24.2 | 0.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | max | triton | 256 | 8 | feature_major | token_stationary | 56.8 | 23.1 | 512.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | max | triton | 256 | 8 | feature_major | weight_stationary | 59.0 | 22.2 | 512.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | lme | cuda | 16 | 1 | feature_major | token_stationary | 83.7 | 15.7 | 0.0 MiB | 93.0 | 2.58 | 41 |
-| 32 | lme | cuda | 16 | 8 | feature_major | token_stationary | 259.5 | 5.1 | 512.0 MiB | 93.0 | 2.58 | 41 |
-| 32 | lme | cuda | 32 | 1 | feature_major | token_stationary | 104.1 | 12.6 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | cuda | 32 | 1 | token_major | token_stationary | 143.9 | 9.1 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | cuda | 32 | 8 | feature_major | token_stationary | 300.1 | 4.4 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | cuda | 32 | 8 | token_major | token_stationary | 613.1 | 2.1 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | triton | 32 | 1 | feature_major | token_stationary | 210.9 | 6.2 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | triton | 32 | 8 | feature_major | token_stationary | 218.3 | 6.0 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | triton | 32 | 8 | feature_major | weight_stationary | 232.8 | 5.6 | 512.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | lme | triton | 64 | 1 | feature_major | token_stationary | 138.4 | 9.5 | 0.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | lme | triton | 64 | 8 | feature_major | token_stationary | 146.1 | 9.0 | 512.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | lme | triton | 64 | 8 | feature_major | weight_stationary | 144.6 | 9.1 | 512.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | lme | triton | 128 | 1 | feature_major | token_stationary | 126.4 | 10.4 | 0.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | lme | triton | 128 | 8 | feature_major | token_stationary | 134.5 | 9.7 | 512.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | lme | triton | 128 | 8 | feature_major | weight_stationary | 137.7 | 9.5 | 512.0 MiB | 11.6 | 0.32 | 41 |
-| 32 | lme | triton | 256 | 1 | feature_major | token_stationary | 82.5 | 15.9 | 0.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | lme | triton | 256 | 8 | feature_major | token_stationary | 88.6 | 14.8 | 512.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | lme | triton | 256 | 8 | feature_major | weight_stationary | 86.5 | 15.2 | 512.0 MiB | 5.8 | 0.16 | 41 |
-| 32 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 304.6 | 4.3 | 0.0 MiB | 93.0 | 2.58 | 41 |
+| 32 | max | cuda | 16 | 1 | feature_major | token_stationary | 61.2 | 21.4 | 0.0 MiB | 93.0 | 2.58 | 41 |
+| 32 | max | cuda | 16 | 8 | feature_major | token_stationary | 204.1 | 6.4 | 512.0 MiB | 93.0 | 2.58 | 41 |
+| 32 | max | cuda | 32 | 1 | feature_major | token_stationary | 57.7 | 22.7 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | cuda | 32 | 1 | token_major | token_stationary | 86.7 | 15.1 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | cuda | 32 | 8 | feature_major | token_stationary | 224.3 | 5.8 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | cuda | 32 | 8 | token_major | token_stationary | 514.5 | 2.5 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | triton | 32 | 1 | feature_major | token_stationary | 151.6 | 8.6 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | triton | 32 | 8 | feature_major | token_stationary | 152.6 | 8.6 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | triton | 32 | 8 | feature_major | weight_stationary | 157.8 | 8.3 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | max | triton | 64 | 1 | feature_major | token_stationary | 103.3 | 12.7 | 0.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | max | triton | 64 | 8 | feature_major | token_stationary | 103.6 | 12.7 | 512.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | max | triton | 64 | 8 | feature_major | weight_stationary | 99.0 | 13.2 | 512.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | max | triton | 128 | 1 | feature_major | token_stationary | 78.0 | 16.8 | 0.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | max | triton | 128 | 8 | feature_major | token_stationary | 78.8 | 16.6 | 512.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | max | triton | 128 | 8 | feature_major | weight_stationary | 71.9 | 18.2 | 512.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | max | triton | 256 | 1 | feature_major | token_stationary | 52.0 | 25.2 | 0.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | max | triton | 256 | 8 | feature_major | token_stationary | 54.2 | 24.2 | 512.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | max | triton | 256 | 8 | feature_major | weight_stationary | 56.0 | 23.4 | 512.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | lme | cuda | 16 | 1 | feature_major | token_stationary | 81.6 | 16.1 | 0.0 MiB | 93.0 | 2.58 | 41 |
+| 32 | lme | cuda | 16 | 8 | feature_major | token_stationary | 224.5 | 5.8 | 512.0 MiB | 93.0 | 2.58 | 41 |
+| 32 | lme | cuda | 32 | 1 | feature_major | token_stationary | 80.5 | 16.3 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | cuda | 32 | 1 | token_major | token_stationary | 127.8 | 10.3 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | cuda | 32 | 8 | feature_major | token_stationary | 250.8 | 5.2 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | cuda | 32 | 8 | token_major | token_stationary | 557.3 | 2.4 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | triton | 32 | 1 | feature_major | token_stationary | 200.0 | 6.6 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | triton | 32 | 8 | feature_major | token_stationary | 206.3 | 6.4 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | triton | 32 | 8 | feature_major | weight_stationary | 220.5 | 5.9 | 512.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | lme | triton | 64 | 1 | feature_major | token_stationary | 133.4 | 9.8 | 0.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | lme | triton | 64 | 8 | feature_major | token_stationary | 139.0 | 9.4 | 512.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | lme | triton | 64 | 8 | feature_major | weight_stationary | 140.4 | 9.3 | 512.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | lme | triton | 128 | 1 | feature_major | token_stationary | 120.7 | 10.9 | 0.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | lme | triton | 128 | 8 | feature_major | token_stationary | 125.9 | 10.4 | 512.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | lme | triton | 128 | 8 | feature_major | weight_stationary | 131.1 | 10.0 | 512.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | lme | triton | 256 | 1 | feature_major | token_stationary | 80.3 | 16.3 | 0.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | lme | triton | 256 | 8 | feature_major | token_stationary | 86.0 | 15.2 | 512.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | lme | triton | 256 | 8 | feature_major | weight_stationary | 84.1 | 15.6 | 512.0 MiB | 5.8 | 0.16 | 41 |
+| 32 | top8 | cuda | 16 | 1 | feature_major | token_stationary | 273.3 | 4.8 | 0.0 MiB | 93.0 | 2.58 | 41 |
 | 32 | top8 | cuda | 16 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 93.0 | 2.58 | 41 |
-| 32 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 331.7 | 4.0 | 0.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | top8 | cuda | 32 | 1 | token_major | token_stationary | 386.2 | 3.4 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | top8 | cuda | 32 | 1 | feature_major | token_stationary | 292.3 | 4.5 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | top8 | cuda | 32 | 1 | token_major | token_stationary | 340.5 | 3.8 | 0.0 MiB | 46.5 | 1.29 | 41 |
 | 32 | top8 | cuda | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.5 | 1.29 | 41 |
 | 32 | top8 | cuda | 32 | 8 | token_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | top8 | triton | 32 | 1 | feature_major | token_stationary | 731.3 | 1.8 | 0.0 MiB | 46.5 | 1.29 | 41 |
+| 32 | top8 | triton | 32 | 1 | feature_major | token_stationary | 666.1 | 2.0 | 0.0 MiB | 46.5 | 1.29 | 41 |
 | 32 | top8 | triton | 32 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.5 | 1.29 | 41 |
 | 32 | top8 | triton | 32 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 46.5 | 1.29 | 41 |
-| 32 | top8 | triton | 64 | 1 | feature_major | token_stationary | 636.9 | 2.1 | 0.0 MiB | 23.3 | 0.65 | 41 |
+| 32 | top8 | triton | 64 | 1 | feature_major | token_stationary | 575.8 | 2.3 | 0.0 MiB | 23.3 | 0.65 | 41 |
 | 32 | top8 | triton | 64 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.3 | 0.65 | 41 |
 | 32 | top8 | triton | 64 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 23.3 | 0.65 | 41 |
-| 32 | top8 | triton | 128 | 1 | feature_major | token_stationary | 738.5 | 1.8 | 0.0 MiB | 11.6 | 0.32 | 41 |
+| 32 | top8 | triton | 128 | 1 | feature_major | token_stationary | 667.5 | 2.0 | 0.0 MiB | 11.6 | 0.32 | 41 |
 | 32 | top8 | triton | 128 | 8 | feature_major | token_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 0.32 | 41 |
 | 32 | top8 | triton | 128 | 8 | feature_major | weight_stationary | workspace budget: 8 splits need 4.0 GiB of pooling workspace > budget 1.0 GiB |  | 4096.0 MiB | 11.6 | 0.32 | 41 |
 
@@ -327,21 +327,21 @@ Errors are relative L2 errors of dX / dW against an FP64 reference on the same B
 
 | Operator | Strategy | Policy | Forward ms | Backward ms | Total ms | Peak extra memory | Checkpoint | dX err | dW err |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| Max | A store hidden | autograd | 34.45 | 133.63 | 168.08 | 4114.2 MiB | - | 6.0e-08 | 6.9e-08 |
-| Max | B compact stats | save_winners | 1.83 | 1.17 | 3.00 | 37.5 MiB | 8.0 MiB | 7.4e-08 | 7.5e-08 |
-| Max | C recompute | minimal_stats | 1.78 | 2.79 | 4.57 | 50.5 MiB | 4.0 MiB | 7.4e-08 | 7.5e-08 |
-| Top-8 | A store hidden | autograd | 83.66 | 134.62 | 218.28 | 6158.3 MiB | - | 8.6e-08 | 1.3e-07 |
-| Top-8 | B compact stats | save_winners | 16.13 | 6.35 | 22.48 | 97.5 MiB | 36.0 MiB | 1.7e-07 | 1.4e-07 |
-| Top-8 | C recompute | recompute_stats | 15.88 | 21.22 | 37.11 | 101.5 MiB | 0.0 MiB | 1.7e-07 | 1.4e-07 |
-| Mean(ReLU) | A store hidden | autograd | 41.15 | 135.57 | 176.73 | 5134.3 MiB | - | 1.3e-07 | 4.1e-07 |
-| Mean(ReLU) | B compact stats | minimal_stats | 1.70 | 4.47 | 6.17 | 37.5 MiB | 4.0 MiB | 2.5e-06 | 2.5e-06 |
-| Mean(ReLU) | C recompute | recompute_stats | 1.76 | 6.31 | 8.07 | 41.5 MiB | 0.0 MiB | 2.5e-06 | 2.5e-06 |
-| LogMeanExp | A store hidden | autograd | 46.43 | 145.65 | 192.08 | 5138.3 MiB | - | 2.9e-07 | 6.3e-07 |
-| LogMeanExp | B compact stats | minimal_stats | 2.19 | 4.81 | 7.01 | 40.5 MiB | 4.0 MiB | 2.4e-06 | 3.0e-06 |
-| LogMeanExp | C recompute | recompute_stats | 2.18 | 6.74 | 8.92 | 44.5 MiB | 0.0 MiB | 2.4e-06 | 3.0e-06 |
-| Softmax-weighted | A store hidden | autograd | 53.63 | 158.37 | 212.00 | 6162.3 MiB | - | 1.6e-07 | 5.8e-07 |
-| Softmax-weighted | B compact stats | minimal_stats | 2.35 | 5.22 | 7.57 | 44.5 MiB | 8.0 MiB | 2.3e-06 | 3.0e-06 |
-| Softmax-weighted | C recompute | recompute_stats | 2.48 | 7.49 | 9.97 | 48.5 MiB | 0.0 MiB | 2.3e-06 | 3.0e-06 |
+| Max | A store hidden | autograd | 29.73 | 120.11 | 149.84 | 4114.2 MiB | - | 6.0e-08 | 6.9e-08 |
+| Max | B compact stats | save_winners | 1.73 | 1.08 | 2.81 | 37.5 MiB | 8.0 MiB | 7.4e-08 | 7.5e-08 |
+| Max | C recompute | minimal_stats | 1.67 | 2.55 | 4.22 | 50.5 MiB | 4.0 MiB | 7.4e-08 | 7.5e-08 |
+| Top-8 | A store hidden | autograd | 75.96 | 118.73 | 194.68 | 6158.3 MiB | - | 8.6e-08 | 1.3e-07 |
+| Top-8 | B compact stats | save_winners | 14.47 | 5.24 | 19.72 | 97.5 MiB | 36.0 MiB | 1.7e-07 | 1.4e-07 |
+| Top-8 | C recompute | recompute_stats | 14.34 | 19.17 | 33.50 | 101.5 MiB | 0.0 MiB | 1.7e-07 | 1.4e-07 |
+| Mean(ReLU) | A store hidden | autograd | 36.20 | 122.02 | 158.22 | 5134.3 MiB | - | 4.3e-05 | 4.3e-05 |
+| Mean(ReLU) | B compact stats | minimal_stats | 1.61 | 4.26 | 5.87 | 37.5 MiB | 4.0 MiB | 2.5e-06 | 2.5e-06 |
+| Mean(ReLU) | C recompute | recompute_stats | 1.61 | 5.79 | 7.40 | 41.5 MiB | 0.0 MiB | 2.5e-06 | 2.5e-06 |
+| LogMeanExp | A store hidden | autograd | 42.93 | 129.55 | 172.48 | 5138.3 MiB | - | 2.9e-07 | 6.3e-07 |
+| LogMeanExp | B compact stats | minimal_stats | 1.97 | 4.45 | 6.43 | 40.5 MiB | 4.0 MiB | 2.4e-06 | 3.0e-06 |
+| LogMeanExp | C recompute | recompute_stats | 1.92 | 6.34 | 8.26 | 44.5 MiB | 0.0 MiB | 2.4e-06 | 3.0e-06 |
+| Softmax-weighted | A store hidden | autograd | 45.42 | 141.13 | 186.55 | 6162.3 MiB | - | 1.6e-07 | 5.8e-07 |
+| Softmax-weighted | B compact stats | minimal_stats | 2.19 | 4.48 | 6.67 | 44.5 MiB | 8.0 MiB | 2.4e-06 | 3.0e-06 |
+| Softmax-weighted | C recompute | recompute_stats | 2.26 | 6.80 | 9.06 | 48.5 MiB | 0.0 MiB | 2.4e-06 | 3.0e-06 |
 
 
 ### Memory at full scale (BF16 Adam moments, no master weights)
@@ -387,7 +387,7 @@ Component model (first row):
 | topk_mean(k=8) | save_winners | - | 17.20 GiB | 15.29 GiB | 288.0 MiB | 10.06 GiB | 16.01 GiB |
 | logmeanexp(tau=0.5) | minimal_stats | - | 17.20 GiB | 15.29 GiB | 32.0 MiB | 10.06 GiB | 15.51 GiB |
 | softmax_weighted(beta=1) | minimal_stats | - | 17.20 GiB | 15.29 GiB | 64.0 MiB | 10.06 GiB | 15.54 GiB |
-| topk_mean(k=8) -> logmeanexp(tau=0.5) | | | OOM | | | | |
+| topk_mean(k=8) -> logmeanexp(tau=0.5) | save_winners | save | 19.18 GiB | 15.29 GiB | 1728.0 MiB | 10.06 GiB | 19.13 GiB |
 | topk_mean(k=8) -> logmeanexp(tau=0.5) | | | OOM | | | | |
 | topk_mean(k=8) -> logmeanexp(tau=0.5) | | | OOM | | | | |
 

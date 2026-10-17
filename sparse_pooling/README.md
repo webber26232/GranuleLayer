@@ -7,7 +7,9 @@ forward nor in backward.  Neuron activations live only in registers of the kerne
 consumes them; backward recomputes them.
 
 Everything in this document was measured on the machine it was developed on:
-**RTX 3090 (GA102, sm_86, 82 SMs, 5 MB L2)** — note this card exposes **20 GiB**, not 24 GB —
+**RTX 3090 (GA102, sm_86, 82 SMs, 5 MB L2, 24 GiB, 370 W limit)** — results were re-measured
+after a hardware repair (the card previously exposed only 20 GiB at 744 GB/s; now 23.7 GiB
+usable to PyTorch, 819 GB/s device-to-device copy) —
 driver 550.67, CUDA 12.1 `nvcc`, PyTorch 2.7 (CUDA 12.8 runtime), Triton 3.3.
 Measured tables: [`results/TABLES.md`](results/TABLES.md) (generated from `results/*.json`).
 The analysis and answers to the research questions are in [REPORT.md](REPORT.md).
@@ -61,9 +63,10 @@ bash sparse_pooling/benchmarks/run_all.sh python && python sparse_pooling/benchm
 Memory at H = 100M, B = 8192 (C = 8): BF16 weights 1.6 GB + bias/indices 0.4 GB, FP32
 `main_grad` 3.6 GB, Adam moments 3.6 GB (BF16) or 7.2 GB (FP32), optional FP32 master
 weights 3.6 GB; checkpoints are 32–288 MiB for single-level models.  Measured peaks
-(`results/TABLES.md`): 8.6–9.8 GiB with BF16 moments, 17.2 GiB with FP32 moments + master
-weights.  Two-level models with Top-K level-1 features need 12.5–16.2 GiB with BF16 moments
-and do not fit the 20 GiB card with FP32 moments + master weights.  If saved winner ids would
+(`results/TABLES.md`): 8.6–9.3 GiB with BF16 moments, 17.2 GiB with FP32 moments + master
+weights.  Two-level models with Top-K level-1 features need 12.5–16.2 GiB with BF16 moments;
+with FP32 moments + master weights the 6,144-unit variant fits (19.2 GiB) but the 49,152-unit
+variants need ~23 GiB and run out of memory on this 24 GiB card with a desktop attached.  If saved winner ids would
 exceed 2 GiB (`autograd.CHECKPOINT_BUDGET`) the layer recomputes winners in token chunks.
 
 ## Layout of the repository
@@ -153,7 +156,7 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
 
 * **Max / Top-K** — sparse winner events (Triton): one event per (token, unit, winner);
   z of the winner is recomputed (8 MACs) for `act'(z)`; gradients by FP32 atomics
-  (8.4M events at B = 8192 → ~13 ms).
+  (8.4M events at B = 8192 → ~11 ms).
 * **Smooth operators** (CUDA): two kernels, because the two reductions want opposite loop
   orders and both must stay on chip:
   * `k_dx` token-stationary: CTA = (16 tokens, ~128 groups).  Recompute z (m16n8k8),

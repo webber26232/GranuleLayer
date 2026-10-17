@@ -78,27 +78,27 @@ hypothetical [B,H] fp32 hidden (never allocated)           0 B
 total                                                 15.5 GiB
 (reference) [B,H] fp32 hidden would need               3.0 TiB
 measured peak 17.2 GiB, steady 15.3 GiB, checkpoint 64.0 MiB
-Traceback (most recent call last):
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/benchmarks/bench_memory.py", line 77, in <module>
-    main()
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/benchmarks/bench_memory.py", line 54, in main
-    y.float().square().mean().backward()
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/_tensor.py", line 648, in backward
-    torch.autograd.backward(
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/autograd/__init__.py", line 353, in backward
-    _engine_run_backward(
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/autograd/graph.py", line 824, in _engine_run_backward
-    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/autograd/function.py", line 307, in apply
-    return user_fn(self, *args)
-           ^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/autograd.py", line 259, in backward
-    dx = rt.backward(xc, wc, bc, g_pre.contiguous(), saved, policy, dw_buf, db_buf, recomputed)
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/autograd.py", line 127, in backward
-    ops.launch_event_backward(x_op, sxf, sxb, self.idx, w, b, self.layout, lv, self.units,
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/ops.py", line 284, in launch_event_backward
-    ev_coef = ev_coef.to(torch.float32).contiguous()
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 19.71 GiB of which 857.12 MiB is free. Including non-PyTorch memory, this process has 18.86 GiB memory in use. Of the allocated memory 17.68 GiB is allocated by PyTorch, and 912.45 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+== topk_mean(k=8) -> logmeanexp(tau=0.5)  policy=save_winners  l1ckpt=save
+weights                                                1.5 GiB
+bias                                                 190.8 MiB
+indices                                              190.8 MiB
+input x (bf16)                                        16.0 MiB
+input x^T copy (bf16)                                 16.0 MiB
+output y (fp32)                                       32.0 MiB
+grad main_grad W (fp32)                                3.0 GiB
+grad main_grad b (fp32)                              381.5 MiB
+grad dX (fp32 + cast)                                 48.0 MiB
+pooling workspace (splits)                                 0 B
+activation checkpoint                                  3.2 GiB
+backward coefficients c1,c2,c3 (fp32)                576.0 MiB
+optimizer moments m,v                                  6.7 GiB
+optimizer master weights                               3.4 GiB
+hypothetical [B,H] fp32 hidden (never allocated)           0 B
+total                                                 19.1 GiB
+(reference) [B,H] fp32 hidden would need               3.0 TiB
+measured peak 19.2 GiB, steady 15.3 GiB, checkpoint 1.7 GiB
+
+== topk_mean(k=8) -> logmeanexp(tau=0.5): OOM (CUDA out of memory. Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 23.68 GiB of which 1.38 GiB is free. Proce)
+
+== topk_mean(k=8) -> logmeanexp(tau=0.5): OOM (CUDA out of memory. Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 23.68 GiB of which 332.06 MiB is free. Pro)
