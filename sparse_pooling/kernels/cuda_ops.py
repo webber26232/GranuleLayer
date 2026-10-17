@@ -133,12 +133,16 @@ class BwdArgs(ctypes.Structure):
         ("B", ctypes.c_int), ("U", ctypes.c_int), ("S", ctypes.c_int), ("NB", ctypes.c_int),
         ("BPS", ctypes.c_int), ("D", ctypes.c_int),
         ("scale", ctypes.c_float), ("p", ctypes.c_float), ("p_int", ctypes.c_int),
-        ("units_per_cta", ctypes.c_int), ("wunits_per_cta", ctypes.c_int),
+        ("units_per_cta", ctypes.c_int), ("wunits_per_cta", ctypes.c_int), ("flags", ctypes.c_int),
+        ("nonfinite", ctypes.c_void_p),
     ]
 
 
 _CUDA_POOLS = {"max": 0, "mean": 2, "logmeanexp": 3, "power_mean": 4, "softmax_weighted": 5}
 _CUDA_BWD_POOLS = ("mean", "logmeanexp", "power_mean", "softmax_weighted")
+BWD_FAST_DX_EPI, BWD_FAST_DW_EPI, BWD_MASK_DX_EPI, BWD_MASK_DW_EPI, BWD_FALLBACK = 1, 2, 4, 8, 16  # BwdArgs.flags
+_EPI_BITS = {"dx": {"fast": BWD_FAST_DX_EPI, "mask": BWD_MASK_DX_EPI},
+             "dw": {"fast": BWD_FAST_DW_EPI, "mask": BWD_MASK_DW_EPI}}
 # k_dw tiling per C: cfg -> (warps, work units per warp)
 DW_CFGS = {0: (8, 2), 1: (8, 4), 2: (16, 1), 3: (8, 2)}  # 3: indexed staging only, register cap for 2 CTAs/SM
 DW_CFG = {8: 1, 16: 1, 32: 1, 64: 1}  # measured at H=100M, B=8192 (8 warps x 4 work units)
@@ -368,24 +372,39 @@ class CudaBackend:
             _ptr(c1), _ptr(c2), _ptr(c3), _ptr(dx), dx.stride(1), dx.stride(0),
             _ptr(dw_buf), _ptr(db_buf),
             B, U, rt.units.S, L.blocks_per_group, rt.units.BPS, D,
-            ops.kernel_scale(lv), float(lv.p), ops._p_int(lv), upc, wu_per_cta,
+            ops.kernel_scale(lv), float(lv.p), ops._p_int(lv), upc, wu_per_cta, 0,
         )
+        # pooling-specialised dZ epilogue: only Mean(ReLU / identity) has one (FastDz in
+        # sparse_pool_bwd.cuh); the dW variant exists for the indexed kernel only
+        fast_ok = lv.type == "mean" and lv.activation in ("relu", "identity")
+        dx_epi = plan.cuda_dx_epilogue if fast_ok else "generic"
+        dw_epi = plan.cuda_dw_epilogue if fast_ok and staging == "indexed" else "generic"
+        nonfinite = None
+        if dx_epi != "generic" or dw_epi != "generic":  # device flag (no host sync): inf/NaN coefficients make the kernels take the generic path
+            nonfinite = (~torch.isfinite(c1)).any().to(torch.uint8)
+            a.nonfinite = _ptr(nonfinite)
         split = int(plan.grad_precision == "split")
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
         pool = _CUDA_POOLS[lv.type]
         # k_dx is held at 1 CTA/SM by its 96 KiB slab: at 64 registers, 32 warps fill the register
         # file and hide more latency (measured 9-14 % faster at C = 64, neutral at C = 8)
         dx_warps = plan.cuda_dx_warps or (32 if L.block == 64 else 16)
-        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, 0, dx_warps,
-                              n_tiles, gy, stream)
-        if err != 0:
-            raise RuntimeError(f"sp_bwd(dx) failed (code {err})")
+        def launch(kind, cfg_, gx, gy_, flags, what):
+            a.flags = flags
+            err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, kind, cfg_, gx, gy_, stream)
+            if err != 0:
+                raise RuntimeError(f"sp_bwd({what}) failed (code {err})")
+
+        dx_flags = _EPI_BITS["dx"].get(dx_epi, 0)
+        launch(0, dx_warps, n_tiles, gy, dx_flags, "dx")  # k_dx falls back to the generic body in-kernel
         _mark("bwd.dx")
         kind = 1 if staging == "full" else {2: 2, 3: 3}[DW_INDEXED_STAGES]
-        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, kind, cfg, n_chunks, U, stream)
-        if err != 0:
-            raise RuntimeError(f"sp_bwd(dw) failed (code {err})")
+        dw_flags = _EPI_BITS["dw"].get(dw_epi, 0)
+        launch(kind, cfg, n_chunks, U, dw_flags, "dw")
+        if dw_flags:  # generic fallback launch: exits at once unless some coefficient is non-finite
+            launch(kind, cfg, n_chunks, U, BWD_FALLBACK, "dw fallback")
         _mark("bwd.dw")
         rt.last_info.update(bwd_dx_grid=(n_tiles, gy), bwd_dw_grid=(n_chunks, U), grad_precision=plan.grad_precision,
-                            dw_staging=staging, dw_cfg=cfg, dx_warps=dx_warps)
+                            dw_staging=staging, dw_cfg=cfg, dx_warps=dx_warps,
+                            dx_epilogue=dx_epi, dw_epilogue=dw_epi)
         return dx

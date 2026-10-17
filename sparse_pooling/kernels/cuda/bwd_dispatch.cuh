@@ -2,9 +2,9 @@
 // backward launch templates (instantiated per pooling op in bwd_<op>.cu)
 #include "sparse_pool_bwd.cuh"
 
-template <int POOL, int ACT, int C, int NW, bool SPLIT, int PI>
-static int launch_dx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
-  auto k = k_dx<POOL, ACT, C, NW, SPLIT, PI>;
+template <int POOL, int ACT, int C, int NW, bool SPLIT, int PI, int EPI = 0>
+static int launch_dx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
+  auto k = k_dx<POOL, ACT, C, NW, SPLIT, PI, EPI>;
   size_t smem = (size_t)a.D * 16 * (2 + 4);
   static size_t configured = 0;  // per instantiation: grow the opt-in as needed
   if (smem > configured) {
@@ -13,6 +13,16 @@ static int launch_dx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   }
   k<<<dim3(gx, gy), NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();
+}
+
+// fast-epilogue variants are instantiated only where they differ (FastDz<POOL, ACT>::on)
+template <int POOL, int ACT, int C, int NW, bool SPLIT, int PI>
+static int launch_dx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
+  if constexpr (FastDz<POOL, ACT>::on) {
+    if (a.flags & BWD_MASK_DX_EPI) return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 2>(a, gx, gy, s);
+    if (a.flags & BWD_FAST_DX_EPI) return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 1>(a, gx, gy, s);
+  }
+  return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 0>(a, gx, gy, s);
 }
 
 template <int POOL, int ACT, int C, int NW, int WPW, bool SPLIT, int PI>
@@ -28,9 +38,9 @@ static int launch_dw(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   return (int)cudaGetLastError();
 }
 
-template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int PI, int MINB = 1>
-static int launch_dw_idx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
-  auto k = k_dw_idx<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB>;
+template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int PI, int MINB, int EPI>
+static int launch_dw_idx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
+  auto k = k_dw_idx<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, EPI>;
   size_t smem = (size_t)NW * ST * (WPW * Unit<C>::UB * 8) * 16 * 2;  // per-warp ring of compact slabs
   static size_t configured = 0;
   if (smem > configured) {
@@ -39,6 +49,15 @@ static int launch_dw_idx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   }
   k<<<dim3(gx, gy), NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();
+}
+
+template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int PI, int MINB = 1>
+static int launch_dw_idx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
+  if constexpr (FastDz<POOL, ACT>::on) {
+    if (a.flags & BWD_MASK_DW_EPI) return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 2>(a, gx, gy, s);
+    if (a.flags & BWD_FAST_DW_EPI) return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 1>(a, gx, gy, s);
+  }
+  return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 0>(a, gx, gy, s);
 }
 
 // kind: 0 = dx (cfg = warps 8|16|32), 1 = dw (cfg = 0: 8 warps x 2 wu, 1: 8 warps x 4 wu, 2: 16 warps x 1 wu),
