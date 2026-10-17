@@ -151,6 +151,18 @@ def main():
            "peak_allocated_bytes": peak_alloc, "peak_reserved_bytes": peak_res,
            "phases": {ph: summary(ph) for ph, _, _ in PHASES if samples[ph]},
            "gpu_before": state_before, "gpu_after": state_after}
+    # a run must measure what it says it measures: refuse silent fallbacks
+    if info.get("backward_backend") == "cuda":
+        bad = []
+        if args.dw_staging == "indexed" and rec["dw_staging_used"] != "indexed":
+            bad.append(f"dW staging: requested indexed, ran {rec['dw_staging_used']} ({info.get('dw_staging_fallback')})")
+        for k in ("dx", "dw"):
+            req, used = getattr(args, f"{k}_epilogue"), rec[f"{k}_epilogue"]
+            if req != "generic" and used == "generic" and args.pooling in ("mean", "lme", "pow2"):
+                if not (k == "dw" and rec["dw_staging_used"] != "indexed"):
+                    bad.append(f"{k} epilogue: requested {req}, ran generic")
+        if bad:
+            raise SystemExit("variant not applied: " + "; ".join(bad))
     ph = rec["phases"]
     line = "  ".join(f"{k} {ph[k]['median_ms']:.2f}" for k in ("fwd_kernel", "fwd_total", "dx_kernel", "dw_kernel",
                                                               "bwd_total", "optimizer", "step") if k in ph)

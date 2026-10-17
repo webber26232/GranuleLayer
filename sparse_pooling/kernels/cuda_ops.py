@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,6 +30,7 @@ NVCC_FLAGS = ["-O3", f"-arch={ARCH}", "--use_fast_math", "-lineinfo", "-std=c++1
 # ablated kernels compute wrong gradients); part of the build hash, so they get their own library
 NVCC_FLAGS += os.environ.get("SPARSE_POOL_NVCC_EXTRA", "").split()
 _lock = threading.Lock()
+_warned = set()  # fallback reasons already reported (one warning each)
 
 
 def _sources():
@@ -332,15 +334,37 @@ class CudaBackend:
                 and L.input_dim % 8 == 0 and L.input_dim * 16 * 6 <= 99 * 1024)
 
     @staticmethod
-    def dw_staging(plan: PhysicalPlan, L, device, sxb) -> str:
-        """Indexed k_dw staging is implemented for packed C = 64 Mode B with a
-        feature-major input operand and validated on sm_86; everything else
-        uses the original full-slab kernel."""
+    def dw_staging_reason(L, device, sxb) -> str:
+        """Why indexed k_dw staging cannot be used ("" if it can).  It is implemented for
+        packed C = 64 Mode B with a feature-major input operand and validated on sm_86."""
+        if not (L.packed and L.shared_indices):
+            return "needs packed Mode B parameters"
+        if L.block != 64:
+            return f"implemented for C = 64 only (C = {L.block})"
+        if sxb != 1:
+            return "needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
+        cc = torch.cuda.get_device_capability(device)
+        if cc != (8, 6):
+            return f"validated on sm_86 only (device is sm_{cc[0]}{cc[1]})"
+        return ""
+
+    @classmethod
+    def dw_staging(cls, plan: PhysicalPlan, L, device, sxb, info=None) -> str:
+        if info is not None:
+            info.pop("dw_staging_fallback", None)
         if plan.cuda_dw_staging == "full":
             return "full"
-        ok = (L.block == 64 and L.packed and L.shared_indices and sxb == 1
-              and torch.cuda.get_device_capability(device) == (8, 6))
-        return "indexed" if ok else "full"
+        reason = cls.dw_staging_reason(L, device, sxb)
+        if not reason:
+            return "indexed"
+        if plan.cuda_dw_staging == "indexed":  # explicit request: never fall back silently
+            if info is not None:
+                info["dw_staging_fallback"] = reason
+            if reason not in _warned:
+                _warned.add(reason)
+                warnings.warn(f"cuda_dw_staging='indexed' unavailable ({reason}); using the full-slab k_dw",
+                              stacklevel=3)
+        return "full"
 
     def backward(self, rt, x, w, b, g_pre, stats, dw_buf, db_buf):
         """Recompute backward: accumulates into dw_buf/db_buf (packed FP32),
@@ -365,7 +389,7 @@ class CudaBackend:
         gy = max(1, min(U, math.ceil(4096 / n_tiles)))  # ~4096 CTAs; one dX flush per CTA
         upc = math.ceil(U / gy)
         gy = math.ceil(U / upc)
-        staging = self.dw_staging(plan, L, x.device, sxb)
+        staging = self.dw_staging(plan, L, x.device, sxb, rt.last_info)
         cfg = plan.cuda_dw_cfg if plan.cuda_dw_cfg >= 0 else DW_CFG[L.block]
         if plan.cuda_dw_cfg < 0 and staging == "indexed":
             cfg = DW_CFG_INDEXED[lv.type]

@@ -119,6 +119,7 @@ def test_indexed_is_deterministic():
 
 
 @requires_cuda_backend
+@pytest.mark.filterwarnings("ignore:cuda_dw_staging='indexed' unavailable")  # the explicit request warns by design
 @pytest.mark.parametrize("why,C,B,layout", [
     ("C=8", 8, 40, "feature_major"),
     ("token-major input", 64, 40, "feature_major_off"),

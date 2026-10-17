@@ -147,3 +147,19 @@ def test_nonfinite_upstream_gradient(variant, pooling, bad):
     same = lambda a, b: torch.equal(torch.nan_to_num(a, 1.0, 2.0, 3.0), torch.nan_to_num(b, 1.0, 2.0, 3.0)) \
         and torch.equal(a.isnan(), b.isnan())  # noqa: E731
     assert same(dw1, dw0) and same(db1, db0)
+
+
+@requires_cuda_backend
+def test_explicit_indexed_fallback_is_reported():
+    """An explicit cuda_dw_staging='indexed' that cannot be honoured warns and records why."""
+    lay, w, b = make_layer(1024, 20000, 8, 8, "mean", "auto", "cuda",
+                           plan=PhysicalPlan(block_m=32, cuda_dw_staging="indexed"))
+    from sparse_pooling.kernels import cuda_ops
+    cuda_ops._warned.clear()
+    with pytest.warns(UserWarning, match="C = 64 only"):
+        run_both(lay, w, b, 40, 1024)
+    assert lay.last_info["dw_staging"] == "full" and "C = 64" in lay.last_info["dw_staging_fallback"]
+    # "auto" falls back silently (that is its job) and leaves no fallback note
+    lay.plan = PhysicalPlan(block_m=32)
+    run_both(lay, w, b, 40, 1024)
+    assert "dw_staging_fallback" not in lay.last_info
