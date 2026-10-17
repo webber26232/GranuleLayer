@@ -163,3 +163,12 @@ def test_explicit_indexed_fallback_is_reported():
     lay.plan = PhysicalPlan(block_m=32)
     run_both(lay, w, b, 40, 1024)
     assert "dw_staging_fallback" not in lay.last_info
+
+
+@requires_cuda_backend
+@pytest.mark.parametrize("H,want", [(1000 * 8, 16), (2048 * 8, 32), (1792 * 8, 16), (1984 * 8, 32)])  # packed: blocks rounded up to 4
+def test_dx_warps_follow_work_units(H, want):
+    """32 dX warps only when a pooling unit has >= 32 work units (C = 64: >= 2048 neurons)."""
+    lay, w, b = make_layer(1024, H, 8, 64, "mean", "auto", "cuda", plan=PhysicalPlan(block_m=32))
+    run_both(lay, w, b, 40, 1024)
+    assert lay.last_info["dx_warps"] == want

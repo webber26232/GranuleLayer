@@ -193,6 +193,7 @@ def test_dx_warp_counts_against_reference(pooling, C, warps):
 
 @requires_cuda_backend
 def test_default_dx_warps():
+    # H = 20000 over 8 groups: 2500 neurons -> 40 work units per unit at C = 64
     for C, want in ((64, 32), (8, 16)):
         lay, w, b = make_layer(1024, 20000, 8, C, "mean", "auto", "cuda", plan=PhysicalPlan(block_m=32))
         run_both(lay, w, b, 40, 1024)

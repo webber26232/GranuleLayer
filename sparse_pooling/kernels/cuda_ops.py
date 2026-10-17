@@ -168,6 +168,14 @@ def _mark(name):
         PHASE_EVENTS.append((name, e))
 
 
+def dx_warps_default(C: int, blocks_per_unit: int, unit_blocks: int) -> int:
+    """k_dx is held at 1 CTA/SM by its 96 KiB slab; at 64 registers 32 warps fill the register
+    file and hide more latency (9-13 % faster dX at C = 64, neutral at C = 8).  Warps take whole
+    work units of a pooling unit, so 32 warps only help when a unit has >= 32 work units
+    (measured crossover: H = 1M slower, H >= 2M faster, at M = 1024 and 8192)."""
+    return 32 if C == 64 and blocks_per_unit // unit_blocks >= 32 else 16
+
+
 def _epilogue(requested: str, lv) -> str:
     act_ok = lv.activation in ("relu", "identity")
     if requested == "mask" and lv.type == "mean" and act_ok:
@@ -421,9 +429,7 @@ class CudaBackend:
         split = int(plan.grad_precision == "split")
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
         pool = _CUDA_POOLS[lv.type]
-        # k_dx is held at 1 CTA/SM by its 96 KiB slab: at 64 registers, 32 warps fill the register
-        # file and hide more latency (measured 9-14 % faster at C = 64, neutral at C = 8)
-        dx_warps = plan.cuda_dx_warps or (32 if L.block == 64 else 16)
+        dx_warps = plan.cuda_dx_warps or dx_warps_default(L.block, rt.units.BPS, L.unit_blocks)
         def launch(kind, cfg_, gx, gy_, flags, what):
             a.flags = flags
             err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, kind, cfg_, gx, gy_, stream)
