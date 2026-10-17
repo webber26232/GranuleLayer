@@ -176,7 +176,18 @@ def dx_warps_default(C: int, blocks_per_unit: int, unit_blocks: int) -> int:
     return 32 if C == 64 and blocks_per_unit // unit_blocks >= 32 else 16
 
 
-def _epilogue(requested: str, lv) -> str:
+def auto_epilogue(kernel: str, lv, grad_precision: str) -> str:
+    """Measured defaults (results/BACKWARD_COMPUTE_OPTIMIZATION.md): dW "fast" for every
+    operator that has it; dX "mask" for Mean with split gradients, "generic" for Mean with
+    BF16 gradients (the short BF16 generic path is faster there), "fast" otherwise."""
+    if kernel == "dx" and lv.type == "mean":
+        return "mask" if grad_precision == "split" else "generic"
+    return "fast"
+
+
+def _epilogue(requested: str, lv, grad_precision: str = "split", kernel: str = "dx") -> str:
+    if requested == "auto":
+        requested = auto_epilogue(kernel, lv, grad_precision)
     act_ok = lv.activation in ("relu", "identity")
     if requested == "mask" and lv.type == "mean" and act_ok:
         return "mask"
@@ -419,12 +430,15 @@ class CudaBackend:
         # pooling-specialised dZ epilogues (FastDz in sparse_pool_bwd.cuh): "fast" for Mean and
         # LME (ReLU / identity) and integer-p power mean, "mask" for Mean only; the dW variants
         # exist for the indexed kernel only.  Anything else runs the generic epilogue.
-        dx_epi = _epilogue(plan.cuda_dx_epilogue, lv)
-        dw_epi = _epilogue(plan.cuda_dw_epilogue, lv) if staging == "indexed" else "generic"
+        dx_epi = _epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
+        dw_epi = _epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw") if staging == "indexed" else "generic"
         nonfinite = None
         if dx_epi != "generic" or dw_epi != "generic":  # device flag (no host sync): inf/NaN coefficients make the kernels take the generic path
-            ok = torch.isfinite(c1) & torch.isfinite(c2) & (c1.abs() < 2.0**64)
-            nonfinite = (~ok).any().to(torch.uint8)
+            # scalar inf-norm reductions (NaN propagates and fails the compare): no [B, U] temporaries
+            ok = torch.linalg.vector_norm(c1, float("inf")) < 2.0**64
+            if lv.type != "mean":  # Mean never reads c2
+                ok = ok & (torch.linalg.vector_norm(c2, float("inf")) < float("inf"))
+            nonfinite = (~ok).to(torch.uint8)
             a.nonfinite = _ptr(nonfinite)
         split = int(plan.grad_precision == "split")
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)

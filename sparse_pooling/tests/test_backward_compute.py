@@ -19,6 +19,7 @@ def _variant(**kw):
 
 
 VARIANTS = {
+    "auto_defaults": _variant(cuda_dx_epilogue="auto", cuda_dw_epilogue="auto"),
     "fast_epilogue": _variant(cuda_dx_epilogue="fast", cuda_dw_epilogue="fast"),
     "fast_dx_only": _variant(cuda_dx_epilogue="fast"),
     "fast_dw_only": _variant(cuda_dw_epilogue="fast"),
@@ -50,13 +51,13 @@ def test_variant_matches_baseline(variant, pooling, precision, D, H, G, B, C):
     kw = dict(VARIANTS[variant], grad_precision=precision)
     info = _compare(lay, x, dy, dict(BASE, grad_precision=precision), kw)
     lv = lay.cfg.levels[0]
-    want_dx = _epilogue(kw["cuda_dx_epilogue"], lv)
-    want_dw = _epilogue(kw["cuda_dw_epilogue"], lv) if C == 64 else "generic"
+    want_dx = _epilogue(kw["cuda_dx_epilogue"], lv, precision, "dx")
+    want_dw = _epilogue(kw["cuda_dw_epilogue"], lv, precision, "dw") if C == 64 else "generic"
     assert (info["dx_epilogue"], info["dw_epilogue"]) == (want_dx, want_dw)
     # which operators actually get a specialised epilogue
     special = {"mean": True, "logmeanexp": lv.activation in ("relu", "identity"),
                "power_mean": float(lv.p) in (1.0, 2.0, 4.0, 8.0), "softmax_weighted": False}[lv.type]
-    if kw["cuda_dx_epilogue"] != "generic":
+    if kw["cuda_dx_epilogue"] not in ("generic", "auto"):
         assert (want_dx != "generic") == special
 
 

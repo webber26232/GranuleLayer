@@ -67,8 +67,8 @@ def main():
     ap.add_argument("--dw-staging", default="auto", choices=["auto", "full", "indexed"])
     ap.add_argument("--dw-stages", type=int, default=2, choices=[2, 3], help="indexed k_dw cp.async ring depth")
     ap.add_argument("--dx-warps", type=int, default=0, choices=[0, 8, 16, 32], help="0 = library default")
-    ap.add_argument("--dx-epilogue", default="generic", choices=["generic", "fast", "mask"])
-    ap.add_argument("--dw-epilogue", default="generic", choices=["generic", "fast", "mask"])
+    ap.add_argument("--dx-epilogue", default="auto", choices=["auto", "generic", "fast", "mask"])
+    ap.add_argument("--dw-epilogue", default="auto", choices=["auto", "generic", "fast", "mask"])
     ap.add_argument("--dw-cfg", type=int, default=-1, help="cuda_ops.DW_CFGS key; -1 = default")
     ap.add_argument("--reps", type=int, default=5, help="independent repetitions")
     ap.add_argument("--iters", type=int, default=3, help="training steps per repetition")
@@ -158,7 +158,7 @@ def main():
             bad.append(f"dW staging: requested indexed, ran {rec['dw_staging_used']} ({info.get('dw_staging_fallback')})")
         for k in ("dx", "dw"):
             req, used = getattr(args, f"{k}_epilogue"), rec[f"{k}_epilogue"]
-            if req != "generic" and used == "generic" and args.pooling in ("mean", "lme", "pow2"):
+            if req not in ("generic", "auto") and used == "generic" and args.pooling in ("mean", "lme", "pow2"):
                 if not (k == "dw" and rec["dw_staging_used"] != "indexed"):
                     bad.append(f"{k} epilogue: requested {req}, ran generic")
         if bad:

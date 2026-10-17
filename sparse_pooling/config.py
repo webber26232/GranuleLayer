@@ -252,11 +252,12 @@ class PhysicalPlan:
     # backward: dZ operand precision for tensor-core gradient products:
     #   "split" = hi + lo BF16 pair (~16-bit mantissa), "bf16" = single BF16
     grad_precision: str = "split"
-    # dZ epilogue of k_dx / k_dw_idx: "generic", "fast" (per-element select) or "mask"
-    # (per-token BF16 hi/lo + per-element bit masks); the specialised ones exist for
-    # Mean(ReLU / identity) only, other operators always use the generic path
-    cuda_dx_epilogue: str = "generic"
-    cuda_dw_epilogue: str = "generic"
+    # dZ epilogue of k_dx / k_dw_idx: "generic", "fast" (per-element select; Mean, LME and
+    # integer-p power mean), "mask" (per-token BF16 hi/lo + bit masks; Mean only, else
+    # "fast") or "auto" (measured per operator and precision: cuda_ops.auto_epilogue).
+    # All variants give gradients bitwise identical to "generic" (dX: up to atomic order).
+    cuda_dx_epilogue: str = "auto"
+    cuda_dw_epilogue: str = "auto"
     cuda_dx_warps: int = 0  # 8 | 16 | 32; 0 = auto (32 at C = 64, else 16; results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_cfg: int = -1  # -1 = per-C default (see cuda_ops.DW_CFG)
     # k_dw input staging: "full" stages all D features per token tile; "indexed"
@@ -270,8 +271,8 @@ class PhysicalPlan:
         assert self.backend in ("triton", "cuda", "auto")
         assert self.grad_precision in ("split", "bf16")
         assert self.cuda_dw_staging in ("auto", "full", "indexed")
-        assert self.cuda_dx_epilogue in ("generic", "fast", "mask")
-        assert self.cuda_dw_epilogue in ("generic", "fast", "mask")
+        assert self.cuda_dx_epilogue in ("auto", "generic", "fast", "mask")
+        assert self.cuda_dw_epilogue in ("auto", "generic", "fast", "mask")
 
 
 def state_fields(level: LevelSpec) -> int:
