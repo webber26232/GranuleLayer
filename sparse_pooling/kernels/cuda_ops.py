@@ -166,6 +166,16 @@ def _mark(name):
         PHASE_EVENTS.append((name, e))
 
 
+def _epilogue(requested: str, lv) -> str:
+    act_ok = lv.activation in ("relu", "identity")
+    if requested == "mask" and lv.type == "mean" and act_ok:
+        return "mask"
+    if requested in ("fast", "mask") and ((lv.type in ("mean", "logmeanexp") and act_ok)
+                                         or (lv.type == "power_mean" and ops._p_int(lv) != 0)):
+        return "fast"
+    return "generic"
+
+
 def _ptr(t):
     return ctypes.c_void_p(t.data_ptr()) if t is not None else ctypes.c_void_p(0)
 
@@ -374,14 +384,15 @@ class CudaBackend:
             B, U, rt.units.S, L.blocks_per_group, rt.units.BPS, D,
             ops.kernel_scale(lv), float(lv.p), ops._p_int(lv), upc, wu_per_cta, 0,
         )
-        # pooling-specialised dZ epilogue: only Mean(ReLU / identity) has one (FastDz in
-        # sparse_pool_bwd.cuh); the dW variant exists for the indexed kernel only
-        fast_ok = lv.type == "mean" and lv.activation in ("relu", "identity")
-        dx_epi = plan.cuda_dx_epilogue if fast_ok else "generic"
-        dw_epi = plan.cuda_dw_epilogue if fast_ok and staging == "indexed" else "generic"
+        # pooling-specialised dZ epilogues (FastDz in sparse_pool_bwd.cuh): "fast" for Mean and
+        # LME (ReLU / identity) and integer-p power mean, "mask" for Mean only; the dW variants
+        # exist for the indexed kernel only.  Anything else runs the generic epilogue.
+        dx_epi = _epilogue(plan.cuda_dx_epilogue, lv)
+        dw_epi = _epilogue(plan.cuda_dw_epilogue, lv) if staging == "indexed" else "generic"
         nonfinite = None
         if dx_epi != "generic" or dw_epi != "generic":  # device flag (no host sync): inf/NaN coefficients make the kernels take the generic path
-            nonfinite = (~torch.isfinite(c1)).any().to(torch.uint8)
+            ok = torch.isfinite(c1) & torch.isfinite(c2) & (c1.abs() < 2.0**64)
+            nonfinite = (~ok).any().to(torch.uint8)
             a.nonfinite = _ptr(nonfinite)
         split = int(plan.grad_precision == "split")
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)

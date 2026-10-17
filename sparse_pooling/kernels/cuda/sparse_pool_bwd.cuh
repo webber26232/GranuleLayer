@@ -99,12 +99,35 @@ __device__ __forceinline__ float mul_ftz(float a, float b) {
 // against RZ: one FSETP + FSEL per element.  Non-finite c1 (inf/NaN upstream gradient,
 // where the generic path yields NaN for z <= 0 too) is detected by a device-side flag
 // (BwdArgs::nonfinite) and those launches run the generic epilogue instead.
-template <int POOL, int ACT>
+//
+// LogMeanExp: for valid tokens c2 = L2 >= max(a * scale), so e = ex2(a * scale - c2) <= 1
+// (+ rounding) and c1 * e is finite for |c1| < 2^64 (guarded by the same flag); the
+// generic (c1 * e) * act'(z) is then c1 * e or a signed zero.  Padded tokens get
+// c2f = +inf (e = 0) instead of the token select.
+// Power mean (integer p): the generic path already returns 0 for z <= 0 before any
+// multiply, and padded tokens (c1 = c2 = 0) give c1 * q^(p-1) = 0, so only the token
+// select is dropped.  (Softmax-weighted has no such bound on its extra factor and keeps
+// the generic epilogue.)
+template <int POOL, int ACT, int P_INT>
+__device__ __forceinline__ float dz_f(float z, float c1, float c2, float c3, float scale, float p);
+
+template <int POOL, int ACT, int P_INT>
 struct FastDz {
-  static constexpr bool on = POOL == P_MEAN && (ACT == A_RELU || ACT == A_ID);
-  __device__ __forceinline__ static float dz(float z, float c1, float one) {
-    if (ACT == A_ID) return c1 * 1.f;  // the generic expression (dact = 1)
-    return z > 0.f ? one : 0.f;
+  static constexpr bool act_ok = ACT == A_RELU || ACT == A_ID;
+  static constexpr bool mask = POOL == P_MEAN && act_ok;  // per-token-constant dz: mask epilogue
+  static constexpr bool on = mask || (POOL == P_LME && act_ok) || (POOL == P_POW && P_INT != 0);
+  __device__ __forceinline__ static float dz(float z, float c1, float c2, float one, float c2f, float scale,
+                                             float p) {
+    if constexpr (POOL == P_MEAN) {
+      if (ACT == A_ID) return c1 * 1.f;  // the generic expression (dact = 1)
+      return z > 0.f ? one : 0.f;
+    } else if constexpr (POOL == P_LME) {
+      const float v = c1 * exp2_approx(fmaf(act_f<ACT>(z), scale, -c2f));
+      if (ACT == A_ID) return v;
+      return z > 0.f ? v : 0.f;
+    } else {
+      return dz_f<POOL, ACT, P_INT>(z, c1, c2, 0.f, scale, p);  // power mean: generic body, no token select
+    }
   }
 };
 __device__ __forceinline__ bool fast_epilogue_ok(const BwdArgs& a) { return !(a.nonfinite && *a.nonfinite); }
@@ -143,6 +166,7 @@ __device__ __forceinline__ float dz_f(float z, float c1, float c2, float c3, flo
 struct RowCoef {
   float c1[2], c2[2], c3[2];  // rows lane/4 and lane/4 + 8
   float one[2];               // FastDz: c1 * 1 under FTZ (dead code in the generic path)
+  float c2f[2];               // FastDz (LME): c2, +inf for padded tokens (dead code otherwise)
   uint32_t hp[2], lp[2];      // mask epilogue: BF16x2 hi / lo of (one[h], one[h]) (dead code otherwise)
   bool tv[2];                 // token < B
   __device__ __forceinline__ void load(const BwdArgs& a, int t0, int u, int lane) {
@@ -159,6 +183,7 @@ struct RowCoef {
         c1[h] = 0.f; c2[h] = 0.f; c3[h] = 0.f;  // c1 = 0 -> dz = 0 for padded tokens
       }
       one[h] = mul_ftz(c1[h], 1.f);
+      c2f[h] = tv[h] ? c2[h] : INFINITY;
       split_bf16(one[h], one[h], hp[h], lp[h]);
     }
   }
@@ -174,8 +199,8 @@ __device__ __forceinline__ void tile_dz(float* dz, const uint32_t* af, uint32_t 
 #pragma unroll
   for (int i = 0; i < 4; i++) {
     int h = i >> 1;
-    if constexpr (EPI && FastDz<POOL, ACT>::on) {
-      float v = FastDz<POOL, ACT>::dz(d[i], rc.c1[h], rc.one[h]);
+    if constexpr (EPI && FastDz<POOL, ACT, P_INT>::on) {
+      float v = FastDz<POOL, ACT, P_INT>::dz(d[i], rc.c1[h], rc.c2[h], rc.one[h], rc.c2f[h], scale, p);
       dz[i] = (MASKED && slot0 + (i & 1) >= n_g) ? 0.f : v;
       continue;
     }
@@ -228,7 +253,7 @@ __device__ __forceinline__ void dx_block(const BlockRegs<C>& blk, int j, int n_g
   uint32_t af[2];
   ldmatrix_x2_trans(af, slab_s + 2 * Swz<1>::off(blk.fidx, (lane >> 3) & 1));
   float da[4] = {0.f, 0.f, 0.f, 0.f};
-  if constexpr (EPI == 2 && FastDz<POOL, ACT>::on) {
+  if constexpr (EPI == 2 && FastDz<POOL, ACT, P_INT>::mask) {
 #pragma unroll
     for (int nt = 0; nt < NT; nt += (NT == 1 ? 1 : 2)) {
       uint32_t m0[4];
@@ -385,6 +410,7 @@ __global__ void __launch_bounds__(NW * 32) k_dx(BwdArgs a) {
 struct ColCoef {  // coefficients for this lane's token columns 2t, 2t+1 (+8)
   float c1[4], c2[4], c3[4];
   float one[4];  // FastDz: c1 * 1 under FTZ (dead code in the generic path)
+  float c2f[4];  // FastDz (LME): c2, +inf for padded tokens (dead code otherwise)
   uint32_t hp[2], lp[2];  // mask epilogue: BF16x2 hi / lo of (one[2th], one[2th + 1]) (dead code otherwise)
   bool tv[4];
   __device__ __forceinline__ void load(const BwdArgs& a, int t0, int u, int lane) {
@@ -407,6 +433,7 @@ struct ColCoef {  // coefficients for this lane's token columns 2t, 2t+1 (+8)
         c1[i] = 0.f; c2[i] = 0.f; c3[i] = 0.f;
       }
       one[i] = mul_ftz(c1[i], 1.f);
+      c2f[i] = tv[i] ? c2[i] : INFINITY;
     }
 #pragma unroll
     for (int th = 0; th < 2; th++) split_bf16(one[2 * th], one[2 * th + 1], hp[th], lp[th]);
@@ -441,7 +468,7 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
     uint32_t ah[4], al[4];
 #pragma unroll
     for (int th = 0; th < 2; th++) {  // token halves 0-7, 8-15
-      if constexpr (EPI == 2 && FastDz<POOL, ACT>::on) {
+      if constexpr (EPI == 2 && FastDz<POOL, ACT, P_INT>::mask) {
         float d[4] = {0.f, 0.f, 0.f, 0.f};
         if constexpr (ACT != A_ID) mma_m16n8k8_bf16(d, w0, w1, xa[th], b0, b0, b1, b1);
         uint32_t m[4];
@@ -470,8 +497,8 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
           continue;
         }
         const int ci = (i & 1) + 2 * th;  // token column index into ColCoef
-        if constexpr (EPI && FastDz<POOL, ACT>::on) {
-          float v = FastDz<POOL, ACT>::dz(d[i], cc.c1[ci], cc.one[ci]);
+        if constexpr (EPI && FastDz<POOL, ACT, P_INT>::on) {
+          float v = FastDz<POOL, ACT, P_INT>::dz(d[i], cc.c1[ci], cc.c2[ci], cc.one[ci], cc.c2f[ci], scale, p);
           dz[i] = (MASKED && !((i < 2) ? v0 : v1)) ? 0.f : v;
           continue;
         }

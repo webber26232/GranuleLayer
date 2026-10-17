@@ -15,13 +15,13 @@ static int launch_dx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   return (int)cudaGetLastError();
 }
 
-// fast-epilogue variants are instantiated only where they differ (FastDz<POOL, ACT>::on)
+// specialised-epilogue variants are instantiated only where they exist (FastDz<POOL, ACT, PI>)
 template <int POOL, int ACT, int C, int NW, bool SPLIT, int PI>
 static int launch_dx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
-  if constexpr (FastDz<POOL, ACT>::on) {
+  if constexpr (FastDz<POOL, ACT, PI>::mask)
     if (a.flags & BWD_MASK_DX_EPI) return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 2>(a, gx, gy, s);
+  if constexpr (FastDz<POOL, ACT, PI>::on)
     if (a.flags & BWD_FAST_DX_EPI) return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 1>(a, gx, gy, s);
-  }
   return launch_dx_v<POOL, ACT, C, NW, SPLIT, PI, 0>(a, gx, gy, s);
 }
 
@@ -53,10 +53,10 @@ static int launch_dw_idx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
 
 template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int PI, int MINB = 1>
 static int launch_dw_idx(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
-  if constexpr (FastDz<POOL, ACT>::on) {
+  if constexpr (FastDz<POOL, ACT, PI>::mask)
     if (a.flags & BWD_MASK_DW_EPI) return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 2>(a, gx, gy, s);
+  if constexpr (FastDz<POOL, ACT, PI>::on)
     if (a.flags & BWD_FAST_DW_EPI) return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 1>(a, gx, gy, s);
-  }
   return launch_dw_idx_v<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, 0>(a, gx, gy, s);
 }
 

@@ -7,6 +7,7 @@ import torch
 
 from conftest import make_layer, rel_err, requires_cuda_backend, run_both
 from sparse_pooling import PhysicalPlan
+from sparse_pooling.kernels.cuda_ops import _epilogue
 from test_dw_indexed import SMOOTH, _grads, _inputs
 
 BASE = dict(block_m=32, cuda_dx_epilogue="generic", cuda_dw_epilogue="generic")
@@ -48,10 +49,15 @@ def test_variant_matches_baseline(variant, pooling, precision, D, H, G, B, C):
     x, dy = _inputs(B, D, G)
     kw = dict(VARIANTS[variant], grad_precision=precision)
     info = _compare(lay, x, dy, dict(BASE, grad_precision=precision), kw)
-    is_mean = pooling in ("mean", {"type": "mean", "activation": "identity"})
-    want_dx = kw["cuda_dx_epilogue"] if is_mean else "generic"
-    want_dw = kw["cuda_dw_epilogue"] if (is_mean and C == 64) else "generic"
+    lv = lay.cfg.levels[0]
+    want_dx = _epilogue(kw["cuda_dx_epilogue"], lv)
+    want_dw = _epilogue(kw["cuda_dw_epilogue"], lv) if C == 64 else "generic"
     assert (info["dx_epilogue"], info["dw_epilogue"]) == (want_dx, want_dw)
+    # which operators actually get a specialised epilogue
+    special = {"mean": True, "logmeanexp": lv.activation in ("relu", "identity"),
+               "power_mean": float(lv.p) in (1.0, 2.0, 4.0, 8.0), "softmax_weighted": False}[lv.type]
+    if kw["cuda_dx_epilogue"] != "generic":
+        assert (want_dx != "generic") == special
 
 
 @requires_cuda_backend
@@ -81,9 +87,14 @@ def test_relu_boundary_and_signed_zero(variant):
     _compare(lay, x, dy, BASE, VARIANTS[variant])
 
 
+EXACT_POOLS = ["mean", {"type": "mean", "activation": "identity"}, {"type": "logmeanexp", "temperature": 0.5},
+               {"type": "logmeanexp", "temperature": 0.5, "activation": "identity"}, {"type": "power_mean", "p": 2},
+               {"type": "power_mean", "p": 4}]
+
+
 @requires_cuda_backend
 @pytest.mark.parametrize("variant", list(VARIANTS))
-@pytest.mark.parametrize("pooling", ["mean", {"type": "mean", "activation": "identity"}], ids=str)
+@pytest.mark.parametrize("pooling", EXACT_POOLS, ids=str)
 def test_extreme_magnitudes(variant, pooling):
     """Large and tiny upstream gradients through the split path; c1 = dy / n becomes
     subnormal, which the generic path flushes (FTZ) and every variant must too."""
@@ -120,12 +131,13 @@ def test_colliding_indices_and_accumulation(variant):
 
 @requires_cuda_backend
 @pytest.mark.parametrize("variant", list(VARIANTS))
-@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
-def test_nonfinite_upstream_gradient(variant, bad):
+@pytest.mark.parametrize("pooling", EXACT_POOLS, ids=str)
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), 3e38])
+def test_nonfinite_upstream_gradient(variant, pooling, bad):
     """A non-finite upstream gradient for one token: the generic path spreads NaN through
     c1 * act'(z) (inf * 0 = NaN); every variant must produce the same bits."""
     D, B = 1024, 40
-    lay, _, _ = make_layer(D, 20000, 8, 64, "mean", "auto", "cuda", plan=PhysicalPlan(block_m=32))
+    lay, _, _ = make_layer(D, 20000, 8, 64, pooling, "auto", "cuda", plan=PhysicalPlan(block_m=32))
     x, dy = _inputs(B, D, 8)
     dy[5, 3] = bad
     lay.plan = PhysicalPlan(**BASE)
