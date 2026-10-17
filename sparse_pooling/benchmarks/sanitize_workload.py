@@ -30,3 +30,19 @@ for C, pooling, pol, backend in CASES:
     torch.cuda.synchronize()
     print("ok", C, lay.cfg.describe(), pol, lay.last_info.get("forward_backend"), lay.last_info.get("backward_backend"),
           flush=True)
+
+# indexed / full-slab k_dw variants at C = 64 (partial blocks, ragged token tail)
+from sparse_pooling.kernels import cuda_ops  # noqa: E402
+
+for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed", 3, 2, "split", 40),
+                                      ("indexed", 1, 3, "split", 24), ("indexed", 3, 3, "bf16", 40),
+                                      ("indexed", 2, 2, "split", 8), ("full", 1, 2, "split", 40)]:
+    cuda_ops.DW_INDEXED_STAGES = stages
+    lay = SparsePoolingLayer(1024, 20011, 16, shared_neurons=64, pooling="mean", device="cuda", bias_std=0.1,
+                             backend="cuda", plan=PhysicalPlan(block_m=32, cuda_dw_staging=staging, cuda_dw_cfg=cfg,
+                                                               grad_precision=prec))
+    x = torch.randn(B, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    lay(x).float().square().sum().backward()
+    torch.cuda.synchronize()
+    print("ok k_dw", lay.last_info.get("dw_staging"), "cfg", lay.last_info.get("dw_cfg"), "stages", stages, prec,
+          "B", B, flush=True)

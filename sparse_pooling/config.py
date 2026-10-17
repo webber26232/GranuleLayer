@@ -252,13 +252,19 @@ class PhysicalPlan:
     # backward: dZ operand precision for tensor-core gradient products:
     #   "split" = hi + lo BF16 pair (~16-bit mantissa), "bf16" = single BF16
     grad_precision: str = "split"
-    cuda_dx_warps: int = 16
+    cuda_dx_warps: int = 0  # 8 | 16 | 32; 0 = auto (32 at C = 64, else 16; results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_cfg: int = -1  # -1 = per-C default (see cuda_ops.DW_CFG)
+    # k_dw input staging: "full" stages all D features per token tile; "indexed"
+    # stages only the rows the CTA's index records use (sm_86, C = 64, packed,
+    # feature-major input; anything else falls back to "full"); "auto" = indexed
+    # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
+    cuda_dw_staging: str = "auto"
 
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
         assert self.backend in ("triton", "cuda", "auto")
         assert self.grad_precision in ("split", "bf16")
+        assert self.cuda_dw_staging in ("auto", "full", "indexed")
 
 
 def state_fields(level: LevelSpec) -> int:

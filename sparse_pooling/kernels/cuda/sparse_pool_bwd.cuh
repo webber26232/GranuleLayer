@@ -21,6 +21,22 @@
 #pragma once
 #include "sparse_pool_fwd.cuh"
 
+// Performance-attribution ablations (benchmarks/bench_ablation.py).  Every
+// non-zero value produces WRONG gradients and is never part of the default build.
+//   SP_ABLATE_DX 1: racy plain RMW instead of the 64-bit CAS scatter
+//                2: no scatter (products kept live, never stored)
+//                3: CAS scatter but no global flush
+//                4: every warp re-loads its first work unit (parameter streaming -> cache hits)
+//   SP_ABLATE_DW 1: no X staging inside the token loop (k_dw and k_dw_idx)
+//                2: k_dw without the per-tile __syncthreads (copies kept)
+//                3: no c1/c2/c3 coefficient loads (constants)
+#ifndef SP_ABLATE_DX
+#define SP_ABLATE_DX 0
+#endif
+#ifndef SP_ABLATE_DW
+#define SP_ABLATE_DW 0
+#endif
+
 struct BwdArgs {
   const bf16* X;
   long long sxf, sxb;
@@ -168,8 +184,18 @@ __device__ __forceinline__ void dx_block(const BlockRegs<C>& blk, int j, int n_g
   int f0 = __shfl_sync(0xffffffff, blk.fidx, col0);
   int f1 = __shfl_sync(0xffffffff, blk.fidx, col0 + 1);
   int t = lane >> 2;
+#if SP_ABLATE_DX == 1
+  float2* p0 = reinterpret_cast<float2*>(dxs + dxs_off(f0, t));
+  float2* p1 = reinterpret_cast<float2*>(dxs + dxs_off(f1, t));
+  float2 v0 = *p0, v1 = *p1;
+  v0.x += da[0]; v0.y += da[2]; v1.x += da[1]; v1.y += da[3];
+  *p0 = v0; *p1 = v1;
+#elif SP_ABLATE_DX == 2
+  if (da[0] + da[1] + da[2] + da[3] == 1.2345e-30f) dxs[f0 & 7] = (float)f1;
+#else
   atomic_add_f32x2(dxs + dxs_off(f0, t), da[0], da[2]);
   atomic_add_f32x2(dxs + dxs_off(f1, t), da[1], da[3]);
+#endif
 }
 
 template <int POOL, int ACT, int C, int NW, bool SPLIT, int P_INT>
@@ -206,7 +232,7 @@ __global__ void __launch_bounds__(NW * 32) k_dx(BwdArgs a) {
     if (warp < nu_full) load_unit<C>(nxt, fa, ubase + warp, lane);
     for (int uu = warp; uu < nu_full; uu += NW) {
       Unit<C> cur = nxt;
-      if (uu + NW < nu_full) load_unit<C>(nxt, fa, ubase + uu + NW, lane);
+      if (uu + NW < nu_full) load_unit<C>(nxt, fa, ubase + (SP_ABLATE_DX == 4 ? warp : uu + NW), lane);
 #pragma unroll
       for (int bu = 0; bu < UB; bu++) {
         BlockRegs<C> blk;
@@ -234,6 +260,7 @@ __global__ void __launch_bounds__(NW * 32) k_dx(BwdArgs a) {
     int f = i >> 4, tl = i & 15;
     int tok = t0 + tl;
     float v = dxs[dxs_off(f, tl)];
+    if (SP_ABLATE_DX == 3) v = (v == 1.2345e-30f) ? v : 0.f;
     if (tok < a.B && v != 0.f) atomicAdd(a.dX + (long long)f * a.sdf + (long long)tok * a.sdb, v);
   }
 }
@@ -253,6 +280,12 @@ struct ColCoef {  // coefficients for this lane's token columns 2t, 2t+1 (+8)
   __device__ __forceinline__ void load(const BwdArgs& a, int t0, int u, int lane) {
 #pragma unroll
     for (int i = 0; i < 4; i++) {
+      if (SP_ABLATE_DW == 3) {
+        int tok = t0 + 2 * (lane & 3) + (i & 1) + 8 * (i >> 1);
+        tv[i] = tok < a.B;
+        c1[i] = 1e-3f * (float)(tok & 7); c2[i] = 0.5f; c3[i] = 0.25f;
+        continue;
+      }
       int tok = t0 + 2 * (lane & 3) + (i & 1) + 8 * (i >> 1);
       tv[i] = tok < a.B;
       if (tv[i]) {
@@ -332,6 +365,10 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
   }
 }
 
+template <int C, int WPW>
+__device__ __forceinline__ void dw_writeback(const BwdArgs& a, DwAcc<C> (&acc)[WPW], const int (&wid)[WPW],
+                                             long long ubase, int lane);
+
 template <int POOL, int ACT, int C, int NW, int WPW, bool SPLIT, int P_INT>
 __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -398,7 +435,7 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
     bf16* cur_slab = (tt & 1) ? slab1 : slab0;
     bf16* nxt_slab = (tt & 1) ? slab0 : slab1;
     // prefetch the next token tile while computing this one
-    if (tt + 1 < n_tiles && a.sxb == 1) {
+    if (tt + 1 < n_tiles && a.sxb == 1 && SP_ABLATE_DW != 1) {
       for (int i = threadIdx.x; i < a.D * 2; i += NW * 32) {
         int f = i >> 1, c = i & 1;
         int tok = (tt + 1) * 16 + c * 8;
@@ -433,10 +470,165 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
       stage_slab<1>(fa, nxt_slab, (tt + 1) * 16);
     }
     asm volatile("cp.async.wait_all;\n" ::);
-    __syncthreads();
+    if (SP_ABLATE_DW != 2) __syncthreads();
   }
 
-  // ---- write back: exclusive ownership, plain read-modify-write
+  dw_writeback<C, WPW>(a, acc, wid, ubase, lane);
+}
+
+// ============================================================================
+// k_dw_idx: k_dw with indexed, warp-local input staging (feature-major X only)
+// ============================================================================
+// k_dw stages all D feature rows of every 16-token tile, but a warp only ever
+// reads the WPW * UB * 8 rows named by its own index records.  Here each warp
+// stages exactly those rows into a private ring of ST compact slabs
+// [R rows][16 tokens] (same Swz<1> row layout, so ldmatrix stays conflict-free)
+// and dw_block addresses them by local row (i, bu, k) instead of by feature.
+// Warps never share slab data: one cp.async group per tile, wait_group +
+// __syncwarp, no CTA barriers in the token loop.  Arithmetic, accumulation
+// order and write-back are identical to k_dw.
+// MINB > 1 asks ptxas for MINB resident CTAs per SM (register cap 64K / (MINB * NW * 32))
+template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int P_INT, int MINB>
+__global__ void __launch_bounds__(NW * 32, MINB) k_dw_idx(BwdArgs a) {
+  extern __shared__ __align__(16) unsigned char smem_raw[];
+  constexpr int UB = Unit<C>::UB;
+  constexpr int R = WPW * UB * 8;               // staged rows per warp
+  constexpr int CPL = (2 * R + 31) / 32;        // 16-byte copies per lane per tile
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+  bf16* ring = reinterpret_cast<bf16*>(smem_raw) + (size_t)warp * ST * R * 16;
+  const int u = blockIdx.y;
+  const int g = u / a.S, sh = u % a.S;
+  const int n_g = a.counts[g];
+  const int b_lo = sh * a.BPS;
+  const int b_hi = min((sh + 1) * a.BPS, a.NB);
+  const int b_any = min(max((n_g + C - 1) / C, b_lo), b_hi);
+  const long long ubase = ((long long)g * a.NB + b_lo) / UB;
+  const int nu_any = (b_any - b_lo + UB - 1) / UB;
+  const int wu0 = blockIdx.x * a.wunits_per_cta;
+  if (wu0 >= nu_any) return;
+
+  FwdArgs fa;
+  fa.X = a.X; fa.sxf = a.sxf; fa.sxb = a.sxb; fa.B = a.B; fa.D = a.D;
+  fa.idx = a.idx; fa.W = a.W; fa.bias = a.bias;
+
+  Unit<C> un[WPW];
+  DwAcc<C> acc[WPW];
+  int wid[WPW];
+  constexpr int NT = C / 8;
+  constexpr int NP = DwAcc<C>::NP;
+  float biasT[WPW][UB][2 * NP];
+#pragma unroll
+  for (int i = 0; i < WPW; i++) {
+    wid[i] = wu0 + warp + i * NW;
+    if (wid[i] < nu_any && wid[i] < wu0 + a.wunits_per_cta) load_unit<C>(un[i], fa, ubase + wid[i], lane);
+    else wid[i] = -1;
+#pragma unroll
+    for (int bu = 0; bu < UB; bu++) {
+#pragma unroll
+      for (int q = 0; q < NP; q++)
+#pragma unroll
+        for (int e = 0; e < 4; e++) acc[i].w[bu][q][e] = 0.f;
+#pragma unroll
+      for (int q = 0; q < NP; q++) acc[i].b[bu][q][0] = acc[i].b[bu][q][1] = 0.f;
+    }
+#pragma unroll
+    for (int bu = 0; bu < UB; bu++) {
+      BlockRegs<C> blk;
+      unit_block<C>(blk, un[i], bu);
+#pragma unroll
+      for (int nt = 0; nt < 2 * NP; nt++) {
+        uint32_t word = (nt < NT) ? blk.bb[nt] : 0u;
+        const int gq = lane >> 2;
+        uint32_t src = __shfl_sync(0xffffffff, word, gq >> 1);
+        float2 bf = bf16x2_to_float2(src);
+        biasT[i][bu][nt] = (gq & 1) ? bf.y : bf.x;
+      }
+    }
+  }
+
+  // staging plan: copy j = lane + 32 q moves (local row j / 2, token chunk j & 1).
+  // Local row r = (i * UB + bu) * 8 + k holds input feature idx[unit i, block bu, k],
+  // held as int16 by lane k of un[i]; -1 marks rows of absent work units (zero-filled).
+  int src_off[CPL];
+#pragma unroll
+  for (int q = 0; q < CPL; q++) {
+    const int r = (lane + 32 * q) >> 1;
+    const int k = r & 7, bu = (r >> 3) % UB, ui = r / (8 * UB);
+    int f = -1;
+#pragma unroll
+    for (int i = 0; i < WPW; i++) {
+#pragma unroll
+      for (int b2 = 0; b2 < UB; b2++) {
+        uint32_t iw = b2 < 2 ? un[i].i0 : un[i].i1;
+        iw = __shfl_sync(0xffffffff, iw, k);
+        const int fi = (int)((iw >> (16 * (b2 & 1))) & 0xffffu);
+        if (ui == i && bu == b2 && wid[i] >= 0) f = fi;
+      }
+    }
+    src_off[q] = (f >= 0 && lane + 32 * q < 2 * R) ? f * (int)a.sxf : -1;
+  }
+  auto stage = [&](int slot, int t0) {
+    bf16* dst = ring + slot * R * 16;
+#pragma unroll
+    for (int q = 0; q < CPL; q++) {
+      const int j = lane + 32 * q;
+      if (j < 2 * R) {
+        const int r = j >> 1, c = j & 1;
+        const int tok = t0 + c * 8;
+        int bytes = (tok + 8 <= a.B) ? 16 : (tok < a.B ? 2 * (a.B - tok) : 0);
+        if (src_off[q] < 0) bytes = 0;
+        const bf16* src = bytes ? a.X + src_off[q] + tok : a.X;
+        cp_async16(dst + Swz<1>::off(r, c), src, bytes);
+      }
+    }
+  };
+
+  const int n_tiles = (a.B + 15) / 16;
+#pragma unroll
+  for (int s = 0; s < ST - 1; s++) {
+    if (s < n_tiles) stage(s, s * 16);
+    asm volatile("cp.async.commit_group;\n" ::);
+  }
+  for (int tt = 0; tt < n_tiles; tt++) {
+    // refill the slot consumed in iteration tt - 1 (all lanes left it at the
+    // trailing __syncwarp), then wait for tile tt: ST - 1 groups stay in flight
+    if (tt + ST - 1 < n_tiles && SP_ABLATE_DW != 1) stage((tt + ST - 1) % ST, (tt + ST - 1) * 16);
+    asm volatile("cp.async.commit_group;\n" ::);
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(ST - 1));
+    __syncwarp();
+    ColCoef cc;
+    cc.load(a, tt * 16, u, lane);
+    const uint32_t slab_s = smem_u32(ring + (tt % ST) * R * 16);
+#pragma unroll
+    for (int i = 0; i < WPW; i++) {
+      if (wid[i] < 0) continue;
+#pragma unroll
+      for (int bu = 0; bu < UB; bu++) {
+        const int j = b_lo + wid[i] * UB + bu;
+        BlockRegs<C> blk;
+        unit_block<C>(blk, un[i], bu);
+        blk.fidx = (i * UB + bu) * 8 + (lane & 7);  // local slab row
+        if ((j + 1) * C <= n_g)
+          dw_block<POOL, ACT, C, SPLIT, P_INT, false>(acc[i], bu, blk, biasT[i][bu], j, n_g, slab_s, cc, lane,
+                                                      a.scale, a.p);
+        else if (j < b_any)
+          dw_block<POOL, ACT, C, SPLIT, P_INT, true>(acc[i], bu, blk, biasT[i][bu], j, n_g, slab_s, cc, lane,
+                                                     a.scale, a.p);
+      }
+    }
+    __syncwarp();
+  }
+  asm volatile("cp.async.wait_all;\n" ::);
+  dw_writeback<C, WPW>(a, acc, wid, ubase, lane);
+}
+
+// write back: exclusive ownership, plain read-modify-write
+template <int C, int WPW>
+__device__ __forceinline__ void dw_writeback(const BwdArgs& a, DwAcc<C> (&acc)[WPW], const int (&wid)[WPW],
+                                             long long ubase, int lane) {
+  constexpr int UB = Unit<C>::UB;
+  constexpr int NT = C / 8;
+  constexpr int NP = DwAcc<C>::NP;
 #pragma unroll
   for (int i = 0; i < WPW; i++) {
     if (wid[i] < 0) continue;

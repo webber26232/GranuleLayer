@@ -25,6 +25,9 @@ from . import ops
 SRC_DIR = Path(__file__).parent / "cuda"
 ARCH = os.environ.get("SPARSE_POOL_ARCH", "sm_86")
 NVCC_FLAGS = ["-O3", f"-arch={ARCH}", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC"]
+# extra flags, e.g. the SP_ABLATE_* attribution ablations in sparse_pool_bwd.cuh (benchmarks only:
+# ablated kernels compute wrong gradients); part of the build hash, so they get their own library
+NVCC_FLAGS += os.environ.get("SPARSE_POOL_NVCC_EXTRA", "").split()
 _lock = threading.Lock()
 
 
@@ -137,8 +140,26 @@ class BwdArgs(ctypes.Structure):
 _CUDA_POOLS = {"max": 0, "mean": 2, "logmeanexp": 3, "power_mean": 4, "softmax_weighted": 5}
 _CUDA_BWD_POOLS = ("mean", "logmeanexp", "power_mean", "softmax_weighted")
 # k_dw tiling per C: cfg -> (warps, work units per warp)
-DW_CFGS = {0: (8, 2), 1: (8, 4), 2: (16, 1)}
+DW_CFGS = {0: (8, 2), 1: (8, 4), 2: (16, 1), 3: (8, 2)}  # 3: indexed staging only, register cap for 2 CTAs/SM
 DW_CFG = {8: 1, 16: 1, 32: 1, 64: 1}  # measured at H=100M, B=8192 (8 warps x 4 work units)
+DW_INDEXED_STAGES = 2  # cp.async ring depth of the indexed k_dw (2 or 3)
+# default indexed k_dw tiling per operator at C = 64 (H = 1M-100M, B = 8192): the
+# register-capped 2-CTA/SM cfg 3 wins for Mean / LME; it spills more with the
+# softmax-weighted / power epilogues, which keep 8 warps x 4 work units
+DW_CFG_INDEXED = {"mean": 3, "logmeanexp": 3, "power_mean": 1, "softmax_weighted": 1}
+
+
+# Optional per-phase instrumentation (benchmarks/bench_kernels.py): when set to a
+# list, every phase boundary records a CUDA event on the current stream.  The
+# computation is identical with and without it.
+PHASE_EVENTS = None
+
+
+def _mark(name):
+    if PHASE_EVENTS is not None:
+        e = torch.cuda.Event(enable_timing=True)
+        e.record()
+        PHASE_EVENTS.append((name, e))
 
 
 def _ptr(t):
@@ -249,6 +270,7 @@ class CudaBackend:
         mt, nw = self._cfg(plan)
         BM = 16 * mt
         U = rt.units.U
+        _mark("fwd.begin")
         # workspace-checked number of physical splits (reuse the Triton policy)
         cplan = PhysicalPlan(phys_splits=plan.phys_splits, block_m=BM)
         PS = ops.choose_splits(B, rt.units, lv, cplan, track_ids, rt.workspace_budget)
@@ -259,6 +281,7 @@ class CudaBackend:
         else:
             xop = x.contiguous()
             sxf, sxb = xop.stride(1), xop.stride(0)
+        _mark("fwd.layout")
         f32 = dict(device=x.device, dtype=torch.float32)
         st_m = torch.empty((PS, B, U), **f32)
         st_s = torch.empty((PS, B, U), **f32) if lv.type != "max" else None
@@ -275,6 +298,7 @@ class CudaBackend:
                               n_tiles, PS, nw, ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
         if err != 0:
             raise RuntimeError(f"sp_fwd failed (code {err})")
+        _mark("fwd.kernel")
         st = {"m": st_m}
         if st_s is not None:
             st["s"] = st_s
@@ -284,6 +308,7 @@ class CudaBackend:
             st["id"] = st_id
         rt.last_info.update(phys_splits=PS, workspace_bytes=sum(t.numel() * t.element_size() for t in st.values()))
         out = ops.merge_finalize(st, lv, rt.units.counts)
+        _mark("fwd.finalize")
         return out
 
     # ---------------------------------------------------------------- backward
@@ -292,28 +317,48 @@ class CudaBackend:
         return (L.packed and lv.type in _CUDA_BWD_POOLS and lv.activation in ("identity", "relu")
                 and L.input_dim % 8 == 0 and L.input_dim * 16 * 6 <= 99 * 1024)
 
+    @staticmethod
+    def dw_staging(plan: PhysicalPlan, L, device, sxb) -> str:
+        """Indexed k_dw staging is implemented for packed C = 64 Mode B with a
+        feature-major input operand and validated on sm_86; everything else
+        uses the original full-slab kernel."""
+        if plan.cuda_dw_staging == "full":
+            return "full"
+        ok = (L.block == 64 and L.packed and L.shared_indices and sxb == 1
+              and torch.cuda.get_device_capability(device) == (8, 6))
+        return "indexed" if ok else "full"
+
     def backward(self, rt, x, w, b, g_pre, stats, dw_buf, db_buf):
         """Recompute backward: accumulates into dw_buf/db_buf (packed FP32),
         returns dX [B, D] FP32."""
         lv, L, plan = rt.level, rt.layout, rt.plan
         B, D = x.shape
         U = rt.units.U
+        _mark("bwd.begin")
         c1, c2, c3 = ops.dense_coefficients(lv, g_pre, stats.get("pre"), rt.units.counts, stats.get("L2"))
         c1, c2, c3 = c1.contiguous(), c2.contiguous(), c3.contiguous()
+        _mark("bwd.coef")
         if plan.input_layout == "feature_major" and B % 8 == 0:
             xop = x.t().contiguous()
             sxf, sxb = xop.stride(0), xop.stride(1)
         else:
             xop = x.contiguous()
             sxf, sxb = xop.stride(1), xop.stride(0)
+        _mark("bwd.layout")
         dx = torch.zeros((B, D), device=x.device, dtype=torch.float32)
+        _mark("bwd.dx_init")
         n_tiles = math.ceil(B / 16)
         gy = max(1, min(U, math.ceil(4096 / n_tiles)))  # ~4096 CTAs; one dX flush per CTA
         upc = math.ceil(U / gy)
         gy = math.ceil(U / upc)
+        staging = self.dw_staging(plan, L, x.device, sxb)
         cfg = plan.cuda_dw_cfg if plan.cuda_dw_cfg >= 0 else DW_CFG[L.block]
+        if plan.cuda_dw_cfg < 0 and staging == "indexed":
+            cfg = DW_CFG_INDEXED[lv.type]
         if plan.cuda_dw_cfg < 0 and L.block == 8 and lv.type != "mean":
             cfg = 0  # 8 x 4 spills with the exp/power epilogues at C = 8 (measured 1.6x slower)
+        if cfg == 3 and staging == "full":
+            cfg = 0  # same tiling; the register-capped variant exists only for indexed staging
         nw, wpw = DW_CFGS[cfg]
         ub = L.unit_blocks
         wu_per_cta = nw * wpw
@@ -328,12 +373,19 @@ class CudaBackend:
         split = int(plan.grad_precision == "split")
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
         pool = _CUDA_POOLS[lv.type]
-        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, 0, plan.cuda_dx_warps,
+        # k_dx is held at 1 CTA/SM by its 96 KiB slab: at 64 registers, 32 warps fill the register
+        # file and hide more latency (measured 9-14 % faster at C = 64, neutral at C = 8)
+        dx_warps = plan.cuda_dx_warps or (32 if L.block == 64 else 16)
+        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, 0, dx_warps,
                               n_tiles, gy, stream)
         if err != 0:
             raise RuntimeError(f"sp_bwd(dx) failed (code {err})")
-        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, 1, cfg, n_chunks, U, stream)
+        _mark("bwd.dx")
+        kind = 1 if staging == "full" else {2: 2, 3: 3}[DW_INDEXED_STAGES]
+        err = self.lib.sp_bwd(ctypes.byref(a), pool, lv.act_id, L.block, split, kind, cfg, n_chunks, U, stream)
         if err != 0:
             raise RuntimeError(f"sp_bwd(dw) failed (code {err})")
-        rt.last_info.update(bwd_dx_grid=(n_tiles, gy), bwd_dw_grid=(n_chunks, U), grad_precision=plan.grad_precision)
+        _mark("bwd.dw")
+        rt.last_info.update(bwd_dx_grid=(n_tiles, gy), bwd_dw_grid=(n_chunks, U), grad_precision=plan.grad_precision,
+                            dw_staging=staging, dw_cfg=cfg, dx_warps=dx_warps)
         return dx

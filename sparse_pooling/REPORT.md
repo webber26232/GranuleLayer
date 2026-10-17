@@ -3,7 +3,7 @@
 All numbers are medians of CUDA-event timings on this machine (RTX 3090, **24 GiB**, 82 SMs,
 370 W limit), from the full campaign re-run on 2026-10-16/17 after a hardware repair.  The
 first campaign ran on the same card while it exposed only 20 GiB at 744 GB/s under a 300 W cap
-(results at git tag `pre-24gib-rerun`; what changed is summarised in §8).  Run-to-run variation
+(results at git tag `pre-24gib-rerun`; what changed is summarised in §9).  Run-to-run variation
 at full scale reaches ~10–15 % (first campaign: the C = 8 LME backward measured 5.13 s and
 5.54 s in two runs whose only difference was a dW tiling that is 0.46 s *faster* when timed in
 isolation).  Full tables with IQRs, peak memory, kernel-launch counts and backends:
@@ -207,7 +207,7 @@ backward, and C = 8 is the expensive end (§4).
 * Weight reuse comes from L2: token tiles of one group run concurrently and walk the group's
   weights in lock-step (grid order token-tile-fastest).  We do not claim weights are read from
   DRAM once — that was not measured (no counters).  Consistent with this, Max forward barely
-  moved when DRAM bandwidth rose 10 % with the repair (§8).
+  moved when DRAM bandwidth rose 10 % with the repair (§9).
 * Exp-based operators are MUFU-bound; C barely matters for them (LME 0.72 s at C = 8 vs
   0.59 s at C = 64), while Max (without id tracking) goes from 0.42 to 0.26 s.  Tracking winner
   ids costs 12 % (C = 8) to 47 % (C = 64) of the Max forward — the compare-and-select per element
@@ -239,7 +239,16 @@ backward, and C = 8 is the expensive end (§4).
 * Sparse/lazy optimizer updates for Max/Top-K are deliberately not offered: they change AdamW
   semantics (moment decay and weight decay of non-selected parameters).
 
-## 8. Re-measurement after the hardware repair
+## 8. Backward kernel optimization (dX / dW)
+
+Per-kernel timing, a source-derived traffic model and ablations are in
+[`results/MEMORY_TRAFFIC_OPTIMIZATION.md`](results/MEMORY_TRAFFIC_OPTIMIZATION.md).  Two
+changes are now the C = 64 defaults: indexed, warp-local input staging in `k_dw` (dW 1096 →
+775 ms, bitwise-identical gradients) and 32-warp `k_dx` CTAs (939 → 806 ms).  Full step at
+H = 100M, C = 64, Mean(ReLU), split: 2357 → 1904 ms (1.24×, interleaved A/B).  The tables in
+§2 above predate these changes.
+
+## 9. Re-measurement after the hardware repair
 
 The first campaign ran while the card exposed 20 GiB at 744 GB/s under a 300 W cap; the card
 now exposes 24 GiB (23.7 GiB to PyTorch) at 819 GB/s under its default 370 W limit.

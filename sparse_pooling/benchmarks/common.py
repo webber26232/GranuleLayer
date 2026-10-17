@@ -69,6 +69,7 @@ def save(name: str, payload: Dict):
     RESULTS.mkdir(parents=True, exist_ok=True)
     payload = dict(payload, gpu=gpu_info(), timestamp=time.strftime("%Y-%m-%d %H:%M:%S"))
     path = RESULTS / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=1, default=str))
     return path
 

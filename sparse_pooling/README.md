@@ -163,14 +163,21 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
     dZ from compact coefficients, `dA = dZ Wᵀ` on tensor cores (Wᵀ via `movmatrix`), scatter
     into a `[1024 × 16]` FP32 slab in shared memory, one global flush per CTA.  GA102 has no
     native FP32 shared-memory atomics (`atomicAdd` compiles to a CAS loop); tokens t and t+8
-    are interleaved so each lane updates its 4 values with two 64-bit CAS.
+    are interleaved so each lane updates its 4 values with two 64-bit CAS.  The 96 KiB of
+    shared memory hold it at 1 CTA/SM; at C = 64 it runs 32 warps per CTA (64 registers fill
+    the register file), 9–14 % faster than 16 (`PhysicalPlan.cuda_dx_warps`).
   * `k_dw` weight-stationary: CTA = chunk of work units of one unit, loops over all tokens
     with a double-buffered slab.  Recomputes `zᵀ = W X_gᵀ` (the packed W fragment is directly
     the A operand, the forward's `ldmatrix.trans` registers the B operand), so `dZᵀ` comes
     out in exactly the A layout of `dWᵀ = dZᵀ X_g` — no transposes.  At C = 8 the structurally
     empty neuron rows 8–15 carry the lo half of the split dZ, giving hi+lo precision for the
     price of one MMA.  dW/db live in registers for the whole kernel and are written once
-    (exclusive ownership: no atomics, deterministic).
+    (exclusive ownership: no atomics, deterministic).  At C = 64 (packed, feature-major X,
+    sm_86) the default `k_dw_idx` stages only the 8 index rows of each work unit into a
+    per-warp `cp.async` ring instead of all 1024 features (192 vs 768 GiB of logical staging
+    at H = 100M), with warp-level instead of CTA-level synchronisation; results are bitwise
+    identical to `k_dw` and 1.4× faster (`PhysicalPlan.cuda_dw_staging = "full"` restores
+    the original kernel).  Details: `results/MEMORY_TRAFFIC_OPTIMIZATION.md`.
 * dZ enters the tensor-core products as hi + lo BF16 pair (`grad_precision="split"`,
   ~16-bit mantissa, gradients within ~3e-6 of FP32 autograd) or a single BF16
   (`"bf16"`, the usual mixed-precision semantics, ~1.5e-3).  Accumulation is FP32 always.
