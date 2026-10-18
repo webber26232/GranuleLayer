@@ -48,11 +48,17 @@ def main():
     ap.add_argument("--models", default="mse,square,compose")
     ap.add_argument("--opt-modes", default="det,sr,fp32")
     ap.add_argument("--precisions", default="split")
+    ap.add_argument("--candidates", default="", help="override the candidate scatters of every C = 8 graph")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     results = []
     for gname in args.graphs.split(","):
         graph, tile, cands, steps = GRAPHS[gname]
+        if args.candidates and tile is not None:
+            cands = tuple(c for c in args.candidates.split(",")
+                          if not (c == "feature_owner" and graph["S"] > 32)
+                          and not (c != "swizzle4" and not c.startswith("swizzle4") and tile[2] != 1)
+                          and not (c.startswith("swizzle4") and tile[2] == 1 and c != "swizzle4"))
         for prec in args.precisions.split(","):
             for model in args.models.split(","):
                 for om in args.opt_modes.split(","):
