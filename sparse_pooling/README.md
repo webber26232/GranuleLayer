@@ -118,7 +118,9 @@ pooling unit, optional split).  The token tile of X is staged as a swizzled **fe
 slab in shared memory** (`cp.async`), so the 8-feature gather is one `ldmatrix.x4.trans` per
 block for 32 tokens.  `mma.sync.m16n8k8` BF16→FP32 computes `Z = X_g W + b` with the bias
 entering as the accumulator input; a templated epilogue folds the 4 accumulator values per
-lane into the per-row pooling state (registers).  Quad shuffles + one shared-memory pass
+lane into the per-row pooling state (registers).  For Mean(ReLU) at C = 64 the epilogue takes the
+MMAs of 4 n8 tiles per chunk instead of 2 (`PhysicalPlan.cuda_fwd_mean_epilogue`, default
+`"auto"`; bitwise identical, forward −3 %; `results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md`).  Quad shuffles + one shared-memory pass
 merge the per-lane states; one compact state per (token, unit, split) is written.  Weights are
 prefetched one or two work units ahead.  Top-K uses a separate kernel (below).
 

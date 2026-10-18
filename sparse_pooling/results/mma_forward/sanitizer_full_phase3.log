@@ -1,0 +1,171 @@
+=== compute-sanitizer --tool memcheck
+      1 ========= ERROR SUMMARY: 0 errors
+      1 ok 16 power_mean(p=3)[relu] minimal_stats cuda cuda
+      1 ok 16 topk_mean(k=8) save_winners cuda triton
+      1 ok 32 softmax_weighted(beta=2) minimal_stats cuda cuda
+      1 ok 64 logmeanexp(tau=0.5) minimal_stats cuda cuda
+      1 ok 8 logmeanexp(tau=0.5) minimal_stats triton triton
+      1 ok 8 mean[relu] minimal_stats cuda cuda
+      1 ok 8 relu(max) -> mean[relu] save_winners cuda triton
+      1 ok 8 relu(max) minimal_stats cuda triton
+      1 ok 8 relu(max) save_winners cuda triton
+      1 ok bwd C=8 fast fast
+      1 ok bwd C=8 mask mask
+      1 ok bwd logmeanexp(tau=0.5) bf16 dx fast 16 dw fast B 40 nonfinite
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 16 dw fast B 40 
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 32 dw fast B 24 nonfinite
+      1 ok bwd mean[relu] bf16 dx fast 16 dw fast B 24 
+      1 ok bwd mean[relu] bf16 dx mask 32 dw mask B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw mask B 40 
+      1 ok bwd mean[relu] split dx mask 32 dw fast B 40 
+      1 ok bwd mean split dx mask 16 dw mask B 8 
+      1 ok bwd power_mean(p=2)[relu] split dx fast 16 dw fast B 40 
+      1 ok fwd mean C 64 block_m 32 epilogue chunk4 B 8 H 3001
+      1 ok fwd mean[relu] C 32 block_m 16 epilogue chunk4 B 24 H 9001
+      1 ok fwd mean[relu] C 32 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 16 epilogue chunk4 B 33 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue baseline B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 136 H 70001
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok k_dw full cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 3 split B 24
+      1 ok k_dw indexed cfg 2 stages 2 split B 8
+      1 ok k_dw indexed cfg 3 stages 2 split B 40
+      1 ok k_dw indexed cfg 3 stages 3 bf16 B 40
+      1 ok None mean[relu] minimal_stats triton triton
+=== compute-sanitizer --tool racecheck
+      1 ========= Error: Race reported between Write access at 0x4040 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4070 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4080 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40a0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40b0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40c0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40d0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40e0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x40f0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4100 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4110 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4120 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4130 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4150 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4190 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x41a0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x41b0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x41c0 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4200 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ========= Error: Race reported between Write access at 0x4210 in /home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/triton_fused.py:441:bwd_dense_kernel
+      1 ok 16 power_mean(p=3)[relu] minimal_stats cuda cuda
+      1 ok 16 topk_mean(k=8) save_winners cuda triton
+      1 ok 32 softmax_weighted(beta=2) minimal_stats cuda cuda
+      1 ok 64 logmeanexp(tau=0.5) minimal_stats cuda cuda
+      1 ok 8 logmeanexp(tau=0.5) minimal_stats triton triton
+      1 ok 8 mean[relu] minimal_stats cuda cuda
+      1 ok 8 relu(max) -> mean[relu] save_winners cuda triton
+      1 ok 8 relu(max) minimal_stats cuda triton
+      1 ok 8 relu(max) save_winners cuda triton
+      1 ok bwd C=8 fast fast
+      1 ok bwd C=8 mask mask
+      1 ok bwd logmeanexp(tau=0.5) bf16 dx fast 16 dw fast B 40 nonfinite
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 16 dw fast B 40 
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 32 dw fast B 24 nonfinite
+      1 ok bwd mean[relu] bf16 dx fast 16 dw fast B 24 
+      1 ok bwd mean[relu] bf16 dx mask 32 dw mask B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw mask B 40 
+      1 ok bwd mean[relu] split dx mask 32 dw fast B 40 
+      1 ok bwd mean split dx mask 16 dw mask B 8 
+      1 ok bwd power_mean(p=2)[relu] split dx fast 16 dw fast B 40 
+      1 ok fwd mean C 64 block_m 32 epilogue chunk4 B 8 H 3001
+      1 ok fwd mean[relu] C 32 block_m 16 epilogue chunk4 B 24 H 9001
+      1 ok fwd mean[relu] C 32 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 16 epilogue chunk4 B 33 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue baseline B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 136 H 70001
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok k_dw full cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 3 split B 24
+      1 ok k_dw indexed cfg 2 stages 2 split B 8
+      1 ok k_dw indexed cfg 3 stages 2 split B 40
+      1 ok k_dw indexed cfg 3 stages 3 bf16 B 40
+      1 ok None mean[relu] minimal_stats triton triton
+=== compute-sanitizer --tool initcheck
+      1 ========= ERROR SUMMARY: 0 errors
+      1 ok 16 power_mean(p=3)[relu] minimal_stats cuda cuda
+      1 ok 16 topk_mean(k=8) save_winners cuda triton
+      1 ok 32 softmax_weighted(beta=2) minimal_stats cuda cuda
+      1 ok 64 logmeanexp(tau=0.5) minimal_stats cuda cuda
+      1 ok 8 logmeanexp(tau=0.5) minimal_stats triton triton
+      1 ok 8 mean[relu] minimal_stats cuda cuda
+      1 ok 8 relu(max) -> mean[relu] save_winners cuda triton
+      1 ok 8 relu(max) minimal_stats cuda triton
+      1 ok 8 relu(max) save_winners cuda triton
+      1 ok bwd C=8 fast fast
+      1 ok bwd C=8 mask mask
+      1 ok bwd logmeanexp(tau=0.5) bf16 dx fast 16 dw fast B 40 nonfinite
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 16 dw fast B 40 
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 32 dw fast B 24 nonfinite
+      1 ok bwd mean[relu] bf16 dx fast 16 dw fast B 24 
+      1 ok bwd mean[relu] bf16 dx mask 32 dw mask B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw mask B 40 
+      1 ok bwd mean[relu] split dx mask 32 dw fast B 40 
+      1 ok bwd mean split dx mask 16 dw mask B 8 
+      1 ok bwd power_mean(p=2)[relu] split dx fast 16 dw fast B 40 
+      1 ok fwd mean C 64 block_m 32 epilogue chunk4 B 8 H 3001
+      1 ok fwd mean[relu] C 32 block_m 16 epilogue chunk4 B 24 H 9001
+      1 ok fwd mean[relu] C 32 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 16 epilogue chunk4 B 33 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue baseline B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 136 H 70001
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok k_dw full cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 3 split B 24
+      1 ok k_dw indexed cfg 2 stages 2 split B 8
+      1 ok k_dw indexed cfg 3 stages 2 split B 40
+      1 ok k_dw indexed cfg 3 stages 3 bf16 B 40
+      1 ok None mean[relu] minimal_stats triton triton
+=== compute-sanitizer --tool synccheck
+      1 ========= ERROR SUMMARY: 0 errors
+      1 ok 16 power_mean(p=3)[relu] minimal_stats cuda cuda
+      1 ok 16 topk_mean(k=8) save_winners cuda triton
+      1 ok 32 softmax_weighted(beta=2) minimal_stats cuda cuda
+      1 ok 64 logmeanexp(tau=0.5) minimal_stats cuda cuda
+      1 ok 8 logmeanexp(tau=0.5) minimal_stats triton triton
+      1 ok 8 mean[relu] minimal_stats cuda cuda
+      1 ok 8 relu(max) -> mean[relu] save_winners cuda triton
+      1 ok 8 relu(max) minimal_stats cuda triton
+      1 ok 8 relu(max) save_winners cuda triton
+      1 ok bwd C=8 fast fast
+      1 ok bwd C=8 mask mask
+      1 ok bwd logmeanexp(tau=0.5) bf16 dx fast 16 dw fast B 40 nonfinite
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 16 dw fast B 40 
+      1 ok bwd logmeanexp(tau=0.5) split dx fast 32 dw fast B 24 nonfinite
+      1 ok bwd mean[relu] bf16 dx fast 16 dw fast B 24 
+      1 ok bwd mean[relu] bf16 dx mask 32 dw mask B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 
+      1 ok bwd mean[relu] split dx mask 16 dw fast B 40 nonfinite
+      1 ok bwd mean[relu] split dx mask 16 dw mask B 40 
+      1 ok bwd mean[relu] split dx mask 32 dw fast B 40 
+      1 ok bwd mean split dx mask 16 dw mask B 8 
+      1 ok bwd power_mean(p=2)[relu] split dx fast 16 dw fast B 40 
+      1 ok fwd mean C 64 block_m 32 epilogue chunk4 B 8 H 3001
+      1 ok fwd mean[relu] C 32 block_m 16 epilogue chunk4 B 24 H 9001
+      1 ok fwd mean[relu] C 32 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 16 epilogue chunk4 B 33 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue baseline B 40 H 20011
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 136 H 70001
+      1 ok fwd mean[relu] C 64 block_m 32 epilogue chunk4 B 40 H 20011
+      1 ok k_dw full cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 2 split B 40
+      1 ok k_dw indexed cfg 1 stages 3 split B 24
+      1 ok k_dw indexed cfg 2 stages 2 split B 8
+      1 ok k_dw indexed cfg 3 stages 2 split B 40
+      1 ok k_dw indexed cfg 3 stages 3 bf16 B 40
+      1 ok None mean[relu] minimal_stats triton triton

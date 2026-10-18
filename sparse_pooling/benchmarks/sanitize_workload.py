@@ -21,7 +21,8 @@ CASES = [
     (8, {"levels": [{"type": "max", "neurons_per_shard": 512, "transform": "affine"}, {"type": "mean"}]},
      "save_winners", "cuda"),
 ]
-for C, pooling, pol, backend in CASES:
+PHASE3_ONLY = os.environ.get("SAN_ONLY") == "phase3"  # native phase-3 forward cases only
+for C, pooling, pol, backend in ([] if PHASE3_ONLY else CASES):
     lay = SparsePoolingLayer(1024 if backend == "cuda" else 64, 20011, 16, shared_neurons=C, pooling=pooling,
                              checkpoint_policy=pol, device="cuda", bias_std=0.1, backend=backend,
                              plan=PhysicalPlan(block_m=32))
@@ -34,7 +35,7 @@ for C, pooling, pol, backend in CASES:
 # indexed / full-slab k_dw variants at C = 64 (partial blocks, ragged token tail)
 from sparse_pooling.kernels import cuda_ops  # noqa: E402
 
-for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed", 3, 2, "split", 40),
+for staging, cfg, stages, prec, B in [] if PHASE3_ONLY else [("indexed", 1, 2, "split", 40), ("indexed", 3, 2, "split", 40),
                                       ("indexed", 1, 3, "split", 24), ("indexed", 3, 3, "bf16", 40),
                                       ("indexed", 2, 2, "split", 8), ("full", 1, 2, "split", 40)]:
     cuda_ops.DW_INDEXED_STAGES = stages
@@ -49,7 +50,7 @@ for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed"
 
 # backward-compute variants (epilogues, fallbacks, dX warp dispatch)
 cuda_ops.DW_INDEXED_STAGES = 2
-for pooling, dxe, dwe, prec, B, H, bad in [
+for pooling, dxe, dwe, prec, B, H, bad in [] if PHASE3_ONLY else [
         ("mean", "mask", "mask", "split", 40, 20011, None), ("mean", "fast", "fast", "bf16", 24, 20011, None),
         ("mean", "auto", "auto", "split", 40, 20011, float("nan")),  # non-finite: in-kernel / separate-launch fallback
         ({"type": "mean", "activation": "identity"}, "mask", "mask", "split", 8, 20011, None),
@@ -73,10 +74,25 @@ for pooling, dxe, dwe, prec, B, H, bad in [
     i = lay.last_info
     print("ok bwd", lay.cfg.describe(), prec, "dx", i.get("dx_epilogue"), i.get("dx_warps"), "dw", i.get("dw_epilogue"),
           "B", B, "nonfinite" if bad is not None else "", flush=True)
-for C, dxe in ((8, "mask"), (8, "fast")):  # C = 8: only the dX epilogue applies
+for C, dxe in () if PHASE3_ONLY else ((8, "mask"), (8, "fast")):  # C = 8: only the dX epilogue applies
     lay = SparsePoolingLayer(1024, 20011, 16, shared_neurons=C, pooling="mean", device="cuda", bias_std=0.1,
                              backend="cuda", plan=PhysicalPlan(block_m=32, cuda_dx_epilogue=dxe))
     x = torch.randn(40, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     lay(x).float().square().sum().backward()
     torch.cuda.synchronize()
     print("ok bwd C=8", dxe, lay.last_info.get("dx_epilogue"), flush=True)
+
+# phase 3: chunk-4 Mean forward epilogue (C = 32 / 64, both token tiles, ragged neuron
+# groups and token tails) and its baseline control
+for pooling, C, bm, fe, B, H in [
+        ("mean", 64, 32, "chunk4", 40, 20011), ("mean", 64, 16, "chunk4", 33, 20011),
+        ({"type": "mean", "activation": "identity"}, 64, 32, "chunk4", 8, 3001),
+        ("mean", 32, 32, "chunk4", 40, 20011), ("mean", 32, 16, "chunk4", 24, 9001),
+        ("mean", 64, 32, "baseline", 40, 20011), ("mean", 64, 32, "auto", 136, 70001)]:
+    lay = SparsePoolingLayer(1024, H, 16, shared_neurons=C, pooling=pooling, device="cuda", bias_std=0.1,
+                             backend="cuda", plan=PhysicalPlan(block_m=bm, cuda_fwd_mean_epilogue=fe))
+    x = torch.randn(B, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    lay(x).float().square().sum().backward()
+    torch.cuda.synchronize()
+    print("ok fwd", lay.cfg.describe(), "C", C, "block_m", bm, "epilogue", lay.last_info.get("fwd_mean_epilogue"),
+          "B", B, "H", H, flush=True)

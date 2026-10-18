@@ -250,6 +250,11 @@ H = 100M, C = 64, Mean(ReLU), split: 2357 → 1904 ms (1.24×, interleaved A/B).
 exact pooling-specialised dZ epilogues (per-token BF16 hi/lo + bit masks for Mean), measured
 per-operator defaults and a work-unit-based dX warp dispatch take the same step from 1964 to
 1814 ms in a same-session A/B against `dw-indexed-staging` (1.08×; dX 1.13×, dW 1.07×).
+Phase 3 ([`results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md`](results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md)):
+the dW C-operand (bias fragment) register-layout hypothesis was tested and disproven for exact
+variants (ptxas re-derives the same allocation; whole bias-C cost bounded at ≈ 20 ms); a chunk-4
+Mean(ReLU) forward epilogue (bitwise identical) saves 9.0 ms of forward and 10.0 ms of step
+time (1763.6 → 1753.5 ms, 10 paired rounds against `backward-compute-optimization`).
 
 ## 9. Re-measurement after the hardware repair
 

@@ -1,0 +1,151 @@
+=== k_dw_idx<2,1,64,8,2,2,1,0,2,1> (Mean ReLU, C=64, split, fast dZ): first row tile (q = 0) of one 64-neuron block, one 16-token tile
+    static SASS (one copy of the code), not a dynamic count
+  01840  SHF.R.U32.HI          R6, RZ, 0x2, R125.reuse
+  01850  IMAD.SHL.U32          R10, R125, 0x10, RZ
+  01860  SHF.R.U32.HI          R7, RZ, 0x3, R125
+  01870  WARPSYNC              0xffffffff
+  01880  IMAD.MOV.U32          R53, RZ, RZ, R52                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19b0)
+  01890  LOP3.LUT              R7, R6, R7, RZ, 0x3c, !PT
+  018a0  IMAD.SHL.U32          R6, R4, 0x100, RZ
+  018b0  IMAD.MOV.U32          R55, RZ, RZ, R54                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19b0)
+  018c0  IMAD.SHL.U32          R7, R7, 0x8, RZ
+  018d0  LOP3.LUT              R6, R6, 0x100, RZ, 0xc0, !PT
+  018e0  IMAD.MOV.U32          R96, RZ, RZ, R52                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19c0)
+  018f0  IMAD.MOV.U32          R97, RZ, RZ, R52                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19c0)
+  01900  LOP3.LUT              R7, R7, 0x8, RZ, 0xc0, !PT
+  01910  IMAD.MOV.U32          R98, RZ, RZ, R54                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19c0)
+  01920  LOP3.LUT              R6, R6, 0x7ffffe00, R10, 0xf8, !PT
+  01930  IMAD.MOV.U32          R99, RZ, RZ, R54                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x19c0)
+  01940  LOP3.LUT              R7, R7, 0x70, R10, 0xf8, !PT
+  01950  IMAD.MOV.U32          R57, RZ, RZ, R56                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1a10)
+  01960  IMAD.MOV.U32          R59, RZ, RZ, R58                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1a10)
+  01970  IMAD.IADD             R6, R6, 0x1, R7
+  01980  IMAD.SHL.U32          R61, R6, 0x2, RZ
+  01990  LDSM.16.MT88.2        R10, [R61]                                    ; ldmatrix: X operand from the staged slab
+  019a0  LDSM.16.M88.2         R6, [R61]                                     ; ldmatrix: X operand from the staged slab
+  019b0  HMMA.1688.F32.BF16    R92, R12.reuse, R10, R52                      ; projection MMA z = W.x + C(bias)
+  019c0  HMMA.1688.F32.BF16    R96, R12, R11, R96                            ; projection MMA z = W.x + C(bias)
+  019d0  FSETP.GT.FTZ.AND      P6, PT, R92, RZ, PT                           ; ReLU: z > 0
+  019e0  FSETP.GT.FTZ.AND      P5, PT, R93, RZ, PT                           ; ReLU: z > 0
+  019f0  FSETP.GT.FTZ.AND      P4, PT, R94, RZ, PT                           ; ReLU: z > 0
+  01a00  FSETP.GT.FTZ.AND      P3, PT, R95, RZ, PT                           ; ReLU: z > 0
+  01a10  HMMA.1688.F32.BF16    R92, R14, R10, R56                            ; projection MMA z = W.x + C(bias)
+  01a20  FSEL                  R65, R2, RZ, P6                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01a30  FSETP.GT.FTZ.AND      P2, PT, R96, RZ, PT                           ; ReLU: z > 0
+  01a40  FSETP.GT.FTZ.AND      P1, PT, R97, RZ, PT                           ; ReLU: z > 0
+  01a50  FSETP.GT.FTZ.AND      P0, PT, R98, RZ, PT                           ; ReLU: z > 0
+  01a60  FSETP.GT.FTZ.AND      P6, PT, R99, RZ, PT                           ; ReLU: z > 0
+  01a70  FSEL                  R73, R0, RZ, P5                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01a80  FSEL                  R69, R2, RZ, P4                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01a90  FSEL                  R71, R0, RZ, P3                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01aa0  FSEL                  R63, R3, RZ, P2                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01ab0  FSEL                  R61, R5, RZ, P1                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01ac0  FSEL                  R55, R3, RZ, P0                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01ad0  FSEL                  R53, R5, RZ, P6                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01ae0  F2FP.BF16.PACK_AB     R57, R73, R65                                 ; pack 2 x f32 -> bf16x2 (dZ hi, or lo residual)
+  01af0  F2FP.BF16.PACK_AB     R77, R71, R69                                 ; pack 2 x f32 -> bf16x2 (dZ hi, or lo residual)
+  01b00  F2FP.BF16.PACK_AB     R67, R61, R63                                 ; pack 2 x f32 -> bf16x2 (dZ hi, or lo residual)
+  01b10  IMAD.MOV.U32          R96, RZ, RZ, R57                              ; MOV -> hmma_a (HMMA.16816.F32.BF16 @0x1bd0)
+  01b20  F2FP.BF16.PACK_AB     R75, R53, R55                                 ; pack 2 x f32 -> bf16x2 (dZ hi, or lo residual)
+  01b30  IMAD.MOV.U32          R97, RZ, RZ, R77                              ; MOV -> hmma_a (HMMA.16816.F32.BF16 @0x1bd0)
+  01b40  FSETP.GT.FTZ.AND      P6, PT, R92, RZ, PT                           ; ReLU: z > 0
+  01b50  IMAD.MOV.U32          R98, RZ, RZ, R67                              ; MOV -> hmma_a (HMMA.16816.F32.BF16 @0x1bd0)
+  01b60  PRMT                  R92, RZ, 0x5410, R57                          ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01b70  IMAD.MOV.U32          R99, RZ, RZ, R75                              ; MOV -> hmma_a (HMMA.16816.F32.BF16 @0x1bd0)
+  01b80  PRMT                  R57, RZ, 0x7610, R57                          ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01b90  FSETP.GT.FTZ.AND      P5, PT, R93, RZ, PT                           ; ReLU: z > 0
+  01ba0  FADD.FTZ              R92, R65, -R92                                ; lo residual dz - hi  /  db accumulation
+  01bb0  FSETP.GT.FTZ.AND      P4, PT, R94, RZ, PT                           ; ReLU: z > 0
+  01bc0  FADD.FTZ              R57, R73, -R57                                ; lo residual dz - hi  /  db accumulation
+  01bd0  HMMA.16816.F32.BF16   R48, R96, R6, R48                             ; dW gradient MMA (dZ hi or lo) x X
+  01be0  FSETP.GT.FTZ.AND      P3, PT, R95, RZ, PT                           ; ReLU: z > 0
+  01bf0  FADD.FTZ              R65, R65, R73                                 ; lo residual dz - hi  /  db accumulation
+  01c00  PRMT                  R106, RZ, 0x5410, R67                         ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01c10  PRMT                  R67, RZ, 0x7610, R67                          ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01c20  FADD.FTZ              R102, R102, R65                               ; lo residual dz - hi  /  db accumulation
+  01c30  F2FP.BF16.PACK_AB     R96, R57, R92                                 ; pack 2 x f32 -> bf16x2 (dZ hi, or lo residual)
+  01c40  IMAD.MOV.U32          R57, RZ, RZ, R56                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1cb0)
+  01c50  PRMT                  R98, RZ, 0x5410, R77.reuse                    ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01c60  FADD.FTZ              R106, R63, -R106                              ; lo residual dz - hi  /  db accumulation
+  01c70  PRMT                  R77, RZ, 0x7610, R77                          ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01c80  FADD.FTZ              R67, R61, -R67                                ; lo residual dz - hi  /  db accumulation
+  01c90  PRMT                  R100, RZ, 0x5410, R75                         ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01ca0  FADD.FTZ              R97, R69, -R98                                ; lo residual dz - hi  /  db accumulation
+  01cb0  HMMA.1688.F32.BF16    R92, R14, R11, R56                            ; projection MMA z = W.x + C(bias)
+  01cc0  FADD.FTZ              R98, R71, -R77                                ; lo residual dz - hi  /  db accumulation
+  01cd0  PRMT                  R75, RZ, 0x7610, R75                          ; bf16 -> f32 (hi back to f32 for the lo residual)
+  01ce0  FADD.FTZ              R99, R55, -R100                               ; lo residual dz - hi  /  db accumulation
+  01cf0  FSEL                  R83, R0, RZ, P5                               ; dZ = z > 0 ? c1 : 0 (fast epilogue)
+  01d00  FADD.FTZ              R59, R69, R71                                 ; lo residual dz - hi  /  db accumulation
+
+=== fwd_mma_kernel<2,1,64,2,16,0,0,1> baseline (FE = 0): first two n8 tiles of one unit, 32 tokens
+    static SASS (one copy of the code), not a dynamic count
+  011d0  WARPSYNC              0xffffffff
+  011e0  LDSM.16.MT88.4        R40, [R40]                                    ; ldmatrix: X operand from the staged slab
+  011f0  SHF.L.U32             R16, R4, 0x10, RZ                             ; bias bf16 -> f32 unpack
+  01200  LOP3.LUT              R17, R4, 0xffff0000, RZ, 0xc0, !PT            ; bias bf16 -> f32 unpack
+  01210  MOV                   R50, R16                                      ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x12a0)
+  01220  IMAD.MOV.U32          R18, RZ, RZ, R16.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1280)
+  01230  ISETP.GE.AND          P0, PT, R60, R3, PT
+  01240  IMAD.MOV.U32          R19, RZ, RZ, R17.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1280)
+  01250  IMAD.MOV.U32          R49, RZ, RZ, R17.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x12a0)
+  01260  IMAD.MOV.U32          R51, RZ, RZ, R17                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x12a0)
+  01270  IMAD.MOV.U32          R48, RZ, RZ, R16                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x12a0)
+  01280  HMMA.1688.F32.BF16    R12, R40, R8, R16                             ; projection MMA z = X.W + C(bias)
+  01290  IMAD.U32              R16, R5, 0x10000, RZ                          ; bias bf16 -> f32 unpack
+  012a0  HMMA.1688.F32.BF16    R48, R42, R8, R48                             ; projection MMA z = X.W + C(bias)
+  012b0  IMAD.MOV.U32          R18, RZ, RZ, R16                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13d0)
+  012c0  FMNMX.FTZ             R17, RZ, R14, !PT                             ; relu(z) = max(z, 0)
+  012d0  IMAD.MOV.U32          R14, RZ, RZ, R16.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13f0)
+  012e0  FMNMX.FTZ             R8, RZ, R12, !PT                              ; relu(z) = max(z, 0)
+  012f0  IMAD.MOV.U32          R12, RZ, RZ, R16                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13f0)
+  01300  FMNMX.FTZ             R13, RZ, R13, !PT                             ; relu(z) = max(z, 0)
+  01310  FADD.FTZ              R54, R17, R54                                 ; pooling sum s += relu(z)
+  01320  LOP3.LUT              R17, R5, 0xffff0000, RZ, 0xc0, !PT            ; bias bf16 -> f32 unpack
+  01330  FADD.FTZ              R8, R8, R53                                   ; pooling sum s += relu(z)
+  01340  FMNMX.FTZ             R15, RZ, R15, !PT                             ; relu(z) = max(z, 0)
+  01350  FMNMX.FTZ             R4, RZ, R48, !PT                              ; relu(z) = max(z, 0)
+  01360  IMAD.MOV.U32          R19, RZ, RZ, R17                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13d0)
+  01370  FADD.FTZ              R8, R8, R13                                   ; pooling sum s += relu(z)
+  01380  FADD.FTZ              R5, R54, R15                                  ; pooling sum s += relu(z)
+  01390  MOV                   R13, R17                                      ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13f0)
+  013a0  IMAD.MOV.U32          R15, RZ, RZ, R17                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x13f0)
+  013b0  FADD.FTZ              R4, R4, R55                                   ; pooling sum s += relu(z)
+  013c0  FMNMX.FTZ             R53, RZ, R50, !PT                             ; relu(z) = max(z, 0)
+  013d0  HMMA.1688.F32.BF16    R16, R40, R9, R16                             ; projection MMA z = X.W + C(bias)
+  013e0  IMAD.U32              R48, R6, 0x10000, RZ                          ; bias bf16 -> f32 unpack
+  013f0  HMMA.1688.F32.BF16    R12, R42, R9, R12                             ; projection MMA z = X.W + C(bias)
+  01400  FADD.FTZ              R53, R53, R52                                 ; pooling sum s += relu(z)
+  01410  FMNMX.FTZ             R9, RZ, R49, !PT                              ; relu(z) = max(z, 0)
+  01420  IMAD.MOV.U32          R50, RZ, RZ, R48.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1590)
+  01430  MOV                   R54, R48                                      ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x15d0)
+  01440  IMAD.MOV.U32          R52, RZ, RZ, R48                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x15d0)
+  01450  FADD.FTZ              R9, R4, R9                                    ; pooling sum s += relu(z)
+  01460  FMNMX.FTZ             R4, RZ, R51, !PT                              ; relu(z) = max(z, 0)
+  01470  FMNMX.FTZ             R49, RZ, R16, !PT                             ; relu(z) = max(z, 0)
+  01480  FADD.FTZ              R4, R53, R4                                   ; pooling sum s += relu(z)
+  01490  FMNMX.FTZ             R18, RZ, R18, !PT                             ; relu(z) = max(z, 0)
+  014a0  IMAD.U32              R16, R7, 0x10000, RZ                          ; bias bf16 -> f32 unpack
+  014b0  FMNMX.FTZ             R12, RZ, R12, !PT                             ; relu(z) = max(z, 0)
+  014c0  FADD.FTZ              R8, R8, R49                                   ; pooling sum s += relu(z)
+  014d0  LOP3.LUT              R49, R6, 0xffff0000, RZ, 0xc0, !PT            ; bias bf16 -> f32 unpack
+  014e0  FADD.FTZ              R5, R5, R18                                   ; pooling sum s += relu(z)
+  014f0  FMNMX.FTZ             R61, RZ, R14, !PT                             ; relu(z) = max(z, 0)
+  01500  FADD.FTZ              R12, R9, R12                                  ; pooling sum s += relu(z)
+  01510  FMNMX.FTZ             R9, RZ, R17, !PT                              ; relu(z) = max(z, 0)
+  01520  IMAD.MOV.U32          R51, RZ, RZ, R49.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1590)
+  01530  LOP3.LUT              R17, R7, 0xffff0000, RZ, 0xc0, !PT            ; bias bf16 -> f32 unpack
+  01540  IMAD.MOV.U32          R53, RZ, RZ, R49.reuse                        ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x15d0)
+  01550  FMNMX.FTZ             R6, RZ, R19, !PT                              ; relu(z) = max(z, 0)
+  01560  IMAD.MOV.U32          R55, RZ, RZ, R49                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x15d0)
+  01570  FMNMX.FTZ             R15, RZ, R15, !PT                             ; relu(z) = max(z, 0)
+  01580  FADD.FTZ              R4, R4, R61                                   ; pooling sum s += relu(z)
+  01590  HMMA.1688.F32.BF16    R48, R40, R10.reuse, R48                      ; projection MMA z = X.W + C(bias)
+  015a0  IMAD.MOV.U32          R18, RZ, RZ, R16                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1650)
+  015b0  FADD.FTZ              R9, R8, R9                                    ; pooling sum s += relu(z)
+  015c0  IMAD.MOV.U32          R19, RZ, RZ, R17                              ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1650)
+  015d0  HMMA.1688.F32.BF16    R52, R42, R10, R52                            ; projection MMA z = X.W + C(bias)
+  015e0  FADD.FTZ              R8, R5, R6                                    ; pooling sum s += relu(z)
+  015f0  FADD.FTZ              R10, R4, R15                                  ; pooling sum s += relu(z)
+  01600  IMAD.MOV.U32          R4, RZ, RZ, R16                               ; MOV -> hmma_c (HMMA.1688.F32.BF16 @0x1680)
+
