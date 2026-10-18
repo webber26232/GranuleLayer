@@ -54,13 +54,45 @@ def run(lay, x, dy):
     return y.detach(), xx.grad.clone(), lay.weight.grad.clone(), lay.bias.grad.clone(), dict(lay.last_info)
 
 
-def reference(lay, x, dy):
-    w = lay.weight.detach().float().clone().requires_grad_(True)
-    b = lay.bias.detach().float().clone().requires_grad_(True)
-    xr = x.clone().requires_grad_(True)
-    yr = ref.reference_forward(xr, lay.indices, w, b, lay.layout, lay.cfg, {})
-    (yr * dy).sum().backward()
+def reference(lay, x, dy, dtype=torch.float32, flip=None):
+    """Reference y, dX, dW, db (Mean(ReLU / identity) layers).  flip: boolean [B, G, slots]
+    elements whose ReLU decision is replaced by the opposite one (value and derivative)."""
+    w = lay.weight.detach().to(dtype).clone().requires_grad_(True)
+    b = lay.bias.detach().to(dtype).clone().requires_grad_(True)
+    xr = x.to(dtype).clone().requires_grad_(True)
+    if flip is None:
+        yr = ref.reference_forward(xr, lay.indices, w, b, lay.layout, lay.cfg, {})
+    else:
+        assert lay.cfg.levels[0].type == "mean" and lay.cfg.levels[0].activation == "relu"
+        z = ref.hidden_preactivations(xr, lay.indices, w, b, lay.layout)
+        a = torch.where((z > 0) ^ flip, z, torch.zeros_like(z))
+        mask = lay.layout.valid_mask(z.device)
+        yr = (a * mask).sum(-1) / mask.sum(-1).to(dtype)
+    (yr * dy.to(dtype)).sum().backward()
     return yr.detach(), xr.grad, w.grad, b.grad
+
+
+# The one known reference-tolerance exceedance of this file (benchmarks/relu_boundary_case.py,
+# results/c8_dx_scatter/relu_boundary_case.json): for (token 206, output 30, slot 923) the exact
+# pre-activation is z = +2^-28 (FP64 and the FP32 reference agree: active), but the FP32 tensor-core
+# accumulation of BOTH the generic and the grouped kernels yields z <= 0 (inactive).  This single
+# decision moves dX / dW / db by ~3e-5 / 8e-5 / 9e-5 relative; with it adopted every kernel is
+# within ~2.4e-6 of the FP64 reference.  No other case may exceed the tolerances.
+BOUNDARY_CASE = dict(C=8, S=64, R=16, shape=(1024, 300_000, 64, 256), precision="split")
+BOUNDARY_ELEMENT = (206, 30, 923)
+BOUNDARY_Z = 2.0 ** -28
+
+
+def boundary_reference(lay, x, dy):
+    """FP64 reference with the kernels' decision at the known boundary element (asserting
+    that element is the documented one)."""
+    t, g, s = BOUNDARY_ELEMENT
+    z = ref.hidden_preactivations(x.double(), lay.indices, lay.weight.detach().double(), lay.bias.detach().double(),
+                                  lay.layout)
+    assert z[t, g, s].item() == BOUNDARY_Z, z[t, g, s].item()
+    flip = torch.zeros(z.shape, dtype=torch.bool, device=z.device)
+    flip[t, g, s] = True
+    return reference(lay, x, dy, torch.float64, flip)
 
 
 def check_kernels(info, want):
@@ -163,15 +195,13 @@ def test_grouped_matches_generic(C, S, R, shape, precision):
     check_kernels(i2, ("grouped", "grouped", "grouped"))
     assert torch.equal(dws, dwg) and torch.equal(dbs, dbg)
     assert rel_err(ys, yg) < 1e-6 and rel_err(dxs, dxg) < 1e-6
-    yr, dxr, dwr, dbr = reference(lay, x, dy)
     tol = 2e-5 if precision == "split" else 5e-3
+    yr, dxr, dwr, dbr = reference(lay, x, dy)
     assert rel_err(ys, yr) < 2e-5
+    if dict(C=C, S=S, R=R, shape=shape, precision=precision) == BOUNDARY_CASE:
+        _, dxr, dwr, dbr = boundary_reference(lay, x, dy)  # the documented decision, nothing else
     for got, gen, want in ((dxs, dxg, dxr), (dws, dwg, dwr), (dbs, dbg, dbr)):
-        e, eg = rel_err(got, want), rel_err(gen, want)
-        # strict tolerance; exceeded only where the generic kernels exceed it identically: a ReLU
-        # boundary flip (e.g. split, C = 8, 300k neurons: one z = +3.7e-9 rounds to <= 0 in the
-        # FP32 tensor-core accumulation of both kernels; results/INPUT_SUPERGROUP_OPTIMIZATION.md)
-        assert e < tol or (eg >= tol and e <= eg * 1.01 + 1e-9), (e, eg)
+        assert rel_err(got, want) < tol and rel_err(gen, want) < tol, (rel_err(got, want), rel_err(gen, want))
 
 
 @requires_cuda_backend
