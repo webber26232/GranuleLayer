@@ -199,9 +199,18 @@ SG_DX_SCATTERS = {
     "feature_owner": dict(sc=4, layout="register accumulators [T, S] (MMA-routed), one store per CTA",
                           order="mma_accumulate"),
 }
-# measured "auto" choice per (C, S, dX tokens, warps, warps per copy, precision); anything not
-# listed keeps the baseline
-SG_AUTO_DX_SCATTER = {}
+# measured "auto" choice per (C, S, dX tokens, warps, warps per copy, precision, activation) =
+# the auto dX tiles of SG_AUTO; anything not listed keeps the baseline.  Mean(ReLU), corrected
+# harness (results/C8_DX_SCATTER_OPTIMIZATION.md): S = 16 / 32 at H = 10M and 100M (split, 3 seeds),
+# M = 1024, BF16 gradients at 100M; S = 64 at H = 10M and 100M (split; the warp-private T = 32
+# vector layout is faster at 100M but slower at 10M, so it stays an explicit choice)
+SG_AUTO_DX_SCATTER = {
+    (8, 16, 64, 8, 1, "split", "relu"): "vectorized_transpose_hoisted",
+    (8, 16, 64, 8, 1, "bf16", "relu"): "vectorized_transpose_hoisted",
+    (8, 32, 32, 8, 1, "split", "relu"): "vectorized_transpose_hoisted",
+    (8, 32, 32, 8, 1, "bf16", "relu"): "vectorized_transpose_hoisted",
+    (8, 64, 64, 8, 8, "split", "relu"): "swizzle4_capped",
+}
 
 
 def sg_auto(C: int, S: int):
@@ -566,7 +575,8 @@ class CudaBackend:
         req = rt.plan.cuda_grouped_dx_scatter
         name = req
         if req == "auto":
-            name = SG_AUTO_DX_SCATTER.get((rt.layout.block, rt.sg.S, T, nw, wg, rt.plan.grad_precision), "baseline")
+            name = SG_AUTO_DX_SCATTER.get((rt.layout.block, rt.sg.S, T, nw, wg, rt.plan.grad_precision,
+                                           rt.level.activation), "baseline")
         why = ""
         if name != "baseline":
             if rt.layout.block != 8:

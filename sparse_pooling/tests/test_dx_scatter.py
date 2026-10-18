@@ -301,13 +301,29 @@ def test_explicit_unsupported_raise():
         run(lay64, x, dy)
 
 
+AUTO_EXPECTED = {(8, 16, "split", "relu"): "vectorized_transpose_hoisted", (8, 16, "bf16", "relu"): "vectorized_transpose_hoisted",
+                 (8, 32, "split", "relu"): "vectorized_transpose_hoisted", (8, 32, "bf16", "relu"): "vectorized_transpose_hoisted",
+                 (8, 64, "split", "relu"): "swizzle4_capped"}
+
+
 @requires_cuda_backend
-@pytest.mark.parametrize("C,S,R", [(8, 16, 4), (8, 32, 8), (8, 64, 16), (64, 16, 4), (8, 128, 32)])
-def test_auto_scatter_recorded(C, S, R):
-    lay = sg_layer(1024, 50_000, 16, C, S, R, plan=PhysicalPlan(cuda_input_supergroup_backend="auto"))
-    _, _, _, _, info = run(lay, *inputs(128, 1024, 16))
-    if info["dx_kernel"] == "grouped":
-        gd = info["grouped_dx"]
-        key = (C, S, gd["tokens"], gd["warps"], gd["reduction_group_warps"], "split")
-        assert gd["scatter"] == cuda_ops.SG_AUTO_DX_SCATTER.get(key, "baseline")
-        assert gd["kernel"].startswith("sg_dx_kernel" if gd["scatter"] == "baseline" else "sgx_dx_kernel")
+@pytest.mark.parametrize("C,S,R", [(8, 8, 2), (8, 16, 4), (8, 32, 8), (8, 64, 16), (64, 16, 4), (8, 128, 32)])
+@pytest.mark.parametrize("precision", ["split", "bf16"])
+@pytest.mark.parametrize("act", ["relu", "identity"])
+def test_auto_scatter(C, S, R, precision, act):
+    """auto: the measured variant exactly where it was measured (auto tiles, Mean(ReLU)),
+    the baseline everywhere else; the selection is recorded with the kernel identity."""
+    lay = sg_layer(1024, 50_000, 16, C, S, R, pooling={"type": "mean", "activation": act},
+                   plan=PhysicalPlan(cuda_input_supergroup_backend="auto", grad_precision=precision))
+    x, dy = inputs(128, 1024, 16)
+    _, dxa, dwa, _, info = run(lay, x, dy)
+    if info["dx_kernel"] != "grouped":
+        return
+    gd = info["grouped_dx"]
+    want = AUTO_EXPECTED.get((C, S, precision, act), "baseline")
+    assert gd["scatter"] == want and gd["scatter_fallback"] == ""
+    assert gd["kernel"].startswith("sg_dx_kernel" if want == "baseline" else "sgx_dx_kernel")
+    lay.plan = PhysicalPlan(cuda_input_supergroup_backend="auto", grad_precision=precision,
+                            cuda_grouped_dx_scatter="baseline")
+    _, dxb, dwb, _, ib = run(lay, x, dy)
+    assert ib["grouped_dx"]["scatter"] == "baseline" and torch.equal(dwa, dwb) and rel_err(dxa, dxb) < 1e-6
