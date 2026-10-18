@@ -8,7 +8,7 @@ PY=${PY:-/home/evga/.conda/envs/env_isaaclab/bin/python}
 OUT=../results/c8_dx_scatter/final_100M
 mkdir -p $OUT
 d() { echo "$1:cuda_input_supergroup_backend=auto,cuda_grouped_dx_tokens=$2,cuda_grouped_dx_warps=$3,cuda_grouped_dx_reduction=$4,cuda_grouped_dx_scatter=$5"; }
-B=baseline:cuda_input_supergroup_backend=auto
+B=baseline:cuda_input_supergroup_backend=auto,cuda_grouped_dx_scatter=baseline  # explicit: auto selects the measured variant since 9dfc1b3
 run() { local name=$1; shift; $PY bench_supergroups.py --hidden 100000000 --rounds 4 --reps 2 --iters 3 "$@" --out $OUT/$name 2>&1 | tee $OUT/$name.log; }
 # --- C = 8, S = 16, three graph / input / init seeds (seed 0 adds candidate B and the generic reference)
 run C8_S16_R4_seed0 --C 8 --S 16 --R 4 --variant $B --variant "$(d vectorized_transpose_hoisted 64 8 1 vectorized_transpose_hoisted)" \
