@@ -129,3 +129,15 @@ def test_fingerprint_is_exact():
     u = torch.zeros(1000, dtype=torch.bfloat16)
     u[500] = -0.0
     assert tensor_fingerprint(u) != f0  # signed zero
+
+
+def test_fingerprint_chunked_matches_and_is_bounded():
+    import train_state
+    t = torch.randint(-30000, 30000, (3 * train_state.FP_CHUNK + 12345,), dtype=torch.int16, device="cuda")
+    b = t.view(torch.int16)
+    want = (int(b.sum(dtype=torch.int64)), int(b[1::3].sum(dtype=torch.int64)))
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    assert tensor_fingerprint(t) == want
+    assert torch.cuda.max_memory_allocated() - base <= 8 * train_state.FP_CHUNK + (1 << 20)

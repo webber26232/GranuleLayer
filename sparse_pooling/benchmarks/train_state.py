@@ -26,10 +26,21 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
     return t.view({1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[t.element_size()])
 
 
+FP_CHUNK = 1 << 22  # elements per reduction: bounds the int64 temporaries (32 MiB) on the device
+
+
 def tensor_fingerprint(t: torch.Tensor):
-    """(sum of raw bits, sum of raw bits of every 3rd element) as exact Python ints."""
+    """(sum of raw bits, sum of raw bits of every 3rd element) as exact Python ints.  Reduced in
+    chunks: a whole-tensor sum(dtype=int64) materialises an int64 copy (6.4 GB for 800M BF16
+    weights) that the caching allocator then keeps reserved."""
     b = _bits(t.detach().reshape(-1))
-    return (int(b.sum(dtype=torch.int64)), int(b[1::3].sum(dtype=torch.int64)))
+    s0 = torch.zeros((), dtype=torch.int64, device=b.device)
+    s1 = torch.zeros((), dtype=torch.int64, device=b.device)
+    for i in range(0, b.numel(), FP_CHUNK):  # FP_CHUNK % 3 == 1: track the stride-3 phase
+        c = b[i:i + FP_CHUNK]
+        s0 += c.sum(dtype=torch.int64)
+        s1 += c[(1 - i) % 3::3].sum(dtype=torch.int64)
+    return (int(s0), int(s1))
 
 
 class TrainState:
