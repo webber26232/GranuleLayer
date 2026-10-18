@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--dx-warps", type=int, default=0, choices=[0, 8, 16, 32], help="0 = library default")
     ap.add_argument("--dx-epilogue", default="auto", choices=["auto", "generic", "fast", "mask"])
     ap.add_argument("--dw-epilogue", default="auto", choices=["auto", "generic", "fast", "mask"])
+    ap.add_argument("--fwd-epilogue", default="auto", choices=["auto", "baseline", "chunk4"])
     ap.add_argument("--dw-cfg", type=int, default=-1, help="cuda_ops.DW_CFGS key; -1 = default")
     ap.add_argument("--reps", type=int, default=5, help="independent repetitions")
     ap.add_argument("--iters", type=int, default=3, help="training steps per repetition")
@@ -80,7 +81,7 @@ def main():
     cuda_ops.DW_INDEXED_STAGES = args.dw_stages
     plan = PhysicalPlan(grad_precision=args.grad_precision, cuda_dw_cfg=args.dw_cfg, cuda_dw_staging=args.dw_staging,
                         cuda_dx_warps=args.dx_warps, cuda_dx_epilogue=args.dx_epilogue,
-                        cuda_dw_epilogue=args.dw_epilogue)
+                        cuda_dw_epilogue=args.dw_epilogue, cuda_fwd_mean_epilogue=args.fwd_epilogue)
     lay = SparsePoolingLayer(1024, args.hidden, 1024, shared_neurons=args.C, pooling=POOLINGS[args.pooling],
                              checkpoint_policy="auto", backend="auto", device="cuda", plan=plan)
     lay.enable_main_grad()
@@ -145,6 +146,7 @@ def main():
            "nvcc_extra": " ".join(cuda_ops.NVCC_FLAGS[7:]), "tag": args.tag,
            "dw_cfg": info.get("dw_cfg"), "dx_warps": info.get("dx_warps"),
            "dx_epilogue": info.get("dx_epilogue"), "dw_epilogue": info.get("dw_epilogue"),
+           "fwd_mean_epilogue": info.get("fwd_mean_epilogue"),
            "forward_backend": info.get("forward_backend"), "backward_backend": info.get("backward_backend"),
            "dw_staging_used": info.get("dw_staging", "none"),
            "bwd_dx_grid": info.get("bwd_dx_grid"), "bwd_dw_grid": info.get("bwd_dw_grid"),
@@ -161,6 +163,8 @@ def main():
             if req not in ("generic", "auto") and used == "generic" and args.pooling in ("mean", "lme", "pow2"):
                 if not (k == "dw" and rec["dw_staging_used"] != "indexed"):
                     bad.append(f"{k} epilogue: requested {req}, ran generic")
+        if args.fwd_epilogue == "chunk4" and rec["fwd_mean_epilogue"] != "chunk4":
+            bad.append(f"forward epilogue: requested chunk4, ran {rec['fwd_mean_epilogue']}")
         if bad:
             raise SystemExit("variant not applied: " + "; ".join(bad))
     ph = rec["phases"]

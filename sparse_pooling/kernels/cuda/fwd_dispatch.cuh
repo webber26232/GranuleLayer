@@ -3,9 +3,9 @@
 #include "common.cuh"
 #include "sparse_pool_fwd.cuh"
 
-template <int POOL, int ACT, int C, int MT, int NW, bool TRACK, int PI, bool PK>
+template <int POOL, int ACT, int C, int MT, int NW, bool TRACK, int PI, bool PK, int FE = 0>
 static int launch_fwd(const FwdArgs& a, int n_tiles, int PS, cudaStream_t s) {
-  auto k = fwd_mma_kernel<POOL, ACT, C, MT, NW, TRACK, PI, PK>;
+  auto k = fwd_mma_kernel<POOL, ACT, C, MT, NW, TRACK, PI, PK, FE>;
   int BM = 16 * MT;
   size_t smem = (size_t)a.D * BM * 2;
   size_t red = (size_t)4 * NW * BM * 4;
@@ -23,6 +23,13 @@ static int launch_fwd(const FwdArgs& a, int n_tiles, int PS, cudaStream_t s) {
 template <int POOL, int ACT, int C, int MT, bool TRACK, int PI>
 static int fwd_nw(const FwdArgs& a, int n_tiles, int PS, int nw, cudaStream_t s) {
   if (a.packed) {
+    if constexpr (POOL == P_MEAN && C >= 32) {  // chunk-4 Mean epilogue (process_block FE = 1)
+      if (a.fepi == 1) {
+        if (nw == 8) return launch_fwd<POOL, ACT, C, MT, 8, TRACK, PI, true, 1>(a, n_tiles, PS, s);
+        if (nw == 16) return launch_fwd<POOL, ACT, C, MT, 16, TRACK, PI, true, 1>(a, n_tiles, PS, s);
+        return -1;
+      }
+    }
     if (nw == 8) return launch_fwd<POOL, ACT, C, MT, 8, TRACK, PI, true>(a, n_tiles, PS, s);
     if (nw == 16) return launch_fwd<POOL, ACT, C, MT, 16, TRACK, PI, true>(a, n_tiles, PS, s);
   } else {

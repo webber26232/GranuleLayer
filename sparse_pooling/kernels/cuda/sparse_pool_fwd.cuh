@@ -23,16 +23,6 @@
 #ifndef SP_ABLATE_FWD
 #define SP_ABLATE_FWD 0
 #endif
-// Phase-3 forward screening variants (bitwise identical):
-//   SP_FWD_EPI bit 0: one bias C fragment per n-tile, last token half accumulates in place
-//              bit 1: two alternating parameter buffers instead of the ring-slot copy
-//   SP_FWD_NTC n: Mean epilogue chunk of n n8 tiles (default 2)
-#ifndef SP_FWD_EPI
-#define SP_FWD_EPI 0
-#endif
-#ifndef SP_FWD_NTC
-#define SP_FWD_NTC 0
-#endif
 
 struct FwdArgs {
   const bf16* X;
@@ -49,6 +39,7 @@ struct FwdArgs {
   float scale, p;
   int p_int;
   int packed;  // fragment-packed parameter storage
+  int fepi;    // forward epilogue variant (host-side dispatch: FE template argument)
 };
 
 // ---------------------------------------------------------------- pooling ---
@@ -273,12 +264,14 @@ __device__ __forceinline__ void unit_block(BlockRegs<C>& cur, const Unit<C>& r, 
 template <int C>
 struct Prefetch { static constexpr int PD = (C == 8) ? 4 : (C == 16 ? 3 : 2); };
 
-template <int POOL, int ACT, int C, int MT, bool TRACK, int P_INT, bool MASKED>
+// FE = 1 (Mean only): epilogue chunks of 4 n8 tiles instead of 2.  More MMAs in flight
+// per chunk lets ptxas build the bias C fragments ahead of them; each row state still
+// receives its values in the same order (n-tile, then column), so results are bitwise equal.
+template <int POOL, int ACT, int C, int MT, bool TRACK, int P_INT, bool MASKED, int FE = 0>
 __device__ __forceinline__ void process_block(PoolState<POOL, P_INT>* st, const BlockRegs<C>& cur, int j, int n_g,
                                               uint32_t slab_s, int lane, float scale, float p) {
   constexpr int NT = C / 8;
-  constexpr int NTC0 = NT < 2 ? NT : 2;  // n8 tiles per epilogue chunk (bounds register use)
-  constexpr int NTC = (SP_FWD_NTC && POOL == P_MEAN) ? (SP_FWD_NTC < NT ? SP_FWD_NTC : NT) : NTC0;
+  constexpr int NTC = (FE == 1 && POOL == P_MEAN && NT >= 4) ? 4 : (NT < 2 ? NT : 2);  // n8 tiles per epilogue chunk
   const int mat = lane >> 3;
   const int col0 = 2 * (lane & 3);
   uint32_t af[4];
@@ -294,17 +287,6 @@ __device__ __forceinline__ void process_block(PoolState<POOL, P_INT>* st, const 
 #pragma unroll
     for (int q = 0; q < NTC; q++) {
       float2 bf = bf16x2_to_float2(cur.bb[n0 + q]);
-      if (SP_FWD_EPI & 1) {
-        // one bias fragment per n-tile: the last token half accumulates into it in place
-        float c[4] = {bf.x, bf.y, bf.x, bf.y};
-#pragma unroll
-        for (int mt = 0; mt < MT - 1; mt++)
-          mma_m16n8k8_bf16(d[q][mt], af[2 * mt], af[2 * mt + 1], cur.w[n0 + q], c[0], c[1], c[2], c[3]);
-        mma_m16n8k8_bf16_acc(c, af[2 * MT - 2], af[2 * MT - 1], cur.w[n0 + q]);
-#pragma unroll
-        for (int e = 0; e < 4; e++) d[q][MT - 1][e] = c[e];
-        continue;
-      }
       if (SP_ABLATE_FWD == 4) st[0].s += bf.x + bf.y;
       if (SP_ABLATE_FWD >= 2) bf = make_float2(0.f, 0.f);
 #pragma unroll
@@ -343,7 +325,7 @@ __device__ __forceinline__ void process_block(PoolState<POOL, P_INT>* st, const 
   }
 }
 
-template <int POOL, int ACT, int C, int MT, int NW, bool TRACK, int P_INT, bool PACKED>
+template <int POOL, int ACT, int C, int MT, int NW, bool TRACK, int P_INT, bool PACKED, int FE = 0>
 __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
   bf16* slab = reinterpret_cast<bf16*>(smem_raw);
@@ -373,29 +355,6 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
     constexpr int QPD = (C == 64) ? 1 : 2;
     const long long ubase = (gbase + b_lo) / UB;  // flat unit index of b_lo
     const int nu_full = (b_full - b_lo) / UB;
-    auto unit_blocks = [&](const Unit<C>& cur, int uu) {
-#pragma unroll
-      for (int bu = 0; bu < UB; bu++) {
-        BlockRegs<C> blk;
-        unit_block<C>(blk, cur, bu);
-        process_block<POOL, ACT, C, MT, TRACK, P_INT, false>(st, blk, b_lo + uu * UB + bu, n_g, slab_s, lane,
-                                                             a.scale, a.p);
-      }
-    };
-    if constexpr ((SP_FWD_EPI & 2) && QPD == 1) {
-      // same order and prefetch distance (unit uu + NW is requested before unit uu is
-      // processed), two alternating register buffers instead of a copy out of one ring slot
-      Unit<C> ra, rb;
-      if (warp < nu_full) load_unit<C>(ra, a, ubase + warp, lane);
-      for (int uu = warp; uu < nu_full; uu += 2 * NW) {
-        const int u1 = uu + NW;
-        if (u1 < nu_full) load_unit<C>(rb, a, ubase + u1, lane);
-        unit_blocks(ra, uu);
-        if (u1 >= nu_full) break;
-        if (u1 + NW < nu_full) load_unit<C>(ra, a, ubase + u1 + NW, lane);
-        unit_blocks(rb, u1);
-      }
-    } else {
     Unit<C> ring[QPD];
 #pragma unroll
     for (int q = 0; q < QPD; q++)
@@ -412,12 +371,11 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
           for (int bu = 0; bu < UB; bu++) {
             BlockRegs<C> blk;
             unit_block<C>(blk, cur, bu);
-            process_block<POOL, ACT, C, MT, TRACK, P_INT, false>(st, blk, b_lo + uu * UB + bu, n_g, slab_s, lane,
-                                                                 a.scale, a.p);
+            process_block<POOL, ACT, C, MT, TRACK, P_INT, false, FE>(st, blk, b_lo + uu * UB + bu, n_g, slab_s,
+                                                                     lane, a.scale, a.p);
           }
         }
       }
-    }
     }
     // ---- tail: the single unit containing the partially valid block(s)
     const int bt = b_lo + nu_full * UB;
@@ -429,7 +387,7 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
         if (bt + bu < b_any) {
           BlockRegs<C> blk;
           unit_block<C>(blk, cur, bu);
-          process_block<POOL, ACT, C, MT, TRACK, P_INT, true>(st, blk, bt + bu, n_g, slab_s, lane, a.scale, a.p);
+          process_block<POOL, ACT, C, MT, TRACK, P_INT, true, FE>(st, blk, bt + bu, n_g, slab_s, lane, a.scale, a.p);
         }
       }
     }
@@ -447,7 +405,7 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
         if (jj < b_full) {
           BlockRegs<C> cur = ring[q];
           if (jj + PD * NW < b_full) load_block<C>(ring[q], a, gbase + jj + PD * NW, lane);
-          process_block<POOL, ACT, C, MT, TRACK, P_INT, false>(st, cur, jj, n_g, slab_s, lane, a.scale, a.p);
+          process_block<POOL, ACT, C, MT, TRACK, P_INT, false, FE>(st, cur, jj, n_g, slab_s, lane, a.scale, a.p);
         }
       }
     }
@@ -455,7 +413,7 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
     if (b_any > b_full && warp == (b_full - b_lo) % NW) {
       BlockRegs<C> cur;
       load_block<C>(cur, a, gbase + b_full, lane);
-      process_block<POOL, ACT, C, MT, TRACK, P_INT, true>(st, cur, b_full, n_g, slab_s, lane, a.scale, a.p);
+      process_block<POOL, ACT, C, MT, TRACK, P_INT, true, FE>(st, cur, b_full, n_g, slab_s, lane, a.scale, a.p);
     }
 
   }

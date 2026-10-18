@@ -30,15 +30,8 @@
 //   SP_ABLATE_DW 1: no X staging inside the token loop (k_dw and k_dw_idx)
 //                2: k_dw without the per-tile __syncthreads (copies kept)
 //                3: no c1/c2/c3 coefficient loads (constants)
-// Phase-3 dW projection-MMA operand layouts (screening; bitwise identical unless noted):
-//   SP_DW_MMA 1: persistent {b0, b0, b1, b1} C fragment per row tile (bias stored 4x)
-//             2: one C copy per row tile, token half 1 accumulates into it in place
-//             3: DIAGNOSTIC, changes rounding: C = 0 and the bias added with FADD
-//             4: as 2, plus the projection MMAs of row tile q + 1 issued before tile q's epilogue
-//             5: ABLATION, WRONG results: no bias (C = 0)
-#ifndef SP_DW_MMA
-#define SP_DW_MMA 0
-#endif
+//                4: projection MMA without bias (C = 0): cost of the bias C fragments
+//                5: C = 0 and the bias added with FADD after the MMA (changes rounding)
 #ifndef SP_ABLATE_DX
 #define SP_ABLATE_DX 0
 #endif
@@ -466,52 +459,12 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
   const uint32_t addr = slab_s + 2 * Swz<1>::off(blk.fidx, c);
   ldmatrix_x2_trans(xa, addr);  // (token g, inputs 2t..): B operand of z^T, tokens 0-7 / 8-15
   ldmatrix_x2(xb, addr);        // (input g, tokens 2t..): B operand of dW^T
-  // SP_DW_MMA 4: projection MMAs of row tile q + 1 are issued before the epilogue of tile q
-  constexpr bool LOOK = SP_DW_MMA == 4 && !(EPI == 2 && FastDz<POOL, ACT, P_INT>::mask);
-  float pre[(NT + 1) / 2][2][4];
-  auto proj = [&](int qq) {
-    const uint32_t u0 = blk.w[2 * qq], u1 = (2 * qq + 1 < NT) ? blk.w[2 * qq + 1] : 0u;
-    const float c0 = bT[2 * qq], c1 = bT[2 * qq + 1];
-#pragma unroll
-    for (int th = 0; th < 2; th++) mma_m16n8k8_bf16(pre[qq][th], u0, u1, xa[th], c0, c0, c1, c1);
-  };
-  if constexpr (LOOK) proj(0);
 #pragma unroll
   for (int q = 0; q < (NT + 1) / 2; q++) {
     const int nt0 = 2 * q;
     const uint32_t w0 = blk.w[nt0];
     const uint32_t w1 = (nt0 + 1 < NT) ? blk.w[nt0 + 1] : 0u;
-    constexpr int BS = SP_DW_MMA == 1 ? 4 : 2;  // bias floats per row tile in bT
-    const float b0 = bT[BS * q], b1 = bT[BS * q + BS / 2];  // bias of neuron rows g, g+8
-    // projection accumulators of both token halves (fragment layouts per SP_DW_MMA)
-    float dp[2][4];
-    if constexpr (!(EPI == 2 && FastDz<POOL, ACT, P_INT>::mask)) {
-      if (SP_DW_MMA == 1) {  // persistent {b0, b0, b1, b1} fragment
-        mma_m16n8k8_bf16(dp[0], w0, w1, xa[0], bT[4 * q], bT[4 * q + 1], bT[4 * q + 2], bT[4 * q + 3]);
-        mma_m16n8k8_bf16(dp[1], w0, w1, xa[1], bT[4 * q], bT[4 * q + 1], bT[4 * q + 2], bT[4 * q + 3]);
-      } else if (SP_DW_MMA == 2) {  // one fragment copy: token half 1 accumulates into it in place
-        float c[4] = {b0, b0, b1, b1};
-        mma_m16n8k8_bf16(dp[0], w0, w1, xa[0], c[0], c[1], c[2], c[3]);
-        mma_m16n8k8_bf16_acc(c, w0, w1, xa[1]);
-#pragma unroll
-        for (int e = 0; e < 4; e++) dp[1][e] = c[e];
-      } else if (SP_DW_MMA == 4) {
-        if (q + 1 < (NT + 1) / 2) proj(q + 1);
-#pragma unroll
-        for (int th = 0; th < 2; th++)
-#pragma unroll
-          for (int e = 0; e < 4; e++) dp[th][e] = pre[q][th][e];
-      } else if (SP_DW_MMA == 5) {  // ABLATION (WRONG results): no bias at all, C = 0
-#pragma unroll
-        for (int th = 0; th < 2; th++) mma_m16n8k8_bf16(dp[th], w0, w1, xa[th], 0.f, 0.f, 0.f, 0.f);
-      } else if (SP_DW_MMA == 3) {  // DIAGNOSTIC (changes rounding): C = 0, bias added after
-#pragma unroll
-        for (int th = 0; th < 2; th++) {
-          mma_m16n8k8_bf16(dp[th], w0, w1, xa[th], 0.f, 0.f, 0.f, 0.f);
-          dp[th][0] += b0; dp[th][1] += b0; dp[th][2] += b1; dp[th][3] += b1;
-        }
-      }
-    }
+    const float b0 = bT[2 * q], b1 = bT[2 * q + 1];  // bias of neuron rows g, g+8
     const int r0 = j * C + nt0 * 8 + (lane >> 2), r1 = r0 + 8;
     const bool v0 = !MASKED || r0 < n_g, v1 = (nt0 + 1 < NT) && (!MASKED || r1 < n_g);
     uint32_t ah[4], al[4];
@@ -537,10 +490,12 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
         continue;
       }
       float d[4];
-      if (SP_DW_MMA == 0) mma_m16n8k8_bf16(d, w0, w1, xa[th], b0, b0, b1, b1);
-      else
-#pragma unroll
-        for (int e = 0; e < 4; e++) d[e] = dp[th][e];
+      if (SP_ABLATE_DW == 4 || SP_ABLATE_DW == 5) {
+        mma_m16n8k8_bf16(d, w0, w1, xa[th], 0.f, 0.f, 0.f, 0.f);
+        if (SP_ABLATE_DW == 5) { d[0] += b0; d[1] += b0; d[2] += b1; d[3] += b1; }
+      } else {
+        mma_m16n8k8_bf16(d, w0, w1, xa[th], b0, b0, b1, b1);
+      }
       float dz[4];
 #pragma unroll
       for (int i = 0; i < 4; i++) {
@@ -613,7 +568,7 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
   DwAcc<C> acc[WPW];
   int wid[WPW];
   constexpr int NP = DwAcc<C>::NP;
-  float biasT[WPW][UB][(SP_DW_MMA == 1 ? 4 : 2) * NP];  // bias of neuron rows (lane/4, lane/4 + 8) per row tile
+  float biasT[WPW][UB][2 * NP];  // bias of neuron rows (lane/4, lane/4 + 8) per row tile
 #pragma unroll
   for (int i = 0; i < WPW; i++) {
     wid[i] = wu0 + warp + i * NW;
@@ -639,9 +594,7 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
         const int g = lane >> 2;
         uint32_t src = __shfl_sync(0xffffffff, word, g >> 1);  // lane (g/2) holds cols 2(g/2), +1
         float2 bf = bf16x2_to_float2(src);
-        const float bv = (g & 1) ? bf.y : bf.x;
-        if (SP_DW_MMA == 1) biasT[i][bu][2 * nt] = biasT[i][bu][2 * nt + 1] = bv;
-        else biasT[i][bu][nt] = bv;
+        biasT[i][bu][nt] = (g & 1) ? bf.y : bf.x;
       }
     }
   }
@@ -734,7 +687,7 @@ __device__ __forceinline__ void k_dw_idx_body(const BwdArgs& a) {
   int wid[WPW];
   constexpr int NT = C / 8;
   constexpr int NP = DwAcc<C>::NP;
-  float biasT[WPW][UB][(SP_DW_MMA == 1 ? 4 : 2) * NP];
+  float biasT[WPW][UB][2 * NP];
 #pragma unroll
   for (int i = 0; i < WPW; i++) {
     wid[i] = wu0 + warp + i * NW;
@@ -759,9 +712,7 @@ __device__ __forceinline__ void k_dw_idx_body(const BwdArgs& a) {
         const int gq = lane >> 2;
         uint32_t src = __shfl_sync(0xffffffff, word, gq >> 1);
         float2 bf = bf16x2_to_float2(src);
-        const float bv = (gq & 1) ? bf.y : bf.x;
-        if (SP_DW_MMA == 1) biasT[i][bu][2 * nt] = biasT[i][bu][2 * nt + 1] = bv;
-        else biasT[i][bu][nt] = bv;
+        biasT[i][bu][nt] = (gq & 1) ? bf.y : bf.x;
       }
     }
   }

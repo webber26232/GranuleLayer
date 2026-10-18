@@ -265,6 +265,10 @@ class PhysicalPlan:
     # feature-major input; anything else falls back to "full"); "auto" = indexed
     # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_staging: str = "auto"
+    # forward Mean epilogue chunking: "baseline" (2 n8 tiles per chunk), "chunk4" (4 tiles;
+    # packed C >= 32, bitwise identical) or "auto" (= chunk4 at C = 64, where it was
+    # measured; results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md)
+    cuda_fwd_mean_epilogue: str = "auto"
 
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
@@ -273,6 +277,7 @@ class PhysicalPlan:
         assert self.cuda_dw_staging in ("auto", "full", "indexed")
         assert self.cuda_dx_epilogue in ("auto", "generic", "fast", "mask")
         assert self.cuda_dw_epilogue in ("auto", "generic", "fast", "mask")
+        assert self.cuda_fwd_mean_epilogue in ("auto", "baseline", "chunk4")
 
 
 def state_fields(level: LevelSpec) -> int:

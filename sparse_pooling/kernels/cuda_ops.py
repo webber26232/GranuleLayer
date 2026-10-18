@@ -115,7 +115,7 @@ class FwdArgs(ctypes.Structure):
         ("B", ctypes.c_int), ("U", ctypes.c_int), ("S", ctypes.c_int), ("NB", ctypes.c_int),
         ("BPS", ctypes.c_int), ("BPSP", ctypes.c_int), ("D", ctypes.c_int),
         ("scale", ctypes.c_float), ("p", ctypes.c_float), ("p_int", ctypes.c_int),
-        ("packed", ctypes.c_int),
+        ("packed", ctypes.c_int), ("fepi", ctypes.c_int),
     ]
 
 
@@ -305,6 +305,7 @@ class CudaBackend:
         mt, nw = self._cfg(plan)
         BM = 16 * mt
         U = rt.units.U
+        fepi = self.fwd_mean_epilogue(plan, lv, L, rt.last_info)
         _mark("fwd.begin")
         # workspace-checked number of physical splits (reuse the Triton policy)
         cplan = PhysicalPlan(phys_splits=plan.phys_splits, block_m=BM)
@@ -327,6 +328,7 @@ class CudaBackend:
             _ptr(st_m), _ptr(st_s), _ptr(st_t), _ptr(st_id),
             B, U, rt.units.S, L.blocks_per_group, rt.units.BPS, bpsp, L.input_dim,
             ops.kernel_scale(lv), float(lv.p), ops._p_int(lv), int(L.packed),
+            int(fepi == "chunk4"),
         )
         n_tiles = math.ceil(B / BM)
         err = self.lib.sp_fwd(ctypes.byref(a), _CUDA_POOLS[lv.type], lv.act_id, int(track_ids), L.block, mt,
@@ -341,7 +343,8 @@ class CudaBackend:
             st["t"] = st_t
         if st_id is not None:
             st["id"] = st_id
-        rt.last_info.update(phys_splits=PS, workspace_bytes=sum(t.numel() * t.element_size() for t in st.values()))
+        rt.last_info.update(fwd_mean_epilogue=fepi, phys_splits=PS,
+                            workspace_bytes=sum(t.numel() * t.element_size() for t in st.values()))
         out = ops.merge_finalize(st, lv, rt.units.counts)
         _mark("fwd.finalize")
         return out
@@ -366,6 +369,35 @@ class CudaBackend:
         if cc != (8, 6):
             return f"validated on sm_86 only (device is sm_{cc[0]}{cc[1]})"
         return ""
+
+    @staticmethod
+    def fwd_mean_epilogue_reason(lv, L) -> str:
+        """Why the chunk-4 Mean forward epilogue cannot be used ("" if it can)."""
+        if lv.type != "mean":
+            return f"Mean pooling only ({lv.type})"
+        if not L.packed:
+            return "needs packed parameters"
+        if L.block < 32:
+            return f"needs C >= 32 (C = {L.block}: the whole block already fits one chunk)"
+        return ""
+
+    @staticmethod
+    def fwd_mean_epilogue(plan: PhysicalPlan, lv, L, info) -> str:
+        info.pop("fwd_mean_epilogue_fallback", None)
+        if plan.cuda_fwd_mean_epilogue == "baseline":
+            return "baseline"
+        reason = CudaBackend.fwd_mean_epilogue_reason(lv, L)
+        if not reason and (plan.cuda_fwd_mean_epilogue == "chunk4" or L.block == 64):
+            return "chunk4"  # auto: measured at C = 64 only
+        if not reason:
+            return "baseline"
+        if plan.cuda_fwd_mean_epilogue == "chunk4":  # explicit request: never fall back silently
+            info["fwd_mean_epilogue_fallback"] = reason
+            if reason not in _warned:
+                _warned.add(reason)
+                warnings.warn(f"cuda_fwd_mean_epilogue='chunk4' unavailable ({reason}); using the baseline epilogue",
+                              stacklevel=3)
+        return "baseline"
 
     @classmethod
     def dw_staging(cls, plan: PhysicalPlan, L, device, sxb, info=None) -> str:
