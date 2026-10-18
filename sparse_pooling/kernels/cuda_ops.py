@@ -140,6 +140,55 @@ class BwdArgs(ctypes.Structure):
     ]
 
 
+class SgArgs(ctypes.Structure):
+    _fields_ = [
+        ("X", ctypes.c_void_p), ("sxf", ctypes.c_longlong),
+        ("idx", ctypes.c_void_p), ("W", ctypes.c_void_p), ("bias", ctypes.c_void_p),
+        ("counts", ctypes.c_void_p), ("feat", ctypes.c_void_p), ("items", ctypes.c_void_p),
+        ("chunks", ctypes.c_void_p), ("units", ctypes.c_void_p), ("ysum", ctypes.c_void_p),
+        ("c1T", ctypes.c_void_p), ("dXT", ctypes.c_void_p), ("dW", ctypes.c_void_p), ("dB", ctypes.c_void_p),
+        ("B", ctypes.c_int), ("G", ctypes.c_int), ("D", ctypes.c_int), ("S", ctypes.c_int),
+        ("NB", ctypes.c_int), ("NU", ctypes.c_int), ("dx_group_warps", ctypes.c_int), ("flags", ctypes.c_int),
+        ("nonfinite", ctypes.c_void_p),
+    ]
+
+
+# grouped (input-supergroup) dW tilings: cfg -> (warps, units per warp, 16-token tiles per
+# stage, stages, min CTAs/SM); must match SG_DW_CFGS in kernels/cuda/sg_dispatch.cuh
+SG_DW_CFGS = {0: (8, 2, 1, 3, 2), 1: (8, 4, 1, 3, 1), 2: (8, 2, 4, 2, 2), 3: (8, 4, 4, 2, 1)}
+SG_MAX_SMEM = 99 * 1024
+# Measured defaults of the grouped kernels per (C, S) (H = 10M, M = 8192 screens;
+# results/INPUT_SUPERGROUP_OPTIMIZATION.md): fwd (tokens, warps) | None, dX (tokens, warps,
+# warps per FP32 slab copy) | None, dW cfg | None.  None = the generic kernel is faster for
+# that phase, so backend "auto" keeps it (hybrid plans).  Other S use the nearest smaller key.
+SG_AUTO = {
+    (64, 8): ((128, 4), None, None), (64, 64): ((128, 4), None, None), (64, 128): ((128, 8), None, None),
+    (64, 256): ((64, 8), None, None), (64, 512): (None, None, None),
+    (8, 8): ((128, 8), (128, 16, 1), 2), (8, 16): ((128, 8), (64, 8, 1), 2), (8, 32): ((128, 8), (32, 8, 1), 2),
+    (8, 64): ((128, 8), (64, 8, 8), 2), (8, 128): ((128, 8), (32, 8, 8), 2), (8, 256): ((64, 8), None, 0),
+    (8, 512): (None, None, None),
+}
+SG_CHUNK_UNITS = {"fwd": 2048, "dx": 4096}
+
+
+def sg_auto(C: int, S: int):
+    keys = sorted(k[1] for k in SG_AUTO if k[0] == C)
+    k = max([s_ for s_ in keys if s_ <= S], default=keys[0])
+    return SG_AUTO[(C, k)]
+
+
+
+def sg_smem(kind: str, D: int, S: int, tokens: int = 16, warps: int = 8, group_warps: int = 1, dw_cfg: int = 0) -> int:
+    """Dynamic shared memory of a grouped kernel launch (sparse_pool_sg.cuh)."""
+    m = (D * 2 + 15) // 16 * 16
+    if kind == "fwd":
+        return m + S * tokens * 2
+    if kind == "dx":
+        return m + S * tokens * 2 + (warps // group_warps) * S * tokens * 4
+    _, _, ts, st, _ = SG_DW_CFGS[dw_cfg]
+    return m + st * ts * S * 16 * 2
+
+
 _CUDA_POOLS = {"max": 0, "mean": 2, "logmeanexp": 3, "power_mean": 4, "softmax_weighted": 5}
 _CUDA_BWD_POOLS = ("mean", "logmeanexp", "power_mean", "softmax_weighted")
 BWD_FAST_DX_EPI, BWD_FAST_DW_EPI, BWD_MASK_DX_EPI, BWD_MASK_DW_EPI, BWD_FALLBACK = 1, 2, 4, 8, 16  # BwdArgs.flags
@@ -218,6 +267,20 @@ class CudaBackend:
         self.lib.sp_bwd.argtypes = [ctypes.POINTER(BwdArgs)] + [ctypes.c_int] * 8 + [ctypes.c_void_p]
         self.lib.sp_bwd_args_size.restype = ctypes.c_int
         assert self.lib.sp_bwd_args_size() == ctypes.sizeof(BwdArgs), "BwdArgs layout mismatch"
+        self.lib.sp_sg_args_size.restype = ctypes.c_int
+        assert self.lib.sp_sg_args_size() == ctypes.sizeof(SgArgs), "SgArgs layout mismatch"
+        self.sg_fns = {}
+        for C in (8, 64):
+            f = getattr(self.lib, f"sp_sg_fwd_c{C}")
+            f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
+            self.sg_fns[("fwd", C)] = f
+            for act, an in ((0, "a_id"), (1, "a_relu")):
+                f = getattr(self.lib, f"sp_sg_dx_c{C}_{an}")
+                f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+                self.sg_fns[("dx", C, act)] = f
+            f = getattr(self.lib, f"sp_sg_dw_c{C}")
+            f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
+            self.sg_fns[("dw", C)] = f
 
     @classmethod
     def get(cls, strict: bool = False):
@@ -296,6 +359,9 @@ class CudaBackend:
         lv, L, plan = rt.level, rt.layout, rt.plan
         assert x.dtype == torch.bfloat16 and w.dtype == torch.bfloat16
         B = x.shape[0]
+        if self.sg_use(rt, "fwd", B):
+            return self.sg_forward(rt, x, w, b)
+        rt.last_info["forward_kernel"] = "generic"
         if lv.type == "topk_mean":
             if plan.input_layout == "feature_major" and B % 8 == 0:
                 xop = x.t().contiguous()
@@ -346,6 +412,177 @@ class CudaBackend:
         _mark("fwd.finalize")
         return out
 
+
+    # ------------------------------------------- input-supergroup (grouped) kernels
+    def sg_reason(self, rt, phase: str, B: int) -> str:
+        """Why the grouped kernel of a phase cannot run for this layer / batch ("" if it can)."""
+        sg = getattr(rt, "sg", None)
+        lv, L, plan = rt.level, rt.layout, rt.plan
+        if sg is None:
+            return "layer has no input-supergroup connectivity"
+        if not (L.packed and L.shared_indices):
+            return "needs packed Mode B parameters"
+        if L.block not in (8, 64):
+            return f"implemented for C = 8 and 64 (C = {L.block})"
+        if lv.type != "mean" or lv.activation not in ("relu", "identity"):
+            return f"implemented for Mean(ReLU / identity) only (pooling {lv.describe()})"
+        if rt.units.S != 1:
+            return "semantic level-1 shards are not supported"
+        if plan.input_layout != "feature_major" or B % 8:
+            return "needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
+        if L.input_dim % 8 or L.input_dim > 16384:
+            return "needs D % 8 == 0 and D <= 16384 (shared-memory feature map)"
+        S = sg.S
+        if phase == "fwd":
+            T, nw, _ = self.sg_fwd_cfg(rt)
+            smem = sg_smem("fwd", L.input_dim, S, T, nw)
+        elif phase == "dx":
+            epi = _epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
+            if epi == "fast":
+                return "the grouped dX implements the generic and mask epilogues only (requested fast)"
+            if epi == "mask" and plan.grad_precision != "split":
+                return "the grouped dX mask epilogue is compiled for split gradients only"
+            T, nw, wg, _ = self.sg_dx_cfg(rt)
+            if nw % wg:
+                return f"cuda_grouped_dx_reduction={wg} must divide the {nw} warps"
+            smem = sg_smem("dx", L.input_dim, S, T, nw, wg)
+        else:
+            epi = _epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
+            if epi == "mask":
+                return "the grouped dW implements the generic and fast epilogues only (requested mask)"
+            smem = sg_smem("dw", L.input_dim, S, dw_cfg=self.sg_dw_cfg(rt))
+        if smem > SG_MAX_SMEM:
+            return f"{phase} configuration needs {smem / 1024:.1f} KiB of shared memory > 99 KiB"
+        return ""
+
+    def sg_use(self, rt, phase: str, B: int) -> bool:
+        """Run the grouped kernel for this phase?  Explicit "grouped" requests that cannot run
+        raise; "auto" falls back visibly (last_info["grouped_fallback"])."""
+        if getattr(rt, "sg", None) is None:
+            return False
+        req = rt.plan.grouped_request(phase)
+        if req == "generic":
+            return False
+        reason = self.sg_reason(rt, phase, B)
+        fb = rt.last_info.setdefault("grouped_fallback", {})
+        fb.pop(phase, None)
+        if reason:
+            if req == "grouped":
+                raise ValueError(f"grouped {phase} requested but unavailable: {reason}")
+            fb[phase] = reason
+            return False
+        if req == "auto":
+            return self.sg_auto_phase(rt, phase) is not None
+        return True
+
+    @staticmethod
+    def sg_auto_phase(rt, phase: str):
+        """Measured auto configuration of a phase (None: generic is faster)."""
+        return sg_auto(rt.layout.block, rt.sg.S)[("fwd", "dx", "dw").index(phase)]
+
+    def sg_fwd_cfg(self, rt):
+        """(tokens, warps, chunk units) of the grouped forward (auto: SG_AUTO, else the largest
+        token tile whose slab fits)."""
+        p = rt.plan
+        T0, nw0 = self.sg_auto_phase(rt, "fwd") or (128, 8)
+        T = p.cuda_grouped_fwd_tokens or T0
+        nw = p.cuda_grouped_fwd_warps or nw0
+        if not p.cuda_grouped_fwd_tokens:
+            while T > 16 and sg_smem("fwd", rt.layout.input_dim, rt.sg.S, T, nw) > SG_MAX_SMEM:
+                T //= 2
+        return T, nw, p.cuda_grouped_fwd_chunk_units or SG_CHUNK_UNITS["fwd"]
+
+    def sg_dx_cfg(self, rt):
+        """(tokens, warps, warps per FP32 slab copy, chunk units) of the grouped dX.  Unset
+        fields come from SG_AUTO; if that does not fit, copies are shared, then tiles halved."""
+        p, S, D = rt.plan, rt.sg.S, rt.layout.input_dim
+        T0, nw0, wg0 = self.sg_auto_phase(rt, "dx") or (64, 8, 8)
+        T = p.cuda_grouped_dx_tokens or T0
+        nw = p.cuda_grouped_dx_warps or nw0
+        wg = p.cuda_grouped_dx_reduction
+        if not wg:
+            wg = min(wg0, nw)
+            while wg < nw and sg_smem("dx", D, S, T, nw, wg) > SG_MAX_SMEM:
+                wg *= 2
+            if not p.cuda_grouped_dx_tokens:
+                while T > 16 and sg_smem("dx", D, S, T, nw, wg) > SG_MAX_SMEM:
+                    T //= 2
+        return T, nw, wg, p.cuda_grouped_dx_chunk_units or SG_CHUNK_UNITS["dx"]
+
+    def sg_dw_cfg(self, rt) -> int:
+        p = rt.plan
+        if p.cuda_grouped_dw_cfg >= 0:
+            return p.cuda_grouped_dw_cfg
+        cfg = self.sg_auto_phase(rt, "dw")
+        cfg = 2 if cfg is None else cfg
+        if sg_smem("dw", rt.layout.input_dim, rt.sg.S, dw_cfg=cfg) > SG_MAX_SMEM:
+            cfg = 0  # one 16-token tile per stage: the smallest ring (3 S x 16 slabs)
+        return cfg
+
+    def _sg_args(self, rt, xop, w, b, B):
+        L, sg = rt.layout, rt.sg
+        return SgArgs(_ptr(xop), xop.stride(0), _ptr(rt.idx), _ptr(w), _ptr(b), _ptr(rt.counts_i32),
+                      _ptr(sg.feat), 0, 0, 0, 0, 0, 0, 0, 0,
+                      B, L.groups, L.input_dim, sg.S, L.blocks_per_group, L.blocks_per_group // L.unit_blocks,
+                      1, 0, 0)
+
+    def sg_forward(self, rt, x, w, b):
+        """Grouped Mean forward: returns {"pre": [B, G]}."""
+        lv, L = rt.level, rt.layout
+        B = x.shape[0]
+        T, nw, cu = self.sg_fwd_cfg(rt)
+        _mark("fwd.begin")
+        xop = x.t().contiguous()  # [D, B] (same transpose as the generic path)
+        _mark("fwd.layout")
+        ysum = torch.zeros((L.groups, B), device=x.device, dtype=torch.float32)
+        _mark("fwd.zero")
+        items, ch = rt.sg.item_chunks(cu)
+        a = self._sg_args(rt, xop, w, b, B)
+        a.items, a.chunks, a.ysum = _ptr(items), _ptr(ch), _ptr(ysum)
+        err = self.sg_fns[("fwd", L.block)](ctypes.byref(a), lv.act_id, T // 16, nw, ch.shape[0], math.ceil(B / T),
+                                            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
+        if err != 0:
+            raise RuntimeError(f"sp_sg_fwd failed (code {err})")
+        _mark("fwd.kernel")
+        pre = (ysum / rt.units.counts[:, None]).t().contiguous()
+        _mark("fwd.finalize")
+        rt.last_info.update(phys_splits=1, workspace_bytes=ysum.numel() * 4, forward_kernel="grouped",
+                            grouped_fwd=dict(tokens=T, warps=nw, chunk_units=cu, ctas=ch.shape[0] * math.ceil(B / T),
+                                             chunks=ch.shape[0], items=items.shape[0]))
+        return {"pre": pre}
+
+    def _sg_dx(self, rt, a, dxt, c1T, B, split, dx_epi, stream):
+        L = rt.layout
+        T, nw, wg, cu = self.sg_dx_cfg(rt)
+        items, ch = rt.sg.item_chunks(cu)
+        a.items, a.chunks, a.c1T, a.dXT, a.dx_group_warps = _ptr(items), _ptr(ch), _ptr(c1T), _ptr(dxt), wg
+        epi = {"generic": 0, "mask": 2}[dx_epi]
+        err = self.sg_fns[("dx", L.block, rt.level.act_id)](ctypes.byref(a), T // 16, nw, split, epi, ch.shape[0],
+                                                            math.ceil(B / T), stream)
+        if err != 0:
+            raise RuntimeError(f"sp_sg_dx failed (code {err})")
+        rt.last_info["grouped_dx"] = dict(tokens=T, warps=nw, reduction_group_warps=wg, chunk_units=cu,
+                                          ctas=ch.shape[0] * math.ceil(B / T), chunks=ch.shape[0],
+                                          smem=sg_smem("dx", L.input_dim, rt.sg.S, T, nw, wg))
+        return dxt.t()
+
+    def _sg_dw(self, rt, a, c1T, split, dw_epi, stream):
+        L = rt.layout
+        cfg = self.sg_dw_cfg(rt)
+        nw, wpw = SG_DW_CFGS[cfg][:2]
+        units, ch = rt.sg.unit_chunks(nw * wpw)
+        a.units, a.chunks, a.c1T = _ptr(units), _ptr(ch), _ptr(c1T)
+        fn = self.sg_fns[("dw", L.block)]
+        epi = {"generic": 0, "fast": 1}[dw_epi]
+        a.flags = 0
+        err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, epi, ch.shape[0], stream)
+        if err == 0 and epi:  # generic fallback launch: exits at once unless a coefficient is non-finite
+            a.flags = BWD_FALLBACK
+            err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, 0, ch.shape[0], stream)
+        if err != 0:
+            raise RuntimeError(f"sp_sg_dw failed (code {err})")
+        rt.last_info["grouped_dw"] = dict(cfg=cfg, ctas=ch.shape[0], smem=sg_smem("dw", L.input_dim, rt.sg.S, dw_cfg=cfg))
+
     # ---------------------------------------------------------------- backward
     def supports_backward(self, rt) -> bool:
         lv, L = rt.level, rt.layout
@@ -394,6 +631,8 @@ class CudaBackend:
         _mark("bwd.begin")
         c1, c2, c3 = ops.dense_coefficients(lv, g_pre, stats.get("pre"), rt.units.counts, stats.get("L2"))
         c1, c2, c3 = c1.contiguous(), c2.contiguous(), c3.contiguous()
+        sg_dx, sg_dw = self.sg_use(rt, "dx", B), self.sg_use(rt, "dw", B)
+        c1T = c1.t().contiguous() if (sg_dx or sg_dw) else None  # [G, B]: token-contiguous coefficients
         _mark("bwd.coef")
         if plan.input_layout == "feature_major" and B % 8 == 0:
             xop = x.t().contiguous()
@@ -402,7 +641,8 @@ class CudaBackend:
             xop = x.contiguous()
             sxf, sxb = xop.stride(1), xop.stride(0)
         _mark("bwd.layout")
-        dx = torch.zeros((B, D), device=x.device, dtype=torch.float32)
+        dx = None if sg_dx else torch.zeros((B, D), device=x.device, dtype=torch.float32)
+        dxt = torch.zeros((D, B), device=x.device, dtype=torch.float32) if sg_dx else None  # grouped: [D, B]
         _mark("bwd.dx_init")
         n_tiles = math.ceil(B / 16)
         gy = max(1, min(U, math.ceil(4096 / n_tiles)))  # ~4096 CTAs; one dX flush per CTA
@@ -422,16 +662,17 @@ class CudaBackend:
         n_chunks = math.ceil(math.ceil(rt.units.BPS / ub) / wu_per_cta)
         a = BwdArgs(
             _ptr(xop), sxf, sxb, _ptr(rt.idx), _ptr(w), _ptr(b), _ptr(rt.counts_i32),
-            _ptr(c1), _ptr(c2), _ptr(c3), _ptr(dx), dx.stride(1), dx.stride(0),
+            _ptr(c1), _ptr(c2), _ptr(c3), _ptr(dx), D if dx is None else dx.stride(1), 1 if dx is None else dx.stride(0),
             _ptr(dw_buf), _ptr(db_buf),
             B, U, rt.units.S, L.blocks_per_group, rt.units.BPS, D,
             ops.kernel_scale(lv), float(lv.p), ops._p_int(lv), upc, wu_per_cta, 0,
         )
         # pooling-specialised dZ epilogues (FastDz in sparse_pool_bwd.cuh): "fast" for Mean and
-        # LME (ReLU / identity) and integer-p power mean, "mask" for Mean only; the dW variants
-        # exist for the indexed kernel only.  Anything else runs the generic epilogue.
+        # LME (ReLU / identity) and integer-p power mean, "mask" for Mean only; the generic dW
+        # variants exist for the indexed kernel only (the grouped dW has generic and fast).
         dx_epi = _epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
-        dw_epi = _epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw") if staging == "indexed" else "generic"
+        dw_epi = (_epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
+                  if (staging == "indexed" or sg_dw) else "generic")
         nonfinite = None
         if dx_epi != "generic" or dw_epi != "generic":  # device flag (no host sync): inf/NaN coefficients make the kernels take the generic path
             # scalar inf-norm reductions (NaN propagates and fails the compare): no [B, U] temporaries
@@ -450,15 +691,25 @@ class CudaBackend:
             if err != 0:
                 raise RuntimeError(f"sp_bwd({what}) failed (code {err})")
 
-        dx_flags = _EPI_BITS["dx"].get(dx_epi, 0)
-        launch(0, dx_warps, n_tiles, gy, dx_flags, "dx")  # k_dx falls back to the generic body in-kernel
+        if sg_dx or sg_dw:
+            sa = self._sg_args(rt, xop, w, b, B)
+            sa.dW, sa.dB, sa.nonfinite = _ptr(dw_buf), _ptr(db_buf), _ptr(nonfinite)
+        if sg_dx:
+            dx = self._sg_dx(rt, sa, dxt, c1T, B, split, dx_epi, stream)
+        else:
+            dx_flags = _EPI_BITS["dx"].get(dx_epi, 0)
+            launch(0, dx_warps, n_tiles, gy, dx_flags, "dx")  # k_dx falls back to the generic body in-kernel
         _mark("bwd.dx")
-        kind = 1 if staging == "full" else {2: 2, 3: 3}[DW_INDEXED_STAGES]
-        dw_flags = _EPI_BITS["dw"].get(dw_epi, 0)
-        launch(kind, cfg, n_chunks, U, dw_flags, "dw")
-        if dw_flags:  # generic fallback launch: exits at once unless some coefficient is non-finite
-            launch(kind, cfg, n_chunks, U, BWD_FALLBACK, "dw fallback")
+        if sg_dw:
+            self._sg_dw(rt, sa, c1T, split, dw_epi, stream)
+        else:
+            kind = 1 if staging == "full" else {2: 2, 3: 3}[DW_INDEXED_STAGES]
+            dw_flags = _EPI_BITS["dw"].get(dw_epi, 0)
+            launch(kind, cfg, n_chunks, U, dw_flags, "dw")
+            if dw_flags:  # generic fallback launch: exits at once unless some coefficient is non-finite
+                launch(kind, cfg, n_chunks, U, BWD_FALLBACK, "dw fallback")
         _mark("bwd.dw")
+        rt.last_info.update(dx_kernel="grouped" if sg_dx else "generic", dw_kernel="grouped" if sg_dw else "generic")
         rt.last_info.update(bwd_dx_grid=(n_tiles, gy), bwd_dw_grid=(n_chunks, U), grad_precision=plan.grad_precision,
                             dw_staging=staging, dw_cfg=cfg, dx_warps=dx_warps,
                             dx_epilogue=dx_epi, dw_epilogue=dw_epi)

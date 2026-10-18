@@ -43,7 +43,7 @@ def kernel_sass(lib, demangled):
     for chunk in re.split(r"\n\s+Function : ", out)[1:]:
         name = chunk.split("\n", 1)[0].strip()
         d = subprocess.run(["cu++filt", name], capture_output=True, text=True).stdout.strip()
-        d = re.sub(r"\(int\)|\(bool\)|void |\(BwdArgs\)|\(FwdArgs\)", "", d)
+        d = re.sub(r"\(int\)|\(bool\)|void |\(BwdArgs\)|\(FwdArgs\)|\(SgArgs\)", "", d)
         if d == demangled:
             return chunk
     raise SystemExit(f"kernel {demangled!r} not found")

@@ -10,6 +10,7 @@ from torch import nn
 from .autograd import Level1Runtime, SemanticPoolFunction, SparsePoolFunction, resolve_policy
 from .config import DEFAULT_WORKSPACE_BUDGET, PhysicalPlan, PoolingConfig
 from .layout import SparseLayout, init_parameters
+from .supergroups import ConnectivityPlan, SgExec, generate_indices
 
 
 class SparsePoolingLayer(nn.Module):
@@ -27,6 +28,13 @@ class SparsePoolingLayer(nn.Module):
         weight_layout: "canonical" (K-contiguous [G,NB,C,8]) | "packed"
             (mma-fragment-packed, see layout.py) | "auto" (packed for Mode B
             unless backend="triton").  Gradients (main_grad) use the same layout.
+        connectivity: optional ``ConnectivityPlan`` (supergroups.py): every index
+            record draws its 8 inputs from one of Q = R * D / S input supergroups.
+            This changes the model (an explicit architecture choice; the default is
+            unrestricted connectivity).  Weights / bias are drawn exactly as for the
+            unrestricted layer with the same seed; only the indices differ.  The compact
+            graph metadata (``sg_feat`` [Q, S], ``sg_buckets`` [n, 4], ``sg_plan``) is
+            saved in the state dict.  How it runs is ``plan.cuda_input_supergroup_backend``.
     """
 
     def __init__(
@@ -46,6 +54,7 @@ class SparsePoolingLayer(nn.Module):
         bias_std: float = 0.0,
         backend: str = "auto",
         weight_layout: str = "auto",
+        connectivity: Optional[ConnectivityPlan] = None,
     ):
         super().__init__()
         self.cfg = PoolingConfig.parse(pooling, checkpoint_policy)
@@ -65,6 +74,15 @@ class SparsePoolingLayer(nn.Module):
         self.backend_name = backend
         self.workspace_budget = workspace_budget
         idx, w, b = init_parameters(self.layout, device or "cpu", dtype=dtype, seed=seed, bias_std=bias_std)
+        self.connectivity = connectivity
+        self.graph_stats = None
+        if connectivity is not None:
+            idx_c, graph, self.graph_stats = generate_indices(self.layout.canonical, connectivity, device or "cpu")
+            idx = self.layout.pack_indices(idx_c) if self.layout.packed else idx_c
+            self.register_buffer("sg_feat", graph.feat)
+            self.register_buffer("sg_buckets", graph.buckets)
+            self.register_buffer("sg_plan", torch.frombuffer(bytearray(connectivity.to_json().encode()),
+                                                             dtype=torch.uint8).clone())
         self.register_buffer("indices", idx)
         self.weight = nn.Parameter(w)
         self.bias = nn.Parameter(b)
@@ -102,8 +120,21 @@ class SparsePoolingLayer(nn.Module):
             self._rt = Level1Runtime(self.layout, self.indices, l1, self.plan,
                                      l1.neurons_per_shard if self.cfg.is_semantic_hierarchy else None,
                                      self.workspace_budget, backend)
+            if self.connectivity is not None:
+                self._rt.sg = SgExec(self.layout, self.sg_feat, self.sg_buckets)
             self._rt_key = key
         return self._rt
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        plan = state_dict.get(prefix + "sg_plan")
+        if self.connectivity is not None and plan is not None:
+            got = ConnectivityPlan.from_json(bytes(plan.cpu().tolist()).decode())
+            if got != self.connectivity:
+                raise ValueError(f"checkpoint connectivity {got} != layer connectivity {self.connectivity}")
+        if (self.connectivity is None) != (plan is None):
+            raise ValueError("checkpoint and layer disagree on input-supergroup connectivity")
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        self._rt = None  # rebuild the execution metadata from the loaded graph
 
     @property
     def last_info(self):
@@ -141,5 +172,7 @@ class SparsePoolingLayer(nn.Module):
     def extra_repr(self) -> str:
         L = self.layout
         mode = f"B(C={L.block})" if L.shared_indices else "A(independent)"
+        conn = "" if self.connectivity is None else (
+            f", supergroups(S={self.connectivity.input_supergroup_dim}, R={self.connectivity.partition_rounds})")
         return (f"in={L.input_dim}, hidden={L.hidden_dim:,}, out={L.groups}, fan_in={L.fan_in}, "
-                f"mode={mode}, pooling={self.cfg.describe()}, policy={self.effective_policy}")
+                f"mode={mode}, pooling={self.cfg.describe()}, policy={self.effective_policy}{conn}")

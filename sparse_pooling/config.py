@@ -265,6 +265,27 @@ class PhysicalPlan:
     # feature-major input; anything else falls back to "full"); "auto" = indexed
     # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_staging: str = "auto"
+    # ---- input-supergroup execution (only for layers built with a ConnectivityPlan;
+    # supergroups.py, kernels/cuda/sparse_pool_sg.cuh).  Same graph, different kernels:
+    # "generic" = the kernels above, "grouped" = supergroup-scheduled kernels (Mean(ReLU /
+    # identity), packed C = 8 / 64, feature-major input), "auto" = the measured choice per
+    # phase.  An explicit "grouped" that cannot run raises; "auto" records the fallback
+    # reason in last_info["grouped_fallback"].  Per-phase overrides take precedence.
+    cuda_input_supergroup_backend: str = "auto"
+    cuda_grouped_fwd: str = ""  # "" = cuda_input_supergroup_backend
+    cuda_grouped_dx: str = ""
+    cuda_grouped_dw: str = ""
+    cuda_grouped_fwd_tokens: int = 0  # 16 | 32 | 64 | 128; 0 = auto
+    cuda_grouped_fwd_warps: int = 0  # 4 | 8 | 16; 0 = auto
+    cuda_grouped_fwd_chunk_units: int = 0  # work units per CTA (whole buckets); 0 = auto
+    cuda_grouped_dx_tokens: int = 0  # 16 | 32 | 64 | 128; 0 = auto
+    cuda_grouped_dx_warps: int = 0  # 8 | 16; 0 = auto
+    # dX local accumulation: warps sharing one FP32 [S][T] slab copy. 1 = warp-private
+    # copies (plain read-modify-write), = warps: one CTA slab with 64-bit CAS; 0 = auto
+    cuda_grouped_dx_reduction: int = 0
+    cuda_grouped_dx_chunk_units: int = 0
+    cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
+    cuda_grouped_merge: str = "atomic"  # supergroup -> global merge (FP32 atomics, bounded scratch)
 
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
@@ -273,6 +294,18 @@ class PhysicalPlan:
         assert self.cuda_dw_staging in ("auto", "full", "indexed")
         assert self.cuda_dx_epilogue in ("auto", "generic", "fast", "mask")
         assert self.cuda_dw_epilogue in ("auto", "generic", "fast", "mask")
+        assert self.cuda_input_supergroup_backend in ("auto", "generic", "grouped")
+        for p in (self.cuda_grouped_fwd, self.cuda_grouped_dx, self.cuda_grouped_dw):
+            assert p in ("", "auto", "generic", "grouped")
+        assert self.cuda_grouped_fwd_tokens in (0, 16, 32, 64, 128)
+        assert self.cuda_grouped_dx_tokens in (0, 16, 32, 64, 128)
+        assert self.cuda_grouped_fwd_warps in (0, 4, 8, 16)
+        assert self.cuda_grouped_dx_warps in (0, 8, 16)
+        assert self.cuda_grouped_merge == "atomic"
+
+    def grouped_request(self, phase: str) -> str:
+        """Requested execution of a phase ("fwd" | "dx" | "dw") of a supergroup layer."""
+        return getattr(self, f"cuda_grouped_{phase}") or self.cuda_input_supergroup_backend
 
 
 def state_fields(level: LevelSpec) -> int:

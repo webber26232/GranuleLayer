@@ -80,6 +80,7 @@ class Level1Runtime:
         self.counts_i32 = layout.counts_tensor(idx.device).contiguous()
         self.workspace_budget = workspace_budget
         self.backend = backend  # optional CUDA backend (kernels/cuda_ops.py)
+        self.sg = None  # input-supergroup execution metadata (supergroups.SgExec), if any
         self.last_info: Dict = {}
 
     # ---------------------------------------------------------------- forward
@@ -257,7 +258,8 @@ class SparsePoolFunction(torch.autograd.Function):
         dx = rt.backward(xc, wc, bc, g_pre.contiguous(), saved, ctx.policy, dw_buf, db_buf, recomputed)
         gw = None if use_main else dw_buf.to(w.dtype)
         gb = None if use_main else db_buf.to(b.dtype)
-        return dx.to(x.dtype), gw, gb, None, None, None
+        # contiguous: the grouped dX is a transposed [D, B] view (one fused transpose + cast)
+        return dx.to(x.dtype, memory_format=torch.contiguous_format), gw, gb, None, None, None
 
 
 class SemanticPoolFunction(torch.autograd.Function):
