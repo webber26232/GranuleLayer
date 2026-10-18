@@ -1,0 +1,177 @@
+{
+ "commit": "d4fc34c40dac03208ae29583276c515e16c1d822",
+ "dirty": true,
+ "library": "/home/evga/Projects/pamachine/GranuleLayer-c8dx/sparse_pooling/kernels/cuda/build/a45446a8952e5284/libsparse_pool.so",
+ "args": {
+  "hidden": 10000000,
+  "C": 8,
+  "batch": 8192,
+  "S": 16,
+  "R": 4,
+  "seed": 0,
+  "grad_precision": "split",
+  "variant": [
+   "baseline:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=1,cuda_grouped_dx_scatter=baseline",
+   "vectorized:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=1,cuda_grouped_dx_scatter=vectorized",
+   "vectorized_hoisted:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=1,cuda_grouped_dx_scatter=vectorized_hoisted",
+   "vectorized_transpose:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=1,cuda_grouped_dx_scatter=vectorized_transpose",
+   "vectorized_transpose_hoisted:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=1,cuda_grouped_dx_scatter=vectorized_transpose_hoisted"
+  ],
+  "rounds": 6,
+  "iters": 3,
+  "skip_infeasible": false,
+  "out": "../results/c8_dx_scatter/screen/micro_hoist_S16"
+ },
+ "infeasible": {},
+ "variants": {
+  "baseline": {
+   "median_ms": 143.95610809326172,
+   "min_ms": 140.86569213867188,
+   "round_medians_ms": [
+    141.1727294921875,
+    143.21990966796875,
+    145.0812530517578,
+    143.36000061035156,
+    145.91209411621094,
+    144.976806640625
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 1,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 36864,
+    "scatter": "baseline",
+    "scatter_layout": "float2 pairs, 2 bank groups (sg_dxs_off)",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sg_dx_kernel<1, 8, 4, 8, 1, 2>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "vectorized": {
+   "median_ms": 121.69881439208984,
+   "min_ms": 117.96598052978516,
+   "round_medians_ms": [
+    124.0258560180664,
+    121.69420623779297,
+    121.16178894042969,
+    124.80989074707031,
+    121.53734588623047,
+    121.88057708740234
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 1,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 36864,
+    "scatter": "vectorized",
+    "scatter_layout": "float4 two-tile records, 4 bank groups",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 2, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "vectorized_hoisted": {
+   "median_ms": 120.46814346313477,
+   "min_ms": 118.77180480957031,
+   "round_medians_ms": [
+    119.26038360595703,
+    120.3664321899414,
+    120.72220611572266,
+    121.28227233886719,
+    120.63155364990234,
+    119.97673797607422
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 1,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 36864,
+    "scatter": "vectorized_hoisted",
+    "scatter_layout": "float4 two-tile records, 4 bank groups; per-block record addresses",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 8, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "vectorized_transpose": {
+   "median_ms": 123.34131240844727,
+   "min_ms": 119.89401245117188,
+   "round_medians_ms": [
+    124.12210845947266,
+    123.82105255126953,
+    123.08790588378906,
+    123.40121459960938,
+    123.08582305908203,
+    123.28141021728516
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 1,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 36864,
+    "scatter": "vectorized_transpose",
+    "scatter_layout": "float4 two-tile records after an 8-shuffle transpose, conflict-free",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 7, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "vectorized_transpose_hoisted": {
+   "median_ms": 118.26688003540039,
+   "min_ms": 116.25692749023438,
+   "round_medians_ms": [
+    118.1317138671875,
+    118.29759979248047,
+    120.01203155517578,
+    119.14118194580078,
+    117.8114242553711,
+    118.23616027832031
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 1,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 36864,
+    "scatter": "vectorized_transpose_hoisted",
+    "scatter_layout": "float4 records after a shuffle transpose; per-block record addresses",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 9, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  }
+ },
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 3090",
+  "sm": "8.6",
+  "sms": 82,
+  "memory_GiB": 23.68,
+  "torch": "2.7.0+cu128",
+  "cuda_runtime": "12.8"
+ },
+ "timestamp": "2026-10-18 14:29:42"
+}

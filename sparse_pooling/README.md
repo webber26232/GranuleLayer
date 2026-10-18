@@ -236,3 +236,10 @@ validator, compact metadata saved in the state dict).  The default stays unrestr
 `PhysicalPlan(cuda_input_supergroup_backend="auto")` the measured grouped Mean kernels run where they
 are faster (H = 100M, M = 8192, C = 8, S = 16: step 4.85 s → 2.72 s; C = 64: 1.76 s → 1.70 s); see
 `results/INPUT_SUPERGROUP_OPTIMIZATION.md`.
+
+The grouped C = 8 dX local accumulation has conflict-reduced slab layouts
+(`PhysicalPlan.cuda_grouped_dx_scatter`; `auto` selects the measured variant, the baseline elsewhere):
+at H = 100M, M = 8192 the C = 8 step drops another 10–11 % (S = 16: 2.80 s → 2.51 s, S = 32:
+3.10 s → 2.76 s, same-session A/B) with bitwise-identical per-CTA arithmetic; see
+`results/C8_DX_SCATTER_OPTIMIZATION.md`.  Benchmarks restore the complete training state
+(`benchmarks/train_state.py`).

@@ -1,0 +1,177 @@
+{
+ "commit": "ad12dcda3778fc6d2e6eaa879dc91a627e5a2e04",
+ "dirty": true,
+ "library": "/home/evga/Projects/pamachine/GranuleLayer-c8dx/sparse_pooling/kernels/cuda/build/ad01f80eb1dcab3a/libsparse_pool.so",
+ "args": {
+  "hidden": 10000000,
+  "C": 8,
+  "batch": 8192,
+  "S": 64,
+  "R": 16,
+  "seed": 0,
+  "grad_precision": "split",
+  "variant": [
+   "baseline_T64W8G8:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=8,cuda_grouped_dx_scatter=baseline",
+   "swizzle4_T64W8G8:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=8,cuda_grouped_dx_scatter=swizzle4",
+   "swizzle4_capped_T64W8G8:cuda_grouped_dx_tokens=64,cuda_grouped_dx_warps=8,cuda_grouped_dx_reduction=8,cuda_grouped_dx_scatter=swizzle4_capped",
+   "baseline_T128W16G8:cuda_grouped_dx_tokens=128,cuda_grouped_dx_warps=16,cuda_grouped_dx_reduction=8,cuda_grouped_dx_scatter=baseline",
+   "swizzle4_T128W16G8:cuda_grouped_dx_tokens=128,cuda_grouped_dx_warps=16,cuda_grouped_dx_reduction=8,cuda_grouped_dx_scatter=swizzle4"
+  ],
+  "rounds": 6,
+  "iters": 3,
+  "skip_infeasible": false,
+  "out": "../results/c8_dx_scatter/screen/micro_capped_S64"
+ },
+ "infeasible": {},
+ "variants": {
+  "baseline_T64W8G8": {
+   "median_ms": 204.59515380859375,
+   "min_ms": 197.76205444335938,
+   "round_medians_ms": [
+    203.02540588378906,
+    203.85577392578125,
+    205.33453369140625,
+    200.4315185546875,
+    206.50674438476562,
+    205.39173889160156
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 8,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 26624,
+    "scatter": "baseline",
+    "scatter_layout": "float2 pairs, 2 bank groups (sg_dxs_off)",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sg_dx_kernel<1, 8, 4, 8, 1, 2>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "swizzle4_T64W8G8": {
+   "median_ms": 206.59194946289062,
+   "min_ms": 202.66905212402344,
+   "round_medians_ms": [
+    209.25234985351562,
+    205.76153564453125,
+    204.76812744140625,
+    205.88645935058594,
+    206.9031982421875,
+    207.9488067626953
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 8,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 26624,
+    "scatter": "swizzle4",
+    "scatter_layout": "float2 pairs, 4 bank groups",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 1, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "swizzle4_capped_T64W8G8": {
+   "median_ms": 183.12908935546875,
+   "min_ms": 178.68902587890625,
+   "round_medians_ms": [
+    184.3752899169922,
+    181.14544677734375,
+    180.33126831054688,
+    184.48486328125,
+    183.9534149169922,
+    182.24639892578125
+   ],
+   "info": {
+    "tokens": 64,
+    "warps": 8,
+    "reduction_group_warps": 8,
+    "chunk_units": 4096,
+    "ctas": 32768,
+    "chunks": 256,
+    "smem": 26624,
+    "scatter": "swizzle4_capped",
+    "scatter_layout": "float2 pairs, 4 bank groups; <= 80 registers (3 CTAs / SM at 8 warps)",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 10, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "baseline_T128W16G8": {
+   "median_ms": 204.99980926513672,
+   "min_ms": 199.35775756835938,
+   "round_medians_ms": [
+    203.87123107910156,
+    206.98899841308594,
+    205.80076599121094,
+    205.3205108642578,
+    205.3928985595703,
+    202.85430908203125
+   ],
+   "info": {
+    "tokens": 128,
+    "warps": 16,
+    "reduction_group_warps": 8,
+    "chunk_units": 4096,
+    "ctas": 16384,
+    "chunks": 256,
+    "smem": 83968,
+    "scatter": "baseline",
+    "scatter_layout": "float2 pairs, 2 bank groups (sg_dxs_off)",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sg_dx_kernel<1, 8, 8, 16, 1, 2>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  },
+  "swizzle4_T128W16G8": {
+   "median_ms": 193.09430694580078,
+   "min_ms": 187.97080993652344,
+   "round_medians_ms": [
+    192.80108642578125,
+    192.5747528076172,
+    193.97325134277344,
+    193.57798767089844,
+    194.5313262939453,
+    191.6057586669922
+   ],
+   "info": {
+    "tokens": 128,
+    "warps": 16,
+    "reduction_group_warps": 8,
+    "chunk_units": 4096,
+    "ctas": 16384,
+    "chunks": 256,
+    "smem": 83968,
+    "scatter": "swizzle4",
+    "scatter_layout": "float2 pairs, 4 bank groups",
+    "scatter_order": "same",
+    "scatter_fallback": "",
+    "kernel": "sgx_dx_kernel<1, 8, 8, 16, 1, 2, 1, 1>",
+    "epilogue": "mask",
+    "work_list_bytes": 3148800
+   }
+  }
+ },
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 3090",
+  "sm": "8.6",
+  "sms": 82,
+  "memory_GiB": 23.68,
+  "torch": "2.7.0+cu128",
+  "cuda_runtime": "12.8"
+ },
+ "timestamp": "2026-10-18 15:24:43"
+}
