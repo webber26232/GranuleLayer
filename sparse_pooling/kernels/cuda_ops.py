@@ -189,6 +189,10 @@ SG_DX_SCATTERS = {
     "vectorized": dict(sc=2, layout="float4 two-tile records, 4 bank groups", order="same"),
     "vectorized_transpose": dict(sc=7, layout="float4 two-tile records after an 8-shuffle transpose, conflict-free",
                                  order="same"),
+    "vectorized_hoisted": dict(sc=8, layout="float4 two-tile records, 4 bank groups; per-block record addresses",
+                               order="same"),
+    "vectorized_transpose_hoisted": dict(sc=9, layout="float4 records after a shuffle transpose; per-block "
+                                         "record addresses", order="same"),
     "vectorized_parity": dict(sc=3, layout="float4 two-tile records, 2 bank groups", order="same"),
     "feature_owner": dict(sc=4, layout="register accumulators [T, S] (MMA-routed), one store per CTA",
                           order="mma_accumulate"),

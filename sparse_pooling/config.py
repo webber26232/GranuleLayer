@@ -227,8 +227,8 @@ class PoolingConfig:
         return " -> ".join(lv.describe() for lv in self.levels)
 
 
-DX_SCATTERS = ("auto", "baseline", "baseline_private", "swizzle4", "vectorized", "vectorized_transpose", "vectorized_parity",
-               "feature_owner")
+DX_SCATTERS = ("auto", "baseline", "baseline_private", "swizzle4", "vectorized", "vectorized_transpose", "vectorized_hoisted",
+               "vectorized_transpose_hoisted", "vectorized_parity", "feature_owner")
 
 
 @dataclass
@@ -292,7 +292,8 @@ class PhysicalPlan:
     # read-modify-write, 2 bank groups), "baseline_private" (control: same layout compiled for
     # warp-private copies), "swizzle4" (same order, 4 bank groups), "vectorized"
     # (float4 records of two m16 tiles, 4 bank groups; warp-private copies), "vectorized_transpose"
-    # (float4 records after a shuffle transpose: one feature per 128-bit phase), "vectorized_parity"
+    # (float4 records after a shuffle transpose: one feature per 128-bit phase), "*_hoisted" (the
+    # same with record addresses computed once per block), "vectorized_parity"
     # (layout control: float4 records, 2 bank groups), "feature_owner" (MMA-routed register
     # accumulators, S <= 32, warp-private; different FP32 summation order), "auto" (measured)
     cuda_grouped_dx_scatter: str = "auto"

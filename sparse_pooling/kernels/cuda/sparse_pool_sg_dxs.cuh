@@ -21,6 +21,9 @@
 //            quarter-warp k takes the records of fan-in position 2k (2k + 1) at token u from
 //            lane 4u + k, so each 128-bit phase touches the 8 records of ONE feature: no bank
 //            conflicts for any layout (records in token order)
+//   SC_VEC4H / SC_VEC4TH  SC_VEC4 / SC_VEC4T with the record addresses computed once per block
+//            (the offset is linear in the tile pair: base + 32 mp floats) instead of per record
+//            (NVCC re-materialises the copy base from the thread id in the unrolled loop)
 //   SC_OWNER no slab read-modify-write: the warp keeps dX[tokens, S features] in MMA
 //            accumulators.  Per block the W^T fragment is routed by one shuffle per n8 tile of
 //            local features (column n takes fan-in position p with feat[p] = n, or 0), so the
@@ -33,11 +36,16 @@
 #pragma once
 #include "sparse_pool_sg.cuh"
 
-enum { SC_BASE = 0, SC_SWZ4 = 1, SC_VEC4 = 2, SC_VEC4P = 3, SC_OWNER = 4, SC_BASEP = 5, SC_SWZ4P = 6, SC_VEC4T = 7 };
+enum { SC_BASE = 0, SC_SWZ4 = 1, SC_VEC4 = 2, SC_VEC4P = 3, SC_OWNER = 4, SC_BASEP = 5, SC_SWZ4P = 6, SC_VEC4T = 7, SC_VEC4H = 8,
+       SC_VEC4TH = 9 };
+// slab layout of a variant (the hoisted variants share the vector layouts)
+template <int SC>
+struct SgxLayout { static constexpr int L = SC == SC_VEC4H ? SC_VEC4 : (SC == SC_VEC4TH ? SC_VEC4T : SC); };
 
 // float offset of (local feature f, local token t) inside one FP32 slab copy (MT >= 2)
-template <int SC, int MT>
+template <int SC_, int MT>
 __device__ __forceinline__ int sgx_off(int f, int t) {
+  constexpr int SC = SgxLayout<SC_>::L;
   if constexpr (SC == SC_BASE || SC == SC_BASEP || SC == SC_OWNER) {
     return sg_dxs_off<MT>(f, t);
   } else {
@@ -119,7 +127,9 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
   static_assert(C == 8 && MT >= 2, "scatter variants: C = 8, >= 2 m16 tiles");
   extern __shared__ __align__(16) unsigned char smem_raw[];
   constexpr int BM = 16 * MT, UB = Unit<C>::UB;
-  constexpr bool VEC = SC == SC_VEC4 || SC == SC_VEC4P || SC == SC_VEC4T;
+  constexpr bool VEC = SC == SC_VEC4 || SC == SC_VEC4P || SC == SC_VEC4T || SC == SC_VEC4H || SC == SC_VEC4TH;
+  constexpr bool TRANS = SgxLayout<SC>::L == SC_VEC4T;  // shuffle transpose before the record update
+  constexpr bool HOIST = SC == SC_VEC4H || SC == SC_VEC4TH;
   int16_t* smap = reinterpret_cast<int16_t*>(smem_raw);
   bf16* slab = reinterpret_cast<bf16*>(smem_raw + sg_align16(a.D * 2));
   float* dxs = reinterpret_cast<float*>(smem_raw + sg_align16(a.D * 2) + a.S * BM * 2);
@@ -187,10 +197,16 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
         }
       }
     } else {
-      const int col0 = SC == SC_VEC4T ? 2 * (lane >> 3) : 2 * (lane & 3);  // (transposed) fan-in positions
+      const int col0 = TRANS ? 2 * (lane >> 3) : 2 * (lane & 3);  // (transposed) fan-in positions
       const int f0 = __shfl_sync(0xffffffff, blk.fidx, col0);
       const int f1 = __shfl_sync(0xffffffff, blk.fidx, col0 + 1);
       if constexpr (VEC) {
+        float4* q0 = nullptr;
+        float4* q1 = nullptr;
+        if constexpr (HOIST) {  // record of tile pair mp = q + 8 mp (float4 units)
+          q0 = reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f0, TRANS ? (lane & 7) : t));
+          q1 = reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f1, TRANS ? (lane & 7) : t));
+        }
 #pragma unroll
         for (int mp = 0; mp < MT / 2; mp++) {
           float d0[4] = {0.f, 0.f, 0.f, 0.f}, d1[4] = {0.f, 0.f, 0.f, 0.f};
@@ -203,8 +219,8 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
           }
           // 16-byte aligned records (token t of the even tile): this warp owns the copy and a
           // record's features are distinct, so no two lanes touch the same record
-          const int tr = SC == SC_VEC4T ? (lane & 7) : t;  // token of this lane's records
-          if constexpr (SC == SC_VEC4T) {
+          const int tr = TRANS ? (lane & 7) : t;  // token of this lane's records
+          if constexpr (TRANS) {
             const int src = 4 * (lane & 7) + (lane >> 3);
 #pragma unroll
             for (int e = 0; e < 4; e++) {
@@ -212,8 +228,8 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
               d1[e] = __shfl_sync(0xffffffff, d1[e], src);
             }
           }
-          float4* p0 = reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f0, 32 * mp + tr));
-          float4* p1 = reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f1, 32 * mp + tr));
+          float4* p0 = HOIST ? q0 + 8 * mp : reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f0, 32 * mp + tr));
+          float4* p1 = HOIST ? q1 + 8 * mp : reinterpret_cast<float4*>(mys + sgx_off<SC, MT>(f1, 32 * mp + tr));
           float4 v0 = *p0, v1 = *p1;
           v0.x += d0[0]; v0.y += d0[2]; v0.z += d1[0]; v0.w += d1[2];
           v1.x += d0[1]; v1.y += d0[3]; v1.z += d1[1]; v1.w += d1[3];

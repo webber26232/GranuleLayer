@@ -22,7 +22,8 @@ from sparse_pooling import PhysicalPlan
 from sparse_pooling.kernels import cuda_ops
 from test_input_supergroups import inputs, reference, run, sg_layer
 
-SAME = ["baseline_private", "swizzle4", "vectorized", "vectorized_transpose", "vectorized_parity"]
+SAME = ["baseline_private", "swizzle4", "vectorized", "vectorized_transpose", "vectorized_hoisted",
+        "vectorized_transpose_hoisted", "vectorized_parity"]
 ALL = SAME + ["feature_owner"]
 SC = {k: v["sc"] for k, v in cuda_ops.SG_DX_SCATTERS.items() if v["sc"] != 4}
 SC["swizzle4_private"] = 6
@@ -51,7 +52,7 @@ def lane_records(name, tokens, mp_or_mt, rec):
         t, c = lane >> 2, lane & 3
         words = []
         for e in (0, 1):  # p0 / p1 instructions are separate; take both column parities
-            if name == "vectorized_transpose":
+            if name.startswith("vectorized_transpose"):
                 f, tok = rec[2 * (lane >> 3) + e], lane & 7
             else:
                 f, tok = rec[2 * c + e], t
@@ -67,7 +68,7 @@ def lane_records(name, tokens, mp_or_mt, rec):
 
 @requires_cuda_backend
 @pytest.mark.parametrize("name", ["baseline_private", "swizzle4_private", "vectorized", "vectorized_transpose",
-                                  "vectorized_parity"])
+                                  "vectorized_parity", "vectorized_hoisted", "vectorized_transpose_hoisted"])
 @pytest.mark.parametrize("tokens", [32, 64, 128])
 @pytest.mark.parametrize("S", [8, 16, 32, 64])
 def test_layout_bijection_alignment_ownership(name, tokens, S):
@@ -97,9 +98,9 @@ def test_layout_bijection_alignment_ownership(name, tokens, S):
                             banks.setdefault(w % 32, set()).add(w)
                     deg = max(len(v) for v in banks.values())
                     feats = [f for lane in range(p0, p0 + phase) for f, _ in lr[lane][e][:1]]
-                    if name == "vectorized_transpose":
+                    if name.startswith("vectorized_transpose"):
                         assert deg == 1
-                    elif name in ("vectorized", "swizzle4_private"):
+                    elif name in ("vectorized", "vectorized_hoisted", "swizzle4_private"):
                         assert deg == max(sum(1 for f in set(feats) if f % 4 == g) for g in range(4))
                     else:  # 2 bank groups (feature parity)
                         assert deg == max(sum(1 for f in set(feats) if f % 2 == g) for g in range(2))

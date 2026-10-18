@@ -1,6 +1,6 @@
 #include "sgx_dispatch.cuh"
 // experimental scatter layouts of the grouped C = 8 dX, A_ID (sparse_pool_sg_dxs.cuh):
-// sc = 1 (SC_SWZ4) / 2 (SC_VEC4) / 3 (SC_VEC4P) / 5 (SC_BASEP) / 6 (SC_SWZ4P) / 7 (SC_VEC4T); MT = 2, 4, 8; 8 / 16 warps; split: generic / mask, bf16: generic
+// sc = 1 (SC_SWZ4) / 2 (SC_VEC4) / 3 (SC_VEC4P) / 5 (SC_BASEP) / 6 (SC_SWZ4P) / 7 (SC_VEC4T) / 8 (SC_VEC4H) / 9 (SC_VEC4TH); MT = 2, 4, 8; 8 / 16 warps; split: generic / mask, bf16: generic
 extern "C" int sp_sgx_dx_c8_a_id(const SgArgs* a, int sc, int MT, int NW, int split, int epi, int gx, int gy,
                                    void* stream) {
   cudaStream_t s = (cudaStream_t)stream;
@@ -12,7 +12,7 @@ extern "C" int sp_sgx_dx_c8_a_id(const SgArgs* a, int sc, int MT, int NW, int sp
     return -2;                                                                                     \
   }
 #define XS(SC) X(SC, 2, 8) X(SC, 2, 16) X(SC, 4, 8) X(SC, 4, 16) X(SC, 8, 8) X(SC, 8, 16)
-  XS(SC_SWZ4) XS(SC_VEC4) XS(SC_VEC4P) XS(SC_BASEP) XS(SC_SWZ4P) XS(SC_VEC4T)
+  XS(SC_SWZ4) XS(SC_VEC4) XS(SC_VEC4P) XS(SC_BASEP) XS(SC_SWZ4P) XS(SC_VEC4T) XS(SC_VEC4H) XS(SC_VEC4TH)
 #undef XS
 #undef X
   return -1;
@@ -31,7 +31,7 @@ extern "C" int sp_sgx_layout(int sc, int MT, int S, int* out, void* stream) {
 #define X(SC, M) \
   if (sc == SC && MT == M) { sgx_layout_kernel<SC, M><<<32, 256, 0, s>>>(S, out); return (int)cudaGetLastError(); }
 #define XS(SC) X(SC, 2) X(SC, 4) X(SC, 8)
-  XS(SC_BASE) XS(SC_SWZ4) XS(SC_VEC4) XS(SC_VEC4P) XS(SC_BASEP) XS(SC_SWZ4P) XS(SC_VEC4T)
+  XS(SC_BASE) XS(SC_SWZ4) XS(SC_VEC4) XS(SC_VEC4P) XS(SC_BASEP) XS(SC_SWZ4P) XS(SC_VEC4T) XS(SC_VEC4H) XS(SC_VEC4TH)
 #undef XS
 #undef X
   return -1;

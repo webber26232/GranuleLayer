@@ -49,9 +49,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel", action="append", required=True)
     ap.add_argument("--excerpt", type=int, default=0, help="print N instructions around the first STS of the hot loop")
+    ap.add_argument("--loop", type=int, default=0, help="which innermost HMMA loop the excerpt is taken from")
+    ap.add_argument("--anchor", default=r"\b(LDS\.(64|128)|STS\.64)", help="regex of the excerpt's anchor instruction")
+    ap.add_argument("--nth", type=int, default=0, help="use the nth anchor match")
+    ap.add_argument("--lib", default="", help="library to inspect (default: the current build)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
-    lib = build_library()
+    lib = args.lib or build_library()
     rep = {}
     for k in args.kernel:
         txt = sass_of(lib, mangle(k))
@@ -71,11 +75,13 @@ def main():
             top = ", ".join(f"{n} {v}" for n, v in sorted(L["classes"].items(), key=lambda kv: -kv[1]))
             print(f"  loop {L['start']}-{L['end']}: {L['instructions']} instr; shared {L['shared']}\n    {top}")
         if args.excerpt and inner:
-            lo, hi, body = inner[0]
+            lo, hi, body = inner[args.loop]
             lines = [ln for ln in txt.splitlines() if re.search(r"/\*([0-9a-f]{4,})\*/", ln)]
             sel = [ln for ln in lines if lo <= int(re.search(r"/\*([0-9a-f]{4,})\*/", ln).group(1), 16) <= hi]
-            idx = next((i for i, ln in enumerate(sel) if re.search(r"\bSTS", ln)), 0)
+            hits = [i for i, ln in enumerate(sel) if re.search(args.anchor, ln)]
+            idx = hits[min(args.nth, len(hits) - 1)] if hits else 0
             a, b = max(0, idx - args.excerpt), idx + args.excerpt // 2
+            out["excerpt_loop"] = [hex(lo), hex(hi)]
             out["excerpt"] = [re.sub(r"\s+", " ", ln.split(";")[0]).strip() + ";" for ln in sel[a:b]]
             print("\n".join("    " + s for s in out["excerpt"]))
     if args.out:
