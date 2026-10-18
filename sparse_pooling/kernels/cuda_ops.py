@@ -186,6 +186,8 @@ SG_DX_SCATTERS = {
     "baseline_private": dict(sc=5, layout="float2 pairs, 2 bank groups; compile-time warp-private (control)",
                              order="same"),
     "swizzle4": dict(sc=1, layout="float2 pairs, 4 bank groups", order="same"),  # sc 6 when warp-private
+    "swizzle4_capped": dict(sc=10, layout="float2 pairs, 4 bank groups; <= 80 registers (3 CTAs / SM at 8 warps)",
+                            order="same"),
     "vectorized": dict(sc=2, layout="float4 two-tile records, 4 bank groups", order="same"),
     "vectorized_transpose": dict(sc=7, layout="float4 two-tile records after an 8-shuffle transpose, conflict-free",
                                  order="same"),
@@ -571,7 +573,9 @@ class CudaBackend:
                 why = f"implemented for C = 8 only (C = {rt.layout.block})"
             elif T < 32:
                 why = f"needs >= 2 m16 token tiles (cuda_grouped_dx_tokens >= 32, got {T})"
-            elif name != "swizzle4" and wg != 1:
+            elif name == "swizzle4_capped" and (nw != 8 or T not in (64, 128)):
+                why = "swizzle4_capped is compiled for 8 warps and 64 / 128 tokens"
+            elif not name.startswith("swizzle4") and wg != 1:
                 why = f"{name} needs warp-private copies (cuda_grouped_dx_reduction = 1, got {wg})"
             elif name == "feature_owner" and rt.sg.S > 32:
                 why = f"feature_owner keeps S x T accumulators in registers: S <= 32 (S = {rt.sg.S})"

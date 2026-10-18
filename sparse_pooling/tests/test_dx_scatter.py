@@ -246,8 +246,8 @@ def test_mean_identity(scatter, precision):
 
 
 @requires_cuda_backend
-@pytest.mark.parametrize("scatter", ["swizzle4"])
-@pytest.mark.parametrize("wg", [2, 4, 8])
+@pytest.mark.parametrize("scatter", ["swizzle4", "swizzle4_capped"])
+@pytest.mark.parametrize("wg", [1, 2, 4, 8])
 def test_shared_copy_swizzle(scatter, wg):
     D, H, G, B = 1024, 200_000, 64, 128
     lay = sg_layer(D, H, G, 8, 64, 16, plan=dx_plan("baseline", 64, wg=wg))
@@ -260,7 +260,8 @@ def test_shared_copy_swizzle(scatter, wg):
     lay.plan = dx_plan(scatter, 64, wg=wg)
     _, dxc, dwc, _, info = run(lay, x, dy)
     assert info["grouped_dx"]["reduction_group_warps"] == wg and info["grouped_dx"]["scatter"] == scatter
-    assert info["grouped_dx"]["kernel"].endswith(", 1, 1>")  # SC_SWZ4 (shared-copy capable), not SC_SWZ4P
+    sc = {"swizzle4": 6 if wg == 1 else 1, "swizzle4_capped": 10}[scatter]  # SC_SWZ4P only for private copies
+    assert info["grouped_dx"]["kernel"].endswith(f", {sc}, 1>")
     assert torch.equal(dwc, dwb) and rel_err(dxc, dxb) < 1e-6
 
 

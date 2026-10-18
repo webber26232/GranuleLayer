@@ -9,7 +9,7 @@ template <int ACT, int C, int MT, int NW, bool SPLIT, int EPI, int SC, int NS>
 static int sgx_dx_launch(const SgArgs& a, int gx, int gy, cudaStream_t s) {
   static size_t configured = 0;
   if (a.dx_group_warps < 1 || NW % a.dx_group_warps) return -4;
-  if (SC != SC_SWZ4 && a.dx_group_warps != 1) return -4;  // compile-time warp-private variants
+  if (SC != SC_SWZ4 && SC != SC_SWZ4M && a.dx_group_warps != 1) return -4;  // compile-time warp-private variants
   if (SC == SC_OWNER && a.S > 8 * NS) return -5;
   const size_t BM = 16 * MT;
   size_t smem = sg_map_bytes(a) + (size_t)a.S * BM * 2 + (size_t)(NW / a.dx_group_warps) * a.S * BM * 4;

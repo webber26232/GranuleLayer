@@ -23,7 +23,7 @@ def smem_bytes(kind, t, S, dx_group_warps=1):
     m = (D * 2 + 15) // 16 * 16
     if kind == "sg_fwd_kernel":  # <ACT, C, MT, NW>
         return m + S * 16 * t[2] * 2
-    if kind == "sg_dx_kernel":  # <ACT, C, MT, NW, SPLIT, EPI>
+    if kind in ("sg_dx_kernel", "sgx_dx_kernel"):  # <ACT, C, MT, NW, SPLIT, EPI[, SC, NS]>
         bm = 16 * t[2]
         return m + S * bm * 2 + (t[3] // dx_group_warps) * S * bm * 4
     if kind == "sg_dw_kernel":  # <ACT, C, NW, WPW, TS, ST, SPLIT, MINB, EPI>
@@ -53,7 +53,7 @@ def main():
         kind = name.split("<")[0]
         t = [int(v) if v.lstrip("-").isdigit() else (1 if v == "true" else 0)
              for v in re.findall(r"[-\w]+", name.split("<", 1)[1].split(">")[0])]
-        threads = 32 * (t[3] if kind in ("sg_fwd_kernel", "sg_dx_kernel") else t[2])
+        threads = 32 * (t[3] if kind in ("sg_fwd_kernel", "sg_dx_kernel", "sgx_dx_kernel") else t[2])
         smem = smem_bytes(kind, t, args.S, args.dx_group_warps)
         ctas, warps, lim = residency(regs, threads, smem) if smem <= 99 * 1024 else (0, 0, "smem > 99 KiB")
         rows.append(dict(kernel=name, regs=regs, stack=stack, local=local, threads=threads, S=args.S,

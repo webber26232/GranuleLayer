@@ -21,6 +21,8 @@
 //            quarter-warp k takes the records of fan-in position 2k (2k + 1) at token u from
 //            lane 4u + k, so each 128-bit phase touches the 8 records of ONE feature: no bank
 //            conflicts for any layout (records in token order)
+//   SC_SWZ4M SC_SWZ4 (shared-copy capable) compiled for 3 CTAs / SM at 8 warps (<= 80 registers,
+//            the baseline's residency at S = 64, T = 64: SC_SWZ4 needs 82 -> 2 CTAs / SM)
 //   SC_VEC4H / SC_VEC4TH  SC_VEC4 / SC_VEC4T with the record addresses computed once per block
 //            (the offset is linear in the tile pair: base + 32 mp floats) instead of per record
 //            (NVCC re-materialises the copy base from the thread id in the unrolled loop)
@@ -37,10 +39,12 @@
 #include "sparse_pool_sg.cuh"
 
 enum { SC_BASE = 0, SC_SWZ4 = 1, SC_VEC4 = 2, SC_VEC4P = 3, SC_OWNER = 4, SC_BASEP = 5, SC_SWZ4P = 6, SC_VEC4T = 7, SC_VEC4H = 8,
-       SC_VEC4TH = 9 };
+       SC_VEC4TH = 9, SC_SWZ4M = 10 };
 // slab layout of a variant (the hoisted variants share the vector layouts)
 template <int SC>
-struct SgxLayout { static constexpr int L = SC == SC_VEC4H ? SC_VEC4 : (SC == SC_VEC4TH ? SC_VEC4T : SC); };
+struct SgxLayout {
+  static constexpr int L = SC == SC_VEC4H ? SC_VEC4 : (SC == SC_VEC4TH ? SC_VEC4T : (SC == SC_SWZ4M ? SC_SWZ4 : SC));
+};
 
 // float offset of (local feature f, local token t) inside one FP32 slab copy (MT >= 2)
 template <int SC_, int MT>
@@ -136,7 +140,7 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int q = a.chunks[3 * blockIdx.x], lo = a.chunks[3 * blockIdx.x + 1], hi = a.chunks[3 * blockIdx.x + 2];
   const int t0 = blockIdx.y * BM;
-  constexpr bool CT_PRIV = SC != SC_SWZ4;  // compile-time warp-private (the launch checks dx_group_warps == 1)
+  constexpr bool CT_PRIV = SC != SC_SWZ4 && SC != SC_SWZ4M;  // compile-time warp-private (the launch checks dx_group_warps == 1)
   const int WG = CT_PRIV ? 1 : a.dx_group_warps;
   const int ncopy = NW / WG;
   const bool priv = WG == 1;
@@ -286,7 +290,7 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
 }
 
 template <int ACT, int C, int MT, int NW, bool SPLIT, int EPI, int SC, int NS>
-__global__ void __launch_bounds__(NW * 32) sgx_dx_kernel(SgArgs a) {
+__global__ void __launch_bounds__(NW * 32, (SC == SC_SWZ4M && NW == 8) ? 3 : 1) sgx_dx_kernel(SgArgs a) {
   if (EPI && !(a.nonfinite && *a.nonfinite)) sgx_dx_body<ACT, C, MT, NW, SPLIT, EPI, SC, NS>(a);
   else sgx_dx_body<ACT, C, MT, NW, SPLIT, 0, SC, NS>(a);
 }
