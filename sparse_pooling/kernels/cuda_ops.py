@@ -561,7 +561,9 @@ class CudaBackend:
         _mark("fwd.finalize")
         rt.last_info.update(phys_splits=1, workspace_bytes=ysum.numel() * 4, forward_kernel="grouped",
                             grouped_fwd=dict(tokens=T, warps=nw, chunk_units=cu, ctas=ch.shape[0] * math.ceil(B / T),
-                                             chunks=ch.shape[0], items=items.shape[0]))
+                                             chunks=ch.shape[0], items=items.shape[0],
+                                             work_list_bytes=items.numel() * items.element_size()
+                                             + ch.numel() * ch.element_size()))
         return {"pre": pre}
 
     def _sg_dx(self, rt, a, dxt, c1T, B, split, dx_epi, stream):
@@ -576,7 +578,9 @@ class CudaBackend:
             raise RuntimeError(f"sp_sg_dx failed (code {err})")
         rt.last_info["grouped_dx"] = dict(tokens=T, warps=nw, reduction_group_warps=wg, chunk_units=cu,
                                           ctas=ch.shape[0] * math.ceil(B / T), chunks=ch.shape[0],
-                                          smem=sg_smem("dx", L.input_dim, rt.sg.S, T, nw, wg))
+                                          smem=sg_smem("dx", L.input_dim, rt.sg.S, T, nw, wg),
+                                          work_list_bytes=items.numel() * items.element_size()
+                                          + ch.numel() * ch.element_size())
         return dxt.t()
 
     def _sg_dw(self, rt, a, c1T, split, dw_epi, stream):
@@ -594,7 +598,9 @@ class CudaBackend:
             err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, 0, ch.shape[0], stream)
         if err != 0:
             raise RuntimeError(f"sp_sg_dw failed (code {err})")
-        rt.last_info["grouped_dw"] = dict(cfg=cfg, ctas=ch.shape[0], smem=sg_smem("dw", L.input_dim, rt.sg.S, dw_cfg=cfg))
+        rt.last_info["grouped_dw"] = dict(cfg=cfg, ctas=ch.shape[0], smem=sg_smem("dw", L.input_dim, rt.sg.S, dw_cfg=cfg),
+                                          work_list_bytes=units.numel() * units.element_size()
+                                          + ch.numel() * ch.element_size())
 
     # ---------------------------------------------------------------- backward
     def supports_backward(self, rt) -> bool:
