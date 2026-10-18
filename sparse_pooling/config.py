@@ -266,8 +266,8 @@ class PhysicalPlan:
     # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_staging: str = "auto"
     # forward Mean epilogue chunking: "baseline" (2 n8 tiles per chunk), "chunk4" (4 tiles;
-    # packed C >= 32, bitwise identical) or "auto" (= chunk4 at C = 64, where it was
-    # measured; results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md)
+    # packed C >= 32, bitwise identical) or "auto" (= chunk4 for Mean(ReLU) at C = 64, where it
+    # was measured faster; Mean(identity) measured slower; results/MMA_FORWARD_EPILOGUE_OPTIMIZATION.md)
     cuda_fwd_mean_epilogue: str = "auto"
 
     def __post_init__(self):

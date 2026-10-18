@@ -387,8 +387,8 @@ class CudaBackend:
         if plan.cuda_fwd_mean_epilogue == "baseline":
             return "baseline"
         reason = CudaBackend.fwd_mean_epilogue_reason(lv, L)
-        if not reason and (plan.cuda_fwd_mean_epilogue == "chunk4" or L.block == 64):
-            return "chunk4"  # auto: measured at C = 64 only
+        if not reason and (plan.cuda_fwd_mean_epilogue == "chunk4" or (L.block == 64 and lv.activation == "relu")):
+            return "chunk4"  # auto: measured faster for Mean(ReLU) at C = 64 (Mean(identity): slower)
         if not reason:
             return "baseline"
         if plan.cuda_fwd_mean_epilogue == "chunk4":  # explicit request: never fall back silently

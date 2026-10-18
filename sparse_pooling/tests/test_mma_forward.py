@@ -183,6 +183,19 @@ def test_auto_selection_by_block(C, want):
 
 
 @requires_cuda_backend
+@pytest.mark.parametrize("pooling,want", [("mean", "chunk4"), ({"type": "mean", "activation": "identity"}, "baseline")],
+                         ids=str)
+def test_auto_selection_by_activation(pooling, want):
+    """auto: chunk4 only for Mean(ReLU) (Mean(identity) measured slower); explicit chunk4 still applies."""
+    lay, w, b = make_layer(1024, 20000, 8, 64, pooling, "auto", "cuda", plan=_plan("auto"))
+    run_both(lay, w, b, 40, 1024)
+    assert lay.last_info["fwd_mean_epilogue"] == want and "fwd_mean_epilogue_fallback" not in lay.last_info
+    lay.plan = _plan("chunk4")
+    run_both(lay, w, b, 40, 1024)
+    assert lay.last_info["fwd_mean_epilogue"] == "chunk4"
+
+
+@requires_cuda_backend
 @pytest.mark.parametrize("fe", ["baseline", "chunk4", "auto"])
 def test_mode_a_unchanged(fe):
     """Mode A (independent indices) never reaches the packed Mode-B kernels."""
