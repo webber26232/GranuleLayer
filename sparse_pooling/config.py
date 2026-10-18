@@ -227,6 +227,10 @@ class PoolingConfig:
         return " -> ".join(lv.describe() for lv in self.levels)
 
 
+DX_SCATTERS = ("auto", "baseline", "baseline_private", "swizzle4", "vectorized", "vectorized_transpose", "vectorized_parity",
+               "feature_owner")
+
+
 @dataclass
 class PhysicalPlan:
     """Execution-only reduction hierarchy (does not change the model).
@@ -284,6 +288,14 @@ class PhysicalPlan:
     # copies (plain read-modify-write), = warps: one CTA slab with 64-bit CAS; 0 = auto
     cuda_grouped_dx_reduction: int = 0
     cuda_grouped_dx_chunk_units: int = 0
+    # grouped C = 8 dX local accumulation (sparse_pool_sg_dxs.cuh): "baseline" (float2 slab
+    # read-modify-write, 2 bank groups), "baseline_private" (control: same layout compiled for
+    # warp-private copies), "swizzle4" (same order, 4 bank groups), "vectorized"
+    # (float4 records of two m16 tiles, 4 bank groups; warp-private copies), "vectorized_transpose"
+    # (float4 records after a shuffle transpose: one feature per 128-bit phase), "vectorized_parity"
+    # (layout control: float4 records, 2 bank groups), "feature_owner" (MMA-routed register
+    # accumulators, S <= 32, warp-private; different FP32 summation order), "auto" (measured)
+    cuda_grouped_dx_scatter: str = "auto"
     cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
     cuda_grouped_merge: str = "atomic"  # supergroup -> global merge (FP32 atomics, bounded scratch)
 
@@ -301,6 +313,7 @@ class PhysicalPlan:
         assert self.cuda_grouped_dx_tokens in (0, 16, 32, 64, 128)
         assert self.cuda_grouped_fwd_warps in (0, 4, 8, 16)
         assert self.cuda_grouped_dx_warps in (0, 8, 16)
+        assert self.cuda_grouped_dx_scatter in DX_SCATTERS
         assert self.cuda_grouped_merge == "atomic"
 
     def grouped_request(self, phase: str) -> str:

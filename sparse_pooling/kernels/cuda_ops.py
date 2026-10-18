@@ -177,6 +177,27 @@ SG_AUTO_C64_LARGE_BUCKETS = {"dx": ((64, 8, 8), 64, ("split",)), "dw": (2, 16, (
                              "min_bucket_units": 3.0}
 
 
+# grouped dX local-accumulation variants (PhysicalPlan.cuda_grouped_dx_scatter): kernel id
+# (sparse_pool_sg_dxs.cuh SC_*), slab layout, and FP32 summation-order category relative to
+# the baseline ("same": every (feature, token) of a warp's copy receives the same additions in
+# the same order; "mma_accumulate": contributions are summed inside the MMA accumulators)
+SG_DX_SCATTERS = {
+    "baseline": dict(sc=0, layout="float2 pairs, 2 bank groups (sg_dxs_off)", order="same"),
+    "baseline_private": dict(sc=5, layout="float2 pairs, 2 bank groups; compile-time warp-private (control)",
+                             order="same"),
+    "swizzle4": dict(sc=1, layout="float2 pairs, 4 bank groups", order="same"),  # sc 6 when warp-private
+    "vectorized": dict(sc=2, layout="float4 two-tile records, 4 bank groups", order="same"),
+    "vectorized_transpose": dict(sc=7, layout="float4 two-tile records after an 8-shuffle transpose, conflict-free",
+                                 order="same"),
+    "vectorized_parity": dict(sc=3, layout="float4 two-tile records, 2 bank groups", order="same"),
+    "feature_owner": dict(sc=4, layout="register accumulators [T, S] (MMA-routed), one store per CTA",
+                          order="mma_accumulate"),
+}
+# measured "auto" choice per (C, S, dX tokens, warps, warps per copy, precision); anything not
+# listed keeps the baseline
+SG_AUTO_DX_SCATTER = {}
+
+
 def sg_auto(C: int, S: int):
     keys = sorted(k[1] for k in SG_AUTO if k[0] == C)
     k = max([s_ for s_ in keys if s_ <= S], default=keys[0])
@@ -284,6 +305,17 @@ class CudaBackend:
                 f = getattr(self.lib, f"sp_sg_dx_c{C}_{an}")
                 f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
                 self.sg_fns[("dx", C, act)] = f
+            if C == 8:  # experimental dX scatter variants (sparse_pool_sg_dxs.cuh)
+                for act, an in ((0, "a_id"), (1, "a_relu")):
+                    f = getattr(self.lib, f"sp_sgx_dx_c8_{an}")
+                    f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 7 + [ctypes.c_void_p]
+                    self.sg_fns[("dxs", C, act)] = f
+                    f = getattr(self.lib, f"sp_sgo_dx_c8_{an}")
+                    f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+                    self.sg_fns[("dxo", C, act)] = f
+            if C == 8:
+                self.lib.sp_sgx_layout.restype = ctypes.c_int
+                self.lib.sp_sgx_layout.argtypes = [ctypes.c_int] * 3 + [ctypes.c_void_p] * 2
             f = getattr(self.lib, f"sp_sg_dw_c{C}")
             f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
             self.sg_fns[("dw", C)] = f
@@ -522,6 +554,38 @@ class CudaBackend:
                     T //= 2
         return T, nw, wg, p.cuda_grouped_dx_chunk_units or SG_CHUNK_UNITS["dx"]
 
+    def sg_dx_scatter(self, rt, T: int, nw: int, wg: int):
+        """(variant, fallback reason) of the grouped dX local accumulation.  An explicit
+        unsupported request raises; auto keeps the baseline outside the measured cases."""
+        req = rt.plan.cuda_grouped_dx_scatter
+        name = req
+        if req == "auto":
+            name = SG_AUTO_DX_SCATTER.get((rt.layout.block, rt.sg.S, T, nw, wg, rt.plan.grad_precision), "baseline")
+        why = ""
+        if name != "baseline":
+            if rt.layout.block != 8:
+                why = f"implemented for C = 8 only (C = {rt.layout.block})"
+            elif T < 32:
+                why = f"needs >= 2 m16 token tiles (cuda_grouped_dx_tokens >= 32, got {T})"
+            elif name != "swizzle4" and wg != 1:
+                why = f"{name} needs warp-private copies (cuda_grouped_dx_reduction = 1, got {wg})"
+            elif name == "feature_owner" and rt.sg.S > 32:
+                why = f"feature_owner keeps S x T accumulators in registers: S <= 32 (S = {rt.sg.S})"
+        if why:
+            if req != "auto":
+                raise ValueError(f"cuda_grouped_dx_scatter={req!r} unavailable: {why}")
+            return "baseline", why
+        return name, ""
+
+    def sgx_layout(self, sc: int, tokens: int, S: int) -> torch.Tensor:
+        """Device offsets sgx_off<sc, tokens / 16>(f, t) [S, tokens] of a dX slab layout (diagnostics)."""
+        out = torch.empty((S, tokens), dtype=torch.int32, device="cuda")
+        err = self.lib.sp_sgx_layout(sc, tokens // 16, S, _ptr(out),
+                                     ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
+        if err != 0:
+            raise RuntimeError(f"sp_sgx_layout failed (code {err})")
+        return out
+
     def sg_dw_cfg(self, rt) -> int:
         p = rt.plan
         if p.cuda_grouped_dw_cfg >= 0:
@@ -572,13 +636,30 @@ class CudaBackend:
         items, ch = rt.sg.item_chunks(cu)
         a.items, a.chunks, a.c1T, a.dXT, a.dx_group_warps = _ptr(items), _ptr(ch), _ptr(c1T), _ptr(dxt), wg
         epi = {"generic": 0, "mask": 2}[dx_epi]
-        err = self.sg_fns[("dx", L.block, rt.level.act_id)](ctypes.byref(a), T // 16, nw, split, epi, ch.shape[0],
-                                                            math.ceil(B / T), stream)
+        scatter, why = self.sg_dx_scatter(rt, T, nw, wg)
+        sc = SG_DX_SCATTERS[scatter]["sc"]
+        act = rt.level.act_id
+        gx, gy = ch.shape[0], math.ceil(B / T)
+        if sc == 0:
+            err = self.sg_fns[("dx", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy, stream)
+            kernel = f"sg_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}>"
+        elif sc == 4:
+            err = self.sg_fns[("dxo", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy, stream)
+            ns = 1 if rt.sg.S <= 8 else (2 if rt.sg.S <= 16 else 4)
+            kernel = f"sgx_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}, 4, {ns}>"
+        else:
+            if sc == 1 and wg == 1:
+                sc = 6  # SC_SWZ4P: the swizzle4 layout compiled for warp-private copies
+            err = self.sg_fns[("dxs", L.block, act)](ctypes.byref(a), sc, T // 16, nw, split, epi, gx, gy, stream)
+            kernel = f"sgx_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}, {sc}, 1>"
         if err != 0:
-            raise RuntimeError(f"sp_sg_dx failed (code {err})")
+            raise RuntimeError(f"sp_sg_dx ({scatter}) failed (code {err})")
         rt.last_info["grouped_dx"] = dict(tokens=T, warps=nw, reduction_group_warps=wg, chunk_units=cu,
-                                          ctas=ch.shape[0] * math.ceil(B / T), chunks=ch.shape[0],
+                                          ctas=gx * gy, chunks=ch.shape[0],
                                           smem=sg_smem("dx", L.input_dim, rt.sg.S, T, nw, wg),
+                                          scatter=scatter, scatter_layout=SG_DX_SCATTERS[scatter]["layout"],
+                                          scatter_order=SG_DX_SCATTERS[scatter]["order"], scatter_fallback=why,
+                                          kernel=kernel, epilogue=dx_epi,
                                           work_list_bytes=items.numel() * items.element_size()
                                           + ch.numel() * ch.element_size())
         return dxt.t()
