@@ -129,6 +129,7 @@ def main():
         from sparse_pooling.supergroups import SupergroupGraph
         g = None if conn is None else SupergroupGraph(conn, lay.sg_feat, lay.sg_buckets)
         val = validate(L, idx_c, g)
+        del idx_c  # (kept alive by the runs reported in INPUT_SUPERGROUP_OPTIMIZATION.md: +0.19 GiB peak at C = 8)
     lay.enable_main_grad()
     opt = FusedAdamW([lay.weight, lay.bias], lr=1e-4, moments="bf16")
     gx = torch.Generator(device="cuda")

@@ -227,3 +227,12 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
   `benchmarks/profile_ncu.sh` profiles the hot kernels with the relevant metrics when run with
   sudo.  Bottlenecks in this work were established with micro-benchmarks and ablation builds
   (see REPORT.md); DRAM/L2 byte counts quoted are analytic.
+
+## Input-supergroup connectivity (optional architecture)
+
+`SparsePoolingLayer(..., connectivity=ConnectivityPlan(input_supergroup_dim=S, partition_rounds=R))`
+restricts every index record to one of Q = R·D/S seeded input sets (`supergroups.py`: generator,
+validator, compact metadata saved in the state dict).  The default stays unrestricted.  With
+`PhysicalPlan(cuda_input_supergroup_backend="auto")` the measured grouped Mean kernels run where they
+are faster (H = 100M, M = 8192, C = 8, S = 16: step 4.85 s → 2.72 s; C = 64: 1.76 s → 1.70 s); see
+`results/INPUT_SUPERGROUP_OPTIMIZATION.md`.
