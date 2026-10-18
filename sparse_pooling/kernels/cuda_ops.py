@@ -169,6 +169,12 @@ SG_AUTO = {
     (8, 512): (None, None, None),
 }
 SG_CHUNK_UNITS = {"fwd": 2048, "dx": 4096}
+# C = 64 with large buckets (mean work units per nonempty (output, supergroup) bucket >= 3; H = 100M:
+# ~6, H = 10M: ~1): the grouped dX (all S <= 64) and the grouped dW (S <= 16) are faster at
+# H = 100M (-15 ms each, 4 interleaved rounds, +-2 ms) although slower at H = 10M; with BF16
+# gradients the grouped dX (generic epilogue) is slower (614 vs 599 ms): split only
+SG_AUTO_C64_LARGE_BUCKETS = {"dx": ((64, 8, 8), 64, ("split",)), "dw": (2, 16, ("split", "bf16")),
+                             "min_bucket_units": 3.0}
 
 
 def sg_auto(C: int, S: int):
@@ -478,7 +484,14 @@ class CudaBackend:
     @staticmethod
     def sg_auto_phase(rt, phase: str):
         """Measured auto configuration of a phase (None: generic is faster)."""
-        return sg_auto(rt.layout.block, rt.sg.S)[("fwd", "dx", "dw").index(phase)]
+        C, S = rt.layout.block, rt.sg.S
+        cfg = sg_auto(C, S)[("fwd", "dx", "dw").index(phase)]
+        big = SG_AUTO_C64_LARGE_BUCKETS
+        if C == 64 and phase in ("dx", "dw") and rt.sg.mean_bucket_units() >= big["min_bucket_units"]:
+            c, s_max, precisions = big[phase]
+            if S <= s_max and rt.plan.grad_precision in precisions:
+                cfg = c
+        return cfg
 
     def sg_fwd_cfg(self, rt):
         """(tokens, warps, chunk units) of the grouped forward (auto: SG_AUTO, else the largest

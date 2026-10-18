@@ -509,6 +509,9 @@ class SgExec:
         self.feat = feat.contiguous()
         self.graph = SupergroupGraph(None, self.feat, buckets.contiguous())
         self.S, self.Q = self.feat.shape[1], self.feat.shape[0]
+        b = self.graph.buckets
+        # host copy once at construction: no device sync in the per-step dispatch
+        self._mean_bucket_units = float(b[:, 3].double().mean()) if len(b) else 0.0
         self._cache: Dict = {}
 
     def item_chunks(self, target_units: int, max_units: int = 0):
@@ -538,6 +541,9 @@ class SgExec:
             ch = torch.stack([qs, lo, hi], 1).to(torch.int32).to(units.device).contiguous()
             self._cache[key] = (units, ch)
         return self._cache[key]
+
+    def mean_bucket_units(self) -> float:
+        return self._mean_bucket_units
 
     def runtime_bytes(self) -> int:
         """Persistent bytes of the cached work lists (excluding feat / buckets)."""

@@ -27,6 +27,15 @@
 #pragma once
 #include "sparse_pool_bwd.cuh"
 
+// Attribution ablations (benchmarks only, WRONG results; separate builds through
+// SPARSE_POOL_NVCC_EXTRA=-DSP_ABLATE_SG=n):
+//   1: sg_dx without the global dX flush (no FP32 atomics to dXT)
+//   2: sg_dx without the local slab scatter (products kept live, never stored)
+//   3: sg_fwd without the per-(token, item) global atomics
+#ifndef SP_ABLATE_SG
+#define SP_ABLATE_SG 0
+#endif
+
 struct SgArgs {
   const bf16* X;  // feature-major X^T: element (b, f) at X[f * sxf + b]
   long long sxf;
@@ -191,7 +200,11 @@ __global__ void __launch_bounds__(NW * 32) sg_fwd_kernel(SgArgs a) {
 #pragma unroll
     for (int i = 0; i < 2 * MT; i++) {
       const int tok = t0 + (i >> 1) * 16 + (i & 1) * 8 + (lane >> 2);
-      if (tok < a.B) atomicAdd(a.ysum + (long long)g * a.B + tok, s[i]);
+      if (SP_ABLATE_SG == 3) {
+        if (s[i] == 1.2345e-30f) a.ysum[g] = s[i];
+      } else if (tok < a.B) {
+        atomicAdd(a.ysum + (long long)g * a.B + tok, s[i]);
+      }
     }
   }
   SG_ITEM_LOOP_END
@@ -329,7 +342,9 @@ __device__ __forceinline__ void sg_dx_body(const SgArgs& a) {
       else sg_dx_tile<ACT, C, SPLIT, true, EPI>(da, af + 2 * mt, blk, wt, j, n_g, rc[mt], lane);
       float* p0 = mys + sg_dxs_off<MT>(f0, 16 * mt + t);
       float* p1 = mys + sg_dxs_off<MT>(f1, 16 * mt + t);
-      if (priv) {  // this warp owns the copy and a record's features are distinct: no races
+      if (SP_ABLATE_SG == 2) {
+        if (da[0] + da[1] + da[2] + da[3] == 1.2345e-30f) mys[f0 & 7] = (float)f1;
+      } else if (priv) {  // this warp owns the copy and a record's features are distinct: no races
         float2 v0 = *reinterpret_cast<float2*>(p0), v1 = *reinterpret_cast<float2*>(p1);
         v0.x += da[0]; v0.y += da[2]; v1.x += da[1]; v1.y += da[3];
         *reinterpret_cast<float2*>(p0) = v0;
@@ -350,6 +365,7 @@ __device__ __forceinline__ void sg_dx_body(const SgArgs& a) {
     float v = dxs[o];
     for (int c = 1; c < ncopy; c++) v += dxs[c * a.S * BM + o];
     const int tok = t0 + tl;
+    if (SP_ABLATE_SG == 1) v = (v == 1.2345e-30f) ? v : 0.f;
     if (tok < a.B && v != 0.f) atomicAdd(a.dXT + (long long)fq[f] * a.B + tok, v);
   }
 }
