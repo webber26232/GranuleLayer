@@ -79,6 +79,14 @@ __device__ __forceinline__ void mma_m16n8k8_bf16(float* d, uint32_t a0, uint32_t
       : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
       : "r"(a0), "r"(a1), "r"(b), "f"(c0), "f"(c1), "f"(c2), "f"(c3));
 }
+// D = A(16x8, row) * B(8x8, col) + D: the accumulator registers are both C and D
+// (ties input and output, the usual PTX accumulate form)
+__device__ __forceinline__ void mma_m16n8k8_bf16_acc(float* d, uint32_t a0, uint32_t a1, uint32_t b) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+      : "r"(a0), "r"(a1), "r"(b));
+}
 // D += A(16x16, row) * B(16x8, col)
 __device__ __forceinline__ void mma_m16n8k16_bf16(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
   asm volatile(

@@ -40,10 +40,11 @@ def classify(op):
 
 def kernel_sass(lib, demangled):
     out = subprocess.run(["cuobjdump", "-sass", str(lib)], capture_output=True, text=True).stdout
-    for chunk in re.split(r"\n\s+Function : ", out)[1:]:
-        name = chunk.split("\n", 1)[0].strip()
-        d = subprocess.run(["cu++filt", name], capture_output=True, text=True).stdout.strip()
-        d = re.sub(r"\(int\)|\(bool\)|void |\(BwdArgs\)|\(FwdArgs\)", "", d)
+    chunks = re.split(r"\n\s+Function : ", out)[1:]
+    names = [c.split("\n", 1)[0].strip() for c in chunks]
+    dem = subprocess.run(["cu++filt"], input="\n".join(names), capture_output=True, text=True).stdout.splitlines()
+    for chunk, d in zip(chunks, dem):
+        d = re.sub(r"\(int\)|\(bool\)|void |\(BwdArgs\)|\(FwdArgs\)", "", d.strip())
         if d == demangled:
             return chunk
     raise SystemExit(f"kernel {demangled!r} not found")

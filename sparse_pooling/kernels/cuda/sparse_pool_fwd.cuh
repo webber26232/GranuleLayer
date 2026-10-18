@@ -16,8 +16,22 @@
 
 // SP_ABLATE_FWD 1 (benchmarks only, WRONG results): every warp re-loads its first
 // work unit, so parameter streaming becomes cache hits (attribution of param traffic)
+// SP_ABLATE_FWD 2 (WRONG results): no bias, the MMA accumulator input is zero (cost of
+// forming the bias C fragments); 3: as 2 and the epilogue folds one element per MMA
+// into the pooling sum instead of four (cost of the ReLU + accumulate epilogue);
+// 4: as 2 but the bias is still loaded (added once per n-tile to the sum)
 #ifndef SP_ABLATE_FWD
 #define SP_ABLATE_FWD 0
+#endif
+// Phase-3 forward screening variants (bitwise identical):
+//   SP_FWD_EPI bit 0: one bias C fragment per n-tile, last token half accumulates in place
+//              bit 1: two alternating parameter buffers instead of the ring-slot copy
+//   SP_FWD_NTC n: Mean epilogue chunk of n n8 tiles (default 2)
+#ifndef SP_FWD_EPI
+#define SP_FWD_EPI 0
+#endif
+#ifndef SP_FWD_NTC
+#define SP_FWD_NTC 0
 #endif
 
 struct FwdArgs {
@@ -263,7 +277,8 @@ template <int POOL, int ACT, int C, int MT, bool TRACK, int P_INT, bool MASKED>
 __device__ __forceinline__ void process_block(PoolState<POOL, P_INT>* st, const BlockRegs<C>& cur, int j, int n_g,
                                               uint32_t slab_s, int lane, float scale, float p) {
   constexpr int NT = C / 8;
-  constexpr int NTC = NT < 2 ? NT : 2;  // n8 tiles per epilogue chunk (bounds register use)
+  constexpr int NTC0 = NT < 2 ? NT : 2;  // n8 tiles per epilogue chunk (bounds register use)
+  constexpr int NTC = (SP_FWD_NTC && POOL == P_MEAN) ? (SP_FWD_NTC < NT ? SP_FWD_NTC : NT) : NTC0;
   const int mat = lane >> 3;
   const int col0 = 2 * (lane & 3);
   uint32_t af[4];
@@ -279,9 +294,29 @@ __device__ __forceinline__ void process_block(PoolState<POOL, P_INT>* st, const 
 #pragma unroll
     for (int q = 0; q < NTC; q++) {
       float2 bf = bf16x2_to_float2(cur.bb[n0 + q]);
+      if (SP_FWD_EPI & 1) {
+        // one bias fragment per n-tile: the last token half accumulates into it in place
+        float c[4] = {bf.x, bf.y, bf.x, bf.y};
+#pragma unroll
+        for (int mt = 0; mt < MT - 1; mt++)
+          mma_m16n8k8_bf16(d[q][mt], af[2 * mt], af[2 * mt + 1], cur.w[n0 + q], c[0], c[1], c[2], c[3]);
+        mma_m16n8k8_bf16_acc(c, af[2 * MT - 2], af[2 * MT - 1], cur.w[n0 + q]);
+#pragma unroll
+        for (int e = 0; e < 4; e++) d[q][MT - 1][e] = c[e];
+        continue;
+      }
+      if (SP_ABLATE_FWD == 4) st[0].s += bf.x + bf.y;
+      if (SP_ABLATE_FWD >= 2) bf = make_float2(0.f, 0.f);
 #pragma unroll
       for (int mt = 0; mt < MT; mt++)
         mma_m16n8k8_bf16(d[q][mt], af[2 * mt], af[2 * mt + 1], cur.w[n0 + q], bf.x, bf.y, bf.x, bf.y);
+    }
+    if (SP_ABLATE_FWD == 3) {
+#pragma unroll
+      for (int q = 0; q < NTC; q++)
+#pragma unroll
+        for (int mt = 0; mt < MT; mt++) st[2 * mt].s += d[q][mt][0];
+      continue;
     }
     int slot[2 * NTC];
     bool valid[2 * NTC];
@@ -338,6 +373,29 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
     constexpr int QPD = (C == 64) ? 1 : 2;
     const long long ubase = (gbase + b_lo) / UB;  // flat unit index of b_lo
     const int nu_full = (b_full - b_lo) / UB;
+    auto unit_blocks = [&](const Unit<C>& cur, int uu) {
+#pragma unroll
+      for (int bu = 0; bu < UB; bu++) {
+        BlockRegs<C> blk;
+        unit_block<C>(blk, cur, bu);
+        process_block<POOL, ACT, C, MT, TRACK, P_INT, false>(st, blk, b_lo + uu * UB + bu, n_g, slab_s, lane,
+                                                             a.scale, a.p);
+      }
+    };
+    if constexpr ((SP_FWD_EPI & 2) && QPD == 1) {
+      // same order and prefetch distance (unit uu + NW is requested before unit uu is
+      // processed), two alternating register buffers instead of a copy out of one ring slot
+      Unit<C> ra, rb;
+      if (warp < nu_full) load_unit<C>(ra, a, ubase + warp, lane);
+      for (int uu = warp; uu < nu_full; uu += 2 * NW) {
+        const int u1 = uu + NW;
+        if (u1 < nu_full) load_unit<C>(rb, a, ubase + u1, lane);
+        unit_blocks(ra, uu);
+        if (u1 >= nu_full) break;
+        if (u1 + NW < nu_full) load_unit<C>(ra, a, ubase + u1 + NW, lane);
+        unit_blocks(rb, u1);
+      }
+    } else {
     Unit<C> ring[QPD];
 #pragma unroll
     for (int q = 0; q < QPD; q++)
@@ -359,6 +417,7 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
           }
         }
       }
+    }
     }
     // ---- tail: the single unit containing the partially valid block(s)
     const int bt = b_lo + nu_full * UB;

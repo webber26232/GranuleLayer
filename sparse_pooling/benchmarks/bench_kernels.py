@@ -26,7 +26,7 @@ from sparse_pooling.config import PhysicalPlan
 from sparse_pooling.kernels import cuda_ops
 from sparse_pooling.optim import FusedAdamW
 
-POOLINGS = {"mean": "mean", "max": "max", "lme": {"type": "logmeanexp", "temperature": 0.5},
+POOLINGS = {"mean": "mean", "mean_id": {"type": "mean", "activation": "identity"}, "max": "max", "lme": {"type": "logmeanexp", "temperature": 0.5},
             "sw": {"type": "softmax_weighted", "beta": 1.0}, "pow2": {"type": "power_mean", "p": 2}}
 
 # (phase, start mark, end mark); marks from cuda_ops plus the step-level ones below
