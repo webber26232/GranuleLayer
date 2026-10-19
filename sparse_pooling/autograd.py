@@ -92,6 +92,7 @@ class Level1Runtime:
         self._resolver = None
         self._resolver_key = None
         self._resolved: Dict = {}
+        self._recorded: Dict = {}  # ResolvedPlan objects already written to last_info["execution"]
 
     # ------------------------------------------------------- execution facts
     @property
@@ -131,10 +132,29 @@ class Level1Runtime:
             if len(self._resolved) > 64:
                 self._resolved.clear()
             rp = self._resolved[key] = r.resolve(self, B, part)
-        self.last_info["execution"] = dict(self.last_info.get("execution") or {})
-        self.last_info["execution"].update(self.describe_execution())
-        self.last_info["execution"]["forward" if part == "fwd" else "backward"] = rp.as_dict()
+        ex = self.last_info.get("execution")
+        name = "forward" if part == "fwd" else "backward"
+        if ex is None or self._recorded.get(name) is not rp or self._recorded.get("resolver") is not r:
+            ex = dict(ex or {}, **self.describe_execution())  # record only when the choice changes
+            ex[name] = rp.as_dict()
+            self._recorded.update({name: rp, "resolver": r})
+            self.last_info["execution"] = ex
         return rp
+
+    def det_reason(self, B: int) -> str:
+        """Why the deterministic reduction cannot run for this call ("" if it can); cached per batch,
+        plan field values and profile (static facts of the layer)."""
+        from .backends.dispatch import plan_key
+
+        r = self.resolver
+        key = ("det", B, plan_key(self.plan))
+        if key not in self._resolved:
+            self.det = True  # det_reason resolves the deterministic dX configuration
+            try:
+                self._resolved[key] = r.det_reason(self, B)
+            finally:
+                self.det = False
+        return self._resolved[key]
 
     def describe_execution(self) -> Dict:
         """Static part of last_info["execution"]: backend, device, build, profile."""
@@ -176,11 +196,7 @@ class Level1Runtime:
                 if self.last_info.get("backend_fallback"):
                     reason += f"; {self.last_info['backend_fallback']}"
             else:
-                self.det = True  # det_reason resolves the deterministic dX configuration
-                try:
-                    reason = self.resolver.det_reason(self, B)
-                finally:
-                    self.det = False
+                reason = self.det_reason(B)
             if reason:
                 msg = f"reduction='deterministic' ({why}) is unsupported for this layer: {reason}"
                 if strict:
