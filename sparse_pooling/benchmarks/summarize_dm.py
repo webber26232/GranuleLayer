@@ -18,7 +18,7 @@ PH = ["fwd_total", "det_fwd_stage1", "det_fwd_reduce", "dx_kernel", "det_dx_stag
       "bwd_total", "optimizer", "step"]
 PAIRS = [("det_padded", "fast_padded"), ("det_compact", "fast_compact"), ("fast_compact", "fast_padded"),
          ("det_compact", "det_padded"), ("cap256M", "cap1G"), ("cap4G", "cap1G"), ("cap1G", "fast"), ("det", "fast"),
-         ("compact", "padded")]
+         ("compact", "padded"), ("padded_mask", "padded"), ("compact", "padded_mask"), ("compact_nomovm", "padded")]
 
 
 def med(v, k):
