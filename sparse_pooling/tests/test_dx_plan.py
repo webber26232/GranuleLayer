@@ -25,7 +25,7 @@ def test_named_plan_conflicts_raise():
 
 def rule(**kw):
     r = dict(C=8, S=64, precisions=("split",), act="relu", cc=torch.cuda.get_device_capability(),
-             min_units_per_chunk=0, min_tokens=0, plan="private_t32")
+             min_units_per_bucket=0, min_tokens=0, plan="private_t32", below="tiles")
     r.update(kw)
     return [r]
 
@@ -76,11 +76,16 @@ def test_auto_rule_selects_and_reports(monkeypatch):
     assert plan == "private_t32" and cfg == (32, 8, 1, "vectorized_transpose_hoisted") and "scale rule" in why
     assert info["grouped_dx"]["kernel"] == "sgx_dx_kernel<1, 8, 2, 8, 1, 2, 9, 1>"
     # below the work threshold: the per-field automatic tiles (shared_t64 at C = 8, S = 64)
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_chunk=1e9))
+    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
     _, _, _, _, info = run(lay, x, dy)
     plan, cfg, why = ran_plan(info)
-    assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped") and "threshold" in why
+    assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped") and "units / bucket <" in why
+    # a named plan below the threshold
+    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9, below="shared_t64"))
+    lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
+    _, _, _, _, info = run(lay, x, dy)
+    assert ran_plan(info)[0] == "shared_t64"
     # below the token threshold
     monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_tokens=65))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
@@ -128,3 +133,21 @@ def test_rule_descriptor_is_cached_host_side():
     items, ch = sg.item_chunks(cuda_ops.SG_CHUNK_UNITS["dx"])
     assert st["chunks"] == ch.shape[0] and st["units"] == int(items[:, 2].sum())
     assert abs(st["units_per_chunk_mean"] * st["chunks"] - st["units"]) < 1e-6 * st["units"] + 1
+
+
+@requires_cuda_backend
+@pytest.mark.parametrize("precision,H,want", [("split", 200_000, "tiles"), ("split", 3_000_000, "private_t32"),
+                                              ("bf16", 200_000, "shared_t64"), ("bf16", 2_000_000, "private_t32")])
+def test_measured_rule(precision, H, want):
+    """The shipped rule: units per bucket of a G = 64, S = 64, R = 16 graph (Q = 256): H / 32 / (64 * 256)."""
+    lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped", grad_precision=precision), H=H)
+    ub = lay._runtime().sg.mean_bucket_units()
+    x, dy = inputs(1024, 1024, 64)
+    _, _, _, _, info = run(lay, x, dy)
+    plan, cfg, why = ran_plan(info)
+    if torch.cuda.get_device_capability() != (8, 6):
+        assert plan == "tiles"
+        return
+    assert plan == want, (ub, why)
+    _, _, _, _, info = run(lay, x[:512], dy[:512])  # M below the measured range: unchanged defaults
+    assert ran_plan(info)[0] == "tiles"

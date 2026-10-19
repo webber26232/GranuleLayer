@@ -212,11 +212,32 @@ SG_AUTO_DX_SCATTER = {
     (8, 64, 64, 8, 8, "split", "relu"): "swizzle4_capped",
 }
 # scale-aware whole-plan choice (PhysicalPlan.cuda_grouped_dx_plan = "auto" with every grouped dX
-# field automatic; results/SCALE_DISPATCH_FUSED_BACKWARD.md).  A rule applies to its (C, S,
-# precisions, activation, device capability); it selects ``plan`` when the cached mean work
-# units per dX chunk and the token count reach its thresholds, otherwise the per-field
-# automatic tiles ("tiles").  Unlisted configurations keep "tiles".
-SG_AUTO_DX_PLAN = []
+# field automatic; results/SCALE_DISPATCH_FUSED_BACKWARD.md section 5).  A rule applies to its (C,
+# S, precisions, activation, device capability) and M >= min_tokens; it selects ``plan`` when the
+# mean work units per nonempty (output, supergroup) bucket (cached at construction) reaches
+# min_units_per_bucket, else ``below``.  Anything else keeps "tiles" (the per-field defaults).
+# Measured (H = 1M-100M, G = 256 / 1024, R = 8 / 16 / 32, M = 1024-8192): the private T = 32 plan
+# gains with longer buckets (split: +16 % at 0.12 units / bucket ... -3.5 % at 14; crossover ~3);
+# thresholds keep the ambiguous region on the shared plan.  BF16: the shared plan beats the
+# previous BF16 default (the original scatter) by 5.7-7.3 % at H = 1M-100M; crossover ~1.5.
+SG_AUTO_DX_PLAN = [
+    dict(C=8, S=64, precisions=("split",), act="relu", cc=(8, 6), min_tokens=1024, min_units_per_bucket=4.0,
+         plan="private_t32", below="tiles"),
+    dict(C=8, S=64, precisions=("bf16",), act="relu", cc=(8, 6), min_tokens=1024, min_units_per_bucket=2.0,
+         plan="private_t32", below="shared_t64"),
+]
+
+
+# experimental fused shared-projection backward tilings (kernels/cuda/sg_bwdf_c8.cu SGF_CFGS):
+# cfg -> (warps, units per warp, 16-token tiles per window / ring stage, stages, min CTAs / SM)
+# (0-5: v1, tile-outer loops; 6-9: v2, block-outer / tile-inner 32-token windows with vector dX records)
+SGF_CFGS = {0: (8, 2, 4, 2, 1), 1: (8, 2, 4, 2, 2), 2: (8, 4, 4, 2, 1), 3: (8, 2, 2, 2, 2), 4: (16, 2, 2, 2, 1),
+            5: (8, 4, 2, 2, 1), 6: (8, 2, 2, 2, 2), 7: (16, 1, 2, 2, 1), 8: (8, 2, 2, 2, 1), 9: (8, 2, 2, 3, 2)}
+
+
+def sgf_smem(D: int, S: int, cfg: int) -> int:
+    nw, _, ts, st, _ = SGF_CFGS[cfg]
+    return (D * 2 + 15) // 16 * 16 + st * ts * S * 16 * 2 + nw * S * 16 * ts * 4
 
 
 def sg_auto(C: int, S: int):
@@ -579,12 +600,13 @@ class CudaBackend:
             cc = torch.cuda.get_device_capability(rt.idx.device)
             if cc != r["cc"]:
                 return "tiles", f"scale rule validated on sm_{r['cc'][0]}{r['cc'][1]} only (device sm_{cc[0]}{cc[1]})"
-            upc = rt.sg.item_chunk_stats(SG_CHUNK_UNITS["dx"])["units_per_chunk_mean"]
-            if upc >= r["min_units_per_chunk"] and B >= r["min_tokens"]:
-                return r["plan"], (f"scale rule: mean units / dX chunk {upc:.0f} >= {r['min_units_per_chunk']} "
-                                   f"and M = {B} >= {r['min_tokens']}")
-            return "tiles", (f"scale rule: mean units / dX chunk {upc:.0f} (threshold {r['min_units_per_chunk']}), "
-                             f"M = {B} (threshold {r['min_tokens']})")
+            if B < r["min_tokens"]:
+                return "tiles", f"scale rule: M = {B} < {r['min_tokens']} (not measured)"
+            ub = rt.sg.mean_bucket_units()
+            if ub >= r["min_units_per_bucket"]:
+                return r["plan"], f"scale rule: {ub:.2f} units / bucket >= {r['min_units_per_bucket']} (M = {B})"
+            return r["below"], f"scale rule: {ub:.2f} units / bucket < {r['min_units_per_bucket']} (M = {B})"
+
         return "tiles", f"no scale rule for C = {C}, S = {S}, {prec}, {act}"
 
     def sg_dx_cfg(self, rt, B: int = 0):
