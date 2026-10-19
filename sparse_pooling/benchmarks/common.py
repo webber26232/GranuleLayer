@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+# the implementation under test: this checkout, or GRANULE_IMPL_ROOT (another checkout of the
+# repository, e.g. the reviewed baseline in an old-versus-new comparison with the same tools)
+sys.path.insert(0, os.path.abspath(os.environ.get("GRANULE_IMPL_ROOT")
+                                   or os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import torch  # noqa: E402
 

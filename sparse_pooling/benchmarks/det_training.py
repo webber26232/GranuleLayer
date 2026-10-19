@@ -70,14 +70,18 @@ CASES = {
     "P_S16_R4": (1024, 1024, 100_000_000, 8192, 16, 4, 256, 256),
     "P_S32_R8": (1024, 1024, 100_000_000, 8192, 32, 8, 256, 256),
     "P_S64_R16": (1024, 1024, 100_000_000, 8192, 64, 16, 256, 256),
+    # C = 64 deterministic controls (medium; the 9th field is C, default 8)
+    "M64_S16_R4": (256, 64, 20_000_000, 1024, 16, 4, 128, 64, 64),
+    "M64_S64_R16": (256, 64, 20_000_000, 1024, 64, 16, 128, 64, 64),
     # harness self-test (run_det_training.sh selftest): seconds per process
     "T_S16_R4": (256, 64, 400_000, 256, 16, 4, 64, 32),
 }
 class Model:
     def __init__(self, case, seed, precision, opt_mode, reduction, plan_kw):
-        D, G, H, M, S, R, D0, G2 = case
+        D, G, H, M, S, R, D0, G2 = case[:8]
+        C = case[8] if len(case) > 8 else 8
         plan = PhysicalPlan(grad_precision=precision, reduction=reduction, **plan_kw)
-        self.lay = SparsePoolingLayer(D, H, G, shared_neurons=8, pooling="mean", device="cuda", seed=seed,
+        self.lay = SparsePoolingLayer(D, H, G, shared_neurons=C, pooling="mean", device="cuda", seed=seed,
                                       bias_std=0.2, plan=plan, connectivity=ConnectivityPlan(S, R, seed=seed))
         self.lay.enable_main_grad()
         if opt_mode == "fp32":
@@ -133,7 +137,7 @@ class Model:
 
 
 def batches(case, steps, seed):
-    D, G, H, M, S, R, D0, G2 = case
+    D, G, H, M, S, R, D0, G2 = case[:8]
     g = torch.Generator(device="cuda")
     g.manual_seed(4321 + seed)
     return [(torch.randn(M, D0, device="cuda", generator=g), 0.5 * torch.randn(M, G2, device="cuda", generator=g))
@@ -195,7 +199,7 @@ def provenance() -> dict:
 
 def identity(args, case) -> dict:
     """The experiment: the same identity must give the same records under an unchanged plan."""
-    return dict(case=args.case, shape=dict(zip(("D", "G", "H", "M", "S", "R", "D0", "G2"), case)), seed=args.seed,
+    return dict(case=args.case, shape=dict(zip(("D", "G", "H", "M", "S", "R", "D0", "G2", "C"), tuple(case) + (8,) * (len(case) == 8))), seed=args.seed,
                 steps=args.steps, precision=args.precision, opt_mode=args.opt_mode, reduction=args.reduction,
                 plan=args.plan, warn_only=args.warn_only, model="det_training composed/1")
 
