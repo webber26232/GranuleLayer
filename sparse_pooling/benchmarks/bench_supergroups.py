@@ -35,9 +35,9 @@ from pathlib import Path
 
 import torch
 
-import sparse_pooling
 from bench_kernels import POOLINGS, gpu_state
-from common import gpu_info, save
+from common import gpu_info, save  # (puts the implementation under test on sys.path)
+import sparse_pooling
 from sparse_pooling import SparsePoolingLayer
 from sparse_pooling.config import DX_PLANS, PhysicalPlan
 from sparse_pooling.kernels import cuda_ops
