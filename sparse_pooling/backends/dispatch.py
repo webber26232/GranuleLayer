@@ -73,6 +73,17 @@ def epilogue_choice(profile: TuningProfile, requested: str, lv, grad_precision: 
     return "generic"
 
 
+def implied_epilogue(plan: PhysicalPlan, kernel: str) -> str:
+    """The epilogue an explicit option needs when the epilogue itself is "auto" (precedence: a valid
+    explicit override constrains automatic fields; the epilogues are bitwise equal to generic):
+    the compact dW projection needs the fast dW epilogue, the fused backward mask dX / fast dW."""
+    if plan.cuda_grouped_backward in ("fused", "fused_recompute") and plan.grad_precision == "split":
+        return "mask" if kernel == "dx" else "fast"  # (the fused kernel exists for split gradients only)
+    if kernel == "dw" and plan.cuda_grouped_dw_projection == "compact":
+        return "fast"
+    return "auto"
+
+
 def plan_key(plan: PhysicalPlan) -> Tuple:
     return tuple(getattr(plan, f.name) for f in dataclasses.fields(plan))
 
@@ -89,7 +100,9 @@ class Resolver:
         self.limit = smem_limit(caps)
 
     # ------------------------------------------------------------- epilogues
-    def epilogue(self, requested: str, lv, grad_precision: str = "split", kernel: str = "dx") -> str:
+    def epilogue(self, requested: str, lv, grad_precision: str = "split", kernel: str = "dx", plan=None) -> str:
+        if requested == "auto" and plan is not None:
+            requested = implied_epilogue(plan, kernel)
         return epilogue_choice(self.profile, requested, lv, grad_precision, kernel)
 
     # ------------------------------------------------------- generic kernels
@@ -155,19 +168,18 @@ class Resolver:
             return "needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
         if not self.caps.has("cp.async"):
             return "needs cp.async (sm_80+)"
-        if self.profile.dw_staging() != "indexed":
-            return f"profile {self.profile.name} keeps full staging (indexed staging is a measured RTX 3090 choice)"
         return ""
 
     def dw_staging(self, plan: PhysicalPlan, L, sxb) -> Tuple[str, str]:
-        """(staging, fallback reason of an explicit 'indexed' request or "")."""
+        """(staging, fallback reason of an explicit 'indexed' request or ""): an explicit legal request
+        is honoured; "auto" takes the profile's choice where indexed staging is legal."""
         if plan.cuda_dw_staging == "full":
             return "full", ""
         reason = self.dw_staging_reason(L, sxb)
-        if not reason:
+        if plan.cuda_dw_staging == "indexed":
+            return ("full", reason) if reason else ("indexed", "")  # explicit: never fall back silently
+        if not reason and self.profile.dw_staging() == "indexed":
             return "indexed", ""
-        if plan.cuda_dw_staging == "indexed":  # explicit request: never fall back silently
-            return "full", reason
         return "full", ""
 
     def generic_dw_cfg(self, plan: PhysicalPlan, L, lv, staging: str) -> int:
@@ -209,7 +221,7 @@ class Resolver:
             T, nw, _ = self.sg_fwd_cfg(rt)
             smem = V.sg_smem("fwd", L.input_dim, S, T, nw)
         elif phase == "dx":
-            epi = self.epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
+            epi = self.epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx", plan)
             if epi == "fast":
                 return "the grouped dX implements the generic and mask epilogues only (requested fast)"
             if epi == "mask" and plan.grad_precision != "split":
@@ -219,7 +231,7 @@ class Resolver:
                 return f"cuda_grouped_dx_reduction={wg} must divide the {nw} warps"
             smem = V.sg_smem("dx", L.input_dim, S, T, nw, wg)
         else:
-            epi = self.epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
+            epi = self.epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw", plan)
             if epi == "mask" and L.block != 8:
                 return "the grouped dW mask epilogue is compiled for C = 8 only (requested mask)"
             smem = V.sg_smem("dw", L.input_dim, S, dw_cfg=self.sg_dw_cfg(rt))
@@ -474,8 +486,8 @@ class Resolver:
                 use_dx = self.sg_use(rt, "dx", B, fb)
                 use_dw = self.sg_use(rt, "dw", B, fb)
                 staging, staging_fb = self.dw_staging(plan, L, sxb)
-                dx_epi = self.epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
-                dw_epi = (self.epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
+                dx_epi = self.epilogue(plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx", plan)
+                dw_epi = (self.epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw", plan)
                           if (staging == "indexed" or use_dw) else "generic")
                 dx.update(kernel="grouped" if use_dx else "generic", epilogue=dx_epi,
                           generic_warps=self.dx_warps(plan, L, rt.units))
@@ -571,8 +583,8 @@ def matrix_decisions(rt, B: int, caps: Optional[DeviceCapabilities] = None, prof
     sg_dw = out.get("use_dw") is True
     sg_any = sg_dw or out.get("use_dx") is True
     lv, plan = rt.level, rt.plan
-    dx_epi = _call(r.epilogue, plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx")
-    dw_epi = (_call(r.epilogue, plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
+    dx_epi = _call(r.epilogue, plan.cuda_dx_epilogue, lv, plan.grad_precision, "dx", plan)
+    dw_epi = (_call(r.epilogue, plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw", plan)
               if (staging == "indexed" or sg_dw) else "generic")
     out.update(dx_epilogue=dx_epi, dw_epilogue=dw_epi)
     if rt.sg is not None and sg_dw and isinstance(dw_epi, str):
