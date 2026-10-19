@@ -131,3 +131,17 @@ def test_compact_selection_and_errors():
     lay = sg_layer(1024, 300_000, 64, 8, 16, 4, plan=plan("compact", cuda_dw_epilogue="generic"))
     with pytest.raises(ValueError, match="fast dW epilogue"):
         run(lay, x, dy)
+
+
+@requires_cuda_backend
+@pytest.mark.parametrize("S,R", [(16, 4), (64, 16)])
+@pytest.mark.parametrize("precision", ["split", "bf16"])
+def test_mask_epilogue_control_bitwise(S, R, precision):
+    """Attribution control: the grouped dW mask epilogue (padded projection) equals the fast one."""
+    lay = sg_layer(1024, 300_003, 64, 8, S, R, plan=plan("padded", precision, reduction="deterministic"))
+    x, dy = inputs(136, 1024, 64)
+    _, _, dw0, db0, _ = run(lay, x, dy)
+    lay.plan = plan("padded", precision, reduction="deterministic", cuda_dw_epilogue="mask")
+    _, _, dw1, db1, info = run(lay, x, dy)
+    assert info["dw_epilogue"] == "mask" and info["grouped_dw"]["kernel"].endswith(", 2, 0>")
+    assert torch.equal(ibits(dw1), ibits(dw0)) and torch.equal(ibits(db1), ibits(db0))

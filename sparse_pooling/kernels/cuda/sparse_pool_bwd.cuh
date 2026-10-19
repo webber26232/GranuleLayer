@@ -36,6 +36,10 @@
 #ifndef SP_ABLATE_DW
 #define SP_ABLATE_DW 0
 #endif
+//   SP_ABLATE_DWC 1: dw_block_c8_compact without the movmatrix mask transposes (cost of MOVM)
+#ifndef SP_ABLATE_DWC
+#define SP_ABLATE_DWC 0
+#endif
 
 
 struct BwdArgs {
@@ -554,7 +558,9 @@ __device__ __forceinline__ void dw_block_c8_compact(DwAcc<8>& acc, int bu, const
   uint32_t A[4];
 #pragma unroll
   for (int th = 0; th < 2; th++) {
-    const uint32_t mq = movmatrix_trans(pair_mask(m[2 * th], m[2 * th + 1]));  // (neuron g) x (tokens 2c, 2c + 1)
+    // (neuron g) x (tokens 2c, 2c + 1); SP_ABLATE_DWC = 1 (benchmarks only, WRONG dW): no transpose
+    const uint32_t mq = SP_ABLATE_DWC == 1 ? pair_mask(m[2 * th], m[2 * th + 1])
+                                           : movmatrix_trans(pair_mask(m[2 * th], m[2 * th + 1]));
     const uint32_t me0 = (uint32_t)((int32_t)(mq << 16) >> 31), me1 = (uint32_t)((int32_t)mq >> 31);
     A[2 * th] = cc.hp[th] & mq;
     A[2 * th + 1] = SPLIT ? (cc.lp[th] & mq) : 0u;

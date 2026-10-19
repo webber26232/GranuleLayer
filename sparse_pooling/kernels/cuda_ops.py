@@ -565,8 +565,8 @@ class CudaBackend:
             smem = sg_smem("dx", L.input_dim, S, T, nw, wg)
         else:
             epi = _epilogue(plan.cuda_dw_epilogue, lv, plan.grad_precision, "dw")
-            if epi == "mask":
-                return "the grouped dW implements the generic and fast epilogues only (requested mask)"
+            if epi == "mask" and L.block != 8:
+                return "the grouped dW mask epilogue is compiled for C = 8 only (requested mask)"
             smem = sg_smem("dw", L.input_dim, S, dw_cfg=self.sg_dw_cfg(rt))
         if smem > SG_MAX_SMEM:
             return f"{phase} configuration needs {smem / 1024:.1f} KiB of shared memory > 99 KiB"
@@ -907,7 +907,7 @@ class CudaBackend:
         units, ch = rt.sg.unit_chunks(nw * wpw)
         a.units, a.chunks, a.c1T = _ptr(units), _ptr(ch), _ptr(c1T)
         fn = self.sg_fns[("dw", L.block)]
-        epi = {"generic": 0, "fast": 1}[dw_epi]
+        epi = {"generic": 0, "fast": 1, "mask": 2}[dw_epi]  # mask: attribution control (C = 8; bitwise = fast)
         proj, proj_why = self.sg_dw_projection(rt, dw_epi)
         pj = int(proj == "compact")
         a.flags = 0

@@ -1,5 +1,5 @@
 #include "sg_dispatch.cuh"
-// dW instantiations for C = 8 (SG_DW_CFGS), generic / fast epilogue, split / bf16; proj = 1: the
+// dW instantiations for C = 8 (SG_DW_CFGS), generic / fast / mask (control) epilogue, split / bf16; proj = 1: the
 // compact projection (dw_block_c8_compact) of the fast Mean(ReLU) epilogue
 template <int ACT, bool SPLIT, int EPI, int PROJ>
 static int sg_dw_cfg(const SgArgs& a, int cfg, int gx, cudaStream_t s) {
@@ -13,6 +13,9 @@ static int sg_dw_act(const SgArgs& a, int cfg, int split, int epi, int proj, int
   if (proj) {  // compact projection: fast ReLU epilogue only
     if (ACT != A_RELU || !epi) return -2;
     return split ? sg_dw_cfg<ACT, true, 1, 1>(a, cfg, gx, s) : sg_dw_cfg<ACT, false, 1, 1>(a, cfg, gx, s);
+  }
+  if (epi == 2) {  // mask epilogue of dw_block (padded projection): attribution control
+    return split ? sg_dw_cfg<ACT, true, 2, 0>(a, cfg, gx, s) : sg_dw_cfg<ACT, false, 2, 0>(a, cfg, gx, s);
   }
   if (split) return epi ? sg_dw_cfg<ACT, true, 1, 0>(a, cfg, gx, s) : sg_dw_cfg<ACT, true, 0, 0>(a, cfg, gx, s);
   return epi ? sg_dw_cfg<ACT, false, 1, 0>(a, cfg, gx, s) : sg_dw_cfg<ACT, false, 0, 0>(a, cfg, gx, s);
