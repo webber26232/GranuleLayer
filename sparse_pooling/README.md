@@ -290,5 +290,17 @@ fallback.
 | other pooling operators, semantic hierarchies, token-major input, B % 8 != 0 | `ValueError` |
 | non-finite upstream gradients | the in-kernel generic epilogue of the same kernels (one path; finite elements bitwise repeatable; inf / NaN positions reproduced, NaN payload bits not promised) |
 
+Cost (RTX 3090, C = 8, H = 100M, M = 8192, paired complete step): +0.34 / +0.21 / +0.20 % for
+S / R = 16 / 4, 32 / 8, 64 / 16 (+0.25 % BF16 gradients), almost all of it the forward reduce
+(about 10 ms: 8 GiB of partials in 8 token windows); peak allocated memory +0.8 / +0.8 / +1.0 GiB.
+Smaller S = 64 graphs whose fast plan is `shared_t64` cost more (+11 to +24 % at H <= 10M), as
+does C = 64, S = 64 (+12.8 %: private copies need 32-token tiles).
+
+`PhysicalPlan.cuda_grouped_dw_projection` (`"auto"` = `"padded"`, `"compact"`): the compact C = 8
+Mean(ReLU) dW projection computes z with one `mma.m16n8k8` in dX orientation and transposes the
+ReLU mask with `movmatrix`.  It is bitwise equal to the padded projection but 3-4 % slower in dW
+(8 % with BF16 gradients) on the RTX 3090, so it is explicit / experimental;
+`last_info["grouped_dw"]["projection"]` records the choice.
+
 See `results/DETERMINISM_METRICS_DW_PROJECTION.md` for the ownership map, overheads and the
 production H = 100M repeatability evidence.
