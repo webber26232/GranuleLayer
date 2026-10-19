@@ -12,8 +12,9 @@ static int sg_dw_act(const SgArgs& a, int cfg, int split, int epi, int gx, cudaS
   if (split) return epi ? sg_dw_cfg<ACT, true, 1>(a, cfg, gx, s) : sg_dw_cfg<ACT, true, 0>(a, cfg, gx, s);
   return epi ? sg_dw_cfg<ACT, false, 1>(a, cfg, gx, s) : sg_dw_cfg<ACT, false, 0>(a, cfg, gx, s);
 }
-extern "C" int sp_sg_dw_c64(const SgArgs* a, int act, int cfg, int split, int epi, int gx, void* stream) {
+extern "C" int sp_sg_dw_c64(const SgArgs* a, int act, int cfg, int split, int epi, int proj, int gx, void* stream) {
   cudaStream_t s = (cudaStream_t)stream;
+  if (proj) return -2;  // the compact projection is a C = 8 variant
   if (act == A_ID) return sg_dw_act<A_ID>(*a, cfg, split, epi, gx, s);
   if (act == A_RELU) return sg_dw_act<A_RELU>(*a, cfg, split, epi, gx, s);
   return -1;

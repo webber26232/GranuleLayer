@@ -122,6 +122,9 @@ def main():
                     help="drop (and record) variants whose explicit grouped request cannot run")
     ap.add_argument("--protocol", default="complete", choices=["complete", "historical"])
     ap.add_argument("--snapshot-device", default="cpu", choices=["cpu", "cuda"])
+    ap.add_argument("--composed", default="", help="D0,G2: time the composed model x0 -> Linear(D0, D) -> BF16 -> "
+                    "layer -> Linear(G, G2) -> tanh -> MSE (torch AdamW for the two Linear layers) instead of the "
+                    "isolated layer step (y^2 loss)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     variants = [parse_variant(v) for v in args.variant] or [("default", {})]
@@ -153,6 +156,16 @@ def main():
     gx = torch.Generator(device="cuda")
     gx.manual_seed(args.input_seed)
     x = torch.randn(args.batch, args.input_dim, device="cuda", generator=gx).to(torch.bfloat16).requires_grad_(True)
+    small = []
+    if args.composed:
+        D0, G2 = map(int, args.composed.split(","))
+        torch.manual_seed(args.init_seed + 17)
+        proj = torch.nn.Linear(D0, args.input_dim, device="cuda")
+        head = torch.nn.Linear(args.groups, G2, device="cuda")
+        small = list(proj.parameters()) + list(head.parameters())
+        opt2 = torch.optim.AdamW(small, lr=1e-4)
+        x0 = torch.randn(args.batch, D0, device="cuda", generator=gx)
+        tgt = 0.5 * torch.randn(args.batch, G2, device="cuda", generator=gx)
     if args.protocol == "historical":  # device copies of the initial weights / bias (previous harness)
         w_snap, b_snap = lay.weight.detach().clone(), lay.bias.detach().clone()
 
@@ -162,12 +175,22 @@ def main():
         mark = cuda_ops._mark
         try:
             mark("step.begin")
-            y = lay(x)
-            mark("fwd.end")
-            y.float().square().mean().backward()
-            mark("bwd.end")
-            opt.step()
-            mark("opt.end")
+            if args.composed:  # projection -> layer -> head; "fwd" / "bwd" include the two Linear layers
+                y = lay(proj(x0).bfloat16())
+                mark("fwd.end")
+                ((torch.tanh(head(y.float())) - tgt) ** 2).mean().backward()
+                mark("bwd.end")
+                opt2.step()
+                opt2.zero_grad(set_to_none=True)
+                opt.step()
+                mark("opt.end")
+            else:
+                y = lay(x)
+                mark("fwd.end")
+                y.float().square().mean().backward()
+                mark("bwd.end")
+                opt.step()
+                mark("opt.end")
         finally:
             cuda_ops.PHASE_EVENTS = None
             cuda_ops.PHASE_INTERVALS = None
@@ -208,8 +231,14 @@ def main():
     if args.protocol == "complete":
         state = TrainState(list(lay.parameters()), opt, device=args.snapshot_device).capture()
         ref_fp = state.fingerprint()
+        state2 = TrainState(small, opt2, device=args.snapshot_device).capture() if small else None
+        ref_fp2 = state2.fingerprint() if small else None
 
     def restore_reference(res):
+        if state2 is not None:
+            state2.restore()
+            if state2.fingerprint() != ref_fp2:
+                raise SystemExit("training state restoration failed for the composed model's Linear layers")
         state.restore()
         fp = state.fingerprint()
         if fp != ref_fp:

@@ -461,7 +461,8 @@ __device__ __forceinline__ void sg_dw_writeback(const SgArgs& a, DwAcc<C> (&acc)
 }
 
 // TS 16-token tiles per pipeline stage, ST stages; ring [ST][TS][S][16] bf16 (Swz<1> rows)
-template <int ACT, int C, int NW, int WPW, int TS, int ST, bool SPLIT, int EPI>
+// PROJ = 1: the compact C = 8 projection (dw_block_c8_compact) for the fast Mean(ReLU) epilogue
+template <int ACT, int C, int NW, int WPW, int TS, int ST, bool SPLIT, int EPI, int PROJ = 0>
 __device__ __forceinline__ void sg_dw_body(const SgArgs& a) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
   constexpr int UB = Unit<C>::UB, NT = C / 8, NP = DwAcc<C>::NP, POOL = P_MEAN, P_INT = 0;
@@ -560,12 +561,19 @@ __device__ __forceinline__ void sg_dw_body(const SgArgs& a) {
           BlockRegs<C> blk;
           unit_block<C>(blk, un[i], bu);
           blk.fidx = lrow[i][bu];
-          if ((j + 1) * C <= ng[i])
-            dw_block<POOL, ACT, C, SPLIT, P_INT, false, EPI>(acc[i], bu, blk, biasT[i][bu], j, ng[i], slab_s, cc, lane,
-                                                            1.f, 0.f);
-          else if (j * C < ng[i])
-            dw_block<POOL, ACT, C, SPLIT, P_INT, true, EPI>(acc[i], bu, blk, biasT[i][bu], j, ng[i], slab_s, cc, lane,
-                                                           1.f, 0.f);
+          if constexpr (PROJ == 1 && C == 8 && ACT == A_RELU && EPI == 1) {
+            if ((j + 1) * C <= ng[i])
+              dw_block_c8_compact<SPLIT, false>(acc[i], bu, blk, j, ng[i], slab_s, cc, lane);
+            else if (j * C < ng[i])
+              dw_block_c8_compact<SPLIT, true>(acc[i], bu, blk, j, ng[i], slab_s, cc, lane);
+          } else {
+            if ((j + 1) * C <= ng[i])
+              dw_block<POOL, ACT, C, SPLIT, P_INT, false, EPI>(acc[i], bu, blk, biasT[i][bu], j, ng[i], slab_s, cc,
+                                                              lane, 1.f, 0.f);
+            else if (j * C < ng[i])
+              dw_block<POOL, ACT, C, SPLIT, P_INT, true, EPI>(acc[i], bu, blk, biasT[i][bu], j, ng[i], slab_s, cc,
+                                                             lane, 1.f, 0.f);
+          }
         }
       }
     }
@@ -574,12 +582,12 @@ __device__ __forceinline__ void sg_dw_body(const SgArgs& a) {
   sg_dw_writeback<C, WPW>(a, acc, unit, lane);
 }
 
-template <int ACT, int C, int NW, int WPW, int TS, int ST, bool SPLIT, int MINB, int EPI>
+template <int ACT, int C, int NW, int WPW, int TS, int ST, bool SPLIT, int MINB, int EPI, int PROJ = 0>
 __global__ void __launch_bounds__(NW * 32, MINB) sg_dw_kernel(SgArgs a) {
   // specialised launch runs unless the coefficients are non-finite; the generic launch
   // (flags & BWD_FALLBACK) only then (one body per kernel, as k_dw_idx)
   bool active;
   if (EPI) active = !(a.nonfinite && *a.nonfinite);
   else active = !(a.flags & BWD_FALLBACK) || (a.nonfinite && *a.nonfinite);
-  if (active) sg_dw_body<ACT, C, NW, WPW, TS, ST, SPLIT, EPI>(a);
+  if (active) sg_dw_body<ACT, C, NW, WPW, TS, ST, SPLIT, EPI, PROJ>(a);
 }

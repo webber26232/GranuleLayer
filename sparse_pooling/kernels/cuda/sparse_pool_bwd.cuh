@@ -529,6 +529,41 @@ __device__ __forceinline__ void dw_block(DwAcc<C>& acc, int bu, const BlockRegs<
   }
 }
 
+// C = 8 Mean(ReLU) dW block with the compact projection (PhysicalPlan.cuda_grouped_dw_projection =
+// "compact"; the fused-backward prototype's transformation, sparse_pool_sg_bwdf.cuh).  dw_block
+// computes z^T [16 neuron rows x 8 tokens] per token half with rows 8-15 structural zeros: two
+// m16n8k8 per 16-token tile.  Here z [16 tokens x 8 neurons] comes from ONE m16n8k8 in the dX
+// orientation (A = the same ldmatrix.trans registers, B = the packed W fragment, C = the bias pair;
+// bitwise the same z: the same products in the same k order), the (z > 0) masks (set.gt.ftz, stored
+// as values so the FTZ compare is kept) are packed to 16-bit pairs and moved to the dW A layout
+// (rows = neuron g, 16-bit lanes = tokens 2c, 2c + 1 of a half) by one movmatrix.trans per half.
+// The gradient operands are then the mask epilogue's: hi / lo of one[token] ANDed with the mask
+// (bitwise equal to splitting the fast / generic dz), db += one & mask in the same order, and the
+// one gradient m16n8k16 with rows 0-7 hi and rows 8-15 lo is unchanged (the split correction rows
+// are kept; only the projection padding is removed).  Requires finite coefficients (the fast-
+// epilogue domain; non-finite ones run the generic launch).
+template <bool SPLIT, bool MASKED>
+__device__ __forceinline__ void dw_block_c8_compact(DwAcc<8>& acc, int bu, const BlockRegs<8>& blk, int j, int n_g,
+                                                    uint32_t slab_s, const ColCoef& cc, int lane) {
+  uint32_t xa[2], xb[2];
+  const uint32_t addr = slab_s + 2 * Swz<1>::off(blk.fidx, (lane >> 3) & 1);
+  ldmatrix_x2_trans(xa, addr);  // A of the dX-orientation projection (= sg_gather<1>)
+  ldmatrix_x2(xb, addr);        // B of dW^T
+  uint32_t m[4];                // (tokens g, g + 8) x (neurons 2c, 2c + 1); invalid neurons -> 0
+  tile_mask<A_RELU, MASKED>(m, xa, blk.w[0], blk.bb[0], j * 8 + 2 * (lane & 3), n_g);
+  uint32_t A[4];
+#pragma unroll
+  for (int th = 0; th < 2; th++) {
+    const uint32_t mq = movmatrix_trans(pair_mask(m[2 * th], m[2 * th + 1]));  // (neuron g) x (tokens 2c, 2c + 1)
+    const uint32_t me0 = (uint32_t)((int32_t)(mq << 16) >> 31), me1 = (uint32_t)((int32_t)mq >> 31);
+    A[2 * th] = cc.hp[th] & mq;
+    A[2 * th + 1] = SPLIT ? (cc.lp[th] & mq) : 0u;
+    const uint32_t o0 = __float_as_uint(cc.one[2 * th]), o1 = __float_as_uint(cc.one[2 * th + 1]);
+    acc.b[bu][0][0] += __uint_as_float(o0 & me0) + __uint_as_float(o1 & me1);
+  }
+  mma_m16n8k16_bf16(acc.w[bu][0], A, xb[0], xb[1]);  // rows 0-7 hi, rows 8-15 lo (dw_block's C = 8 packing)
+}
+
 template <int C, int WPW>
 __device__ __forceinline__ void dw_writeback(const BwdArgs& a, DwAcc<C> (&acc)[WPW], const int (&wid)[WPW],
                                              long long ubase, int lane);

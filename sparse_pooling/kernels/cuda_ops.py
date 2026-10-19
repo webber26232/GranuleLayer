@@ -170,6 +170,8 @@ SG_AUTO = {
     (8, 512): (None, None, None),
 }
 SG_CHUNK_UNITS = {"fwd": 2048, "dx": 4096}
+# grouped C = 8 Mean(ReLU) fast-epilogue dW projection under cuda_grouped_dw_projection = "auto"
+SG_AUTO_DW_PROJECTION = "padded"
 # C = 64 with large buckets (mean work units per nonempty (output, supergroup) bucket >= 3; H = 100M:
 # ~6, H = 10M: ~1): the grouped dX (all S <= 64) and the grouped dW (S <= 16) are faster at
 # H = 100M (-15 ms each, 4 interleaved rounds, +-2 ms) although slower at H = 10M; with BF16
@@ -387,7 +389,7 @@ class CudaBackend:
                 self.lib.sp_sgx_layout.restype = ctypes.c_int
                 self.lib.sp_sgx_layout.argtypes = [ctypes.c_int] * 3 + [ctypes.c_void_p] * 2
             f = getattr(self.lib, f"sp_sg_dw_c{C}")
-            f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
+            f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
             self.sg_fns[("dw", C)] = f
         f = self.lib.sp_sg_reduce  # fixed-order second stage of the deterministic reductions (sg_det.cu)
         f.restype = ctypes.c_int
@@ -878,6 +880,26 @@ class CudaBackend:
                                                                     "shared_cas+fp32_atomics"))
         return dxt.t()
 
+    def sg_dw_projection(self, rt, dw_epi: str):
+        """(projection, reason) of the grouped dW: "compact" (dw_block_c8_compact) or "padded"."""
+        req = rt.plan.cuda_grouped_dw_projection
+        why = ""
+        if rt.layout.block != 8:
+            why = f"the compact projection is a C = 8 variant (C = {rt.layout.block})"
+        elif rt.level.activation != "relu":
+            why = f"needs Mean(ReLU) ({rt.level.describe()}: no projection to share)"
+        elif dw_epi != "fast":
+            why = f"needs the fast dW epilogue (got {dw_epi})"
+        if req == "compact":
+            if why:
+                raise ValueError(f"cuda_grouped_dw_projection='compact' unavailable: {why}")
+            return "compact", "explicit"
+        if req == "padded":
+            return "padded", "explicit"
+        if why:
+            return "padded", why
+        return SG_AUTO_DW_PROJECTION, "auto (SG_AUTO_DW_PROJECTION)"
+
     def _sg_dw(self, rt, a, c1T, split, dw_epi, stream):
         L = rt.layout
         cfg = self.sg_dw_cfg(rt)
@@ -886,14 +908,22 @@ class CudaBackend:
         a.units, a.chunks, a.c1T = _ptr(units), _ptr(ch), _ptr(c1T)
         fn = self.sg_fns[("dw", L.block)]
         epi = {"generic": 0, "fast": 1}[dw_epi]
+        proj, proj_why = self.sg_dw_projection(rt, dw_epi)
+        pj = int(proj == "compact")
         a.flags = 0
-        err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, epi, ch.shape[0], stream)
+        err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, epi, pj, ch.shape[0], stream)
         if err == 0 and epi:  # generic fallback launch: exits at once unless a coefficient is non-finite
             a.flags = BWD_FALLBACK
-            err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, 0, ch.shape[0], stream)
+            err = fn(ctypes.byref(a), rt.level.act_id, cfg, split, 0, 0, ch.shape[0], stream)
         if err != 0:
             raise RuntimeError(f"sp_sg_dw failed (code {err})")
+        nw_, wpw_, ts_, st_, minb_ = SG_DW_CFGS[cfg]
         rt.last_info["grouped_dw"] = dict(cfg=cfg, ctas=ch.shape[0], smem=sg_smem("dw", L.input_dim, rt.sg.S, dw_cfg=cfg),
+                                          projection=proj, projection_reason=proj_why,
+                                          kernel=f"sg_dw_kernel<{rt.level.act_id}, {L.block}, {nw_}, {wpw_}, {ts_}, "
+                                                 f"{st_}, {str(bool(split)).lower()}, {minb_}, {epi}, {pj}>",
+                                          fallback="sg_dw_kernel generic epilogue (BWD_FALLBACK, padded projection)"
+                                          if epi else None,
                                           work_list_bytes=units.numel() * units.element_size()
                                           + ch.numel() * ch.element_size())
 
@@ -941,7 +971,7 @@ class CudaBackend:
         units_w, chw = rt.sg.unit_chunks(nw * wpw) if (nw, wpw) in ((8, 2), (8, 4)) else rt.sg.unit_chunks(16)
         dwc = {(8, 2): 2, (8, 4): 3}.get((nw, wpw), 2)
         a.units, a.chunks, a.flags = _ptr(units_w), _ptr(chw), BWD_FALLBACK
-        err = self.sg_fns[("dw", L.block)](ctypes.byref(a), rt.level.act_id, dwc, 1, 0, chw.shape[0], stream)
+        err = self.sg_fns[("dw", L.block)](ctypes.byref(a), rt.level.act_id, dwc, 1, 0, 0, chw.shape[0], stream)
         if err != 0:
             raise RuntimeError(f"sp_sg_dw fallback failed (code {err})")
         a.flags = 0

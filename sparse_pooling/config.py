@@ -319,6 +319,12 @@ class PhysicalPlan:
     cuda_grouped_backward: str = "auto"
     cuda_grouped_fused_cfg: int = 0  # cuda_ops.SGF_CFGS key
     cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
+    # grouped C = 8 dW projection (sparse_pool_bwd.cuh dw_block_c8_compact): "padded" = dw_block's two
+    # m16n8k8 per 16-token tile with structural zero neuron rows (the original), "compact" = one
+    # m16n8k8 in the dX orientation + movmatrix mask transposes (fast Mean(ReLU) epilogue; dW / db
+    # bitwise equal), "auto" = cuda_ops.sg_dw_projection (measured).  An explicit "compact" that
+    # cannot run raises.
+    cuda_grouped_dw_projection: str = "auto"
     cuda_grouped_merge: str = "atomic"  # supergroup -> global merge of the fast mode (FP32 atomics)
     # reduction policy (kernels/cuda/sg_det.cu, README "Deterministic execution"):
     #   "fast"          the cross-CTA sums of the grouped forward / dX use FP32 atomics (and
@@ -366,6 +372,7 @@ class PhysicalPlan:
                                  f"{want['scatter']!r}, conflicting with cuda_grouped_dx_scatter="
                                  f"{self.cuda_grouped_dx_scatter!r}")
         assert self.cuda_grouped_merge == "atomic"
+        assert self.cuda_grouped_dw_projection in ("auto", "padded", "compact"), self.cuda_grouped_dw_projection
         if self.reduction not in REDUCTIONS:
             raise ValueError(f"reduction must be one of {REDUCTIONS} (got {self.reduction!r})")
         if self.deterministic_workspace_bytes < 0:
