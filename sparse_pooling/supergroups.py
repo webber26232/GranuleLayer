@@ -513,6 +513,7 @@ class SgExec:
         # host copy once at construction: no device sync in the per-step dispatch
         self._mean_bucket_units = float(b[:, 3].double().mean()) if len(b) else 0.0
         self._cache: Dict = {}
+        self._stats: Dict = {}
 
     def item_chunks(self, target_units: int, max_units: int = 0):
         """(items [n, 3], chunks [m, 3]) for sg_fwd / sg_dx: chunks hold whole items of one
@@ -544,6 +545,35 @@ class SgExec:
 
     def mean_bucket_units(self) -> float:
         return self._mean_bucket_units
+
+    def item_chunk_stats(self, target_units: int) -> Dict:
+        """Host-side workload descriptors of the sg_fwd / sg_dx item chunks for ``target_units``
+        (work units: valid units, buckets, units per bucket / chunk, chunks per supergroup).
+        Computed once per target together with the chunk table (one device -> host copy at
+        first use, none per step) and cached."""
+        if target_units not in self._stats:
+            items, ch = self.item_chunks(target_units)
+            nu = items[:, 2].to("cpu", torch.int64)
+            c = ch.to("cpu", torch.int64)
+            cw = torch.cat([torch.zeros(1, dtype=torch.int64), torch.cumsum(nu, 0)])
+            upc = (cw[c[:, 2]] - cw[c[:, 1]]).double()
+            per_q = torch.bincount(c[:, 0], minlength=self.Q).double()
+            bu = self.graph.buckets[:, 3].to("cpu").double()
+
+            def qs(t):
+                if not len(t):
+                    return [0.0] * 5
+                t = t.sort().values
+                return [float(t[min(len(t) - 1, int(p * (len(t) - 1) + 0.5))]) for p in (0.1, 0.5, 0.9, 0.99, 1.0)]
+
+            self._stats[target_units] = dict(
+                units=int(nu.sum()), buckets=len(bu), Q=self.Q, S=self.S, chunk_target_units=target_units,
+                units_per_bucket_mean=float(bu.mean()) if len(bu) else 0.0, units_per_bucket_q=qs(bu),
+                chunks=len(c), chunks_per_q_mean=float(per_q.mean()), chunks_per_q_max=float(per_q.max()),
+                units_per_q_mean=float(nu.sum()) / max(self.Q, 1),
+                units_per_chunk_mean=float(upc.mean()) if len(upc) else 0.0, units_per_chunk_q=qs(upc),
+                quantiles="p10, p50, p90, p99, max")
+        return self._stats[target_units]
 
     def runtime_bytes(self) -> int:
         """Persistent bytes of the cached work lists (excluding feat / buckets)."""

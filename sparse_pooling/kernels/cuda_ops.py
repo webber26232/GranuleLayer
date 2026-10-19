@@ -20,7 +20,7 @@ from pathlib import Path
 
 import torch
 
-from ..config import PhysicalPlan
+from ..config import DX_PLANS, PhysicalPlan
 from . import ops
 
 SRC_DIR = Path(__file__).parent / "cuda"
@@ -211,6 +211,12 @@ SG_AUTO_DX_SCATTER = {
     (8, 32, 32, 8, 1, "bf16", "relu"): "vectorized_transpose_hoisted",
     (8, 64, 64, 8, 8, "split", "relu"): "swizzle4_capped",
 }
+# scale-aware whole-plan choice (PhysicalPlan.cuda_grouped_dx_plan = "auto" with every grouped dX
+# field automatic; results/SCALE_DISPATCH_FUSED_BACKWARD.md).  A rule applies to its (C, S,
+# precisions, activation, device capability); it selects ``plan`` when the cached mean work
+# units per dX chunk and the token count reach its thresholds, otherwise the per-field
+# automatic tiles ("tiles").  Unlisted configurations keep "tiles".
+SG_AUTO_DX_PLAN = []
 
 
 def sg_auto(C: int, S: int):
@@ -495,7 +501,7 @@ class CudaBackend:
                 return "the grouped dX implements the generic and mask epilogues only (requested fast)"
             if epi == "mask" and plan.grad_precision != "split":
                 return "the grouped dX mask epilogue is compiled for split gradients only"
-            T, nw, wg, _ = self.sg_dx_cfg(rt)
+            T, nw, wg, _ = self.sg_dx_cfg(rt, B)
             if nw % wg:
                 return f"cuda_grouped_dx_reduction={wg} must divide the {nw} warps"
             smem = sg_smem("dx", L.input_dim, S, T, nw, wg)
@@ -552,10 +558,41 @@ class CudaBackend:
                 T //= 2
         return T, nw, p.cuda_grouped_fwd_chunk_units or SG_CHUNK_UNITS["fwd"]
 
-    def sg_dx_cfg(self, rt):
-        """(tokens, warps, warps per FP32 slab copy, chunk units) of the grouped dX.  Unset
-        fields come from SG_AUTO; if that does not fit, copies are shared, then tiles halved."""
+    def sg_dx_plan(self, rt, B: int):
+        """(plan, reason) of the grouped dX: a DX_PLANS key or "tiles" (per-field settings).
+        Host-only: the scale rule reads descriptors cached with the chunk table."""
+        p = rt.plan
+        if p.cuda_grouped_dx_plan != "auto":
+            return p.cuda_grouped_dx_plan, "explicit cuda_grouped_dx_plan"
+        explicit = [f for f in ("tokens", "warps", "reduction", "chunk_units") if getattr(p, f"cuda_grouped_dx_{f}")]
+        if p.cuda_grouped_dx_scatter != "auto":
+            explicit.append("scatter")
+        if explicit:
+            return "tiles", "explicit grouped dX fields take precedence (" + ", ".join(explicit) + ")"
+        C, S, prec, act = rt.layout.block, rt.sg.S, p.grad_precision, rt.level.activation
+        for r in SG_AUTO_DX_PLAN:
+            if (r["C"], r["S"], act) != (C, S, r["act"]) or prec not in r["precisions"]:
+                continue
+            cc = torch.cuda.get_device_capability(rt.idx.device)
+            if cc != r["cc"]:
+                return "tiles", f"scale rule validated on sm_{r['cc'][0]}{r['cc'][1]} only (device sm_{cc[0]}{cc[1]})"
+            upc = rt.sg.item_chunk_stats(SG_CHUNK_UNITS["dx"])["units_per_chunk_mean"]
+            if upc >= r["min_units_per_chunk"] and B >= r["min_tokens"]:
+                return r["plan"], (f"scale rule: mean units / dX chunk {upc:.0f} >= {r['min_units_per_chunk']} "
+                                   f"and M = {B} >= {r['min_tokens']}")
+            return "tiles", (f"scale rule: mean units / dX chunk {upc:.0f} (threshold {r['min_units_per_chunk']}), "
+                             f"M = {B} (threshold {r['min_tokens']})")
+        return "tiles", f"no scale rule for C = {C}, S = {S}, {prec}, {act}"
+
+    def sg_dx_cfg(self, rt, B: int = 0):
+        """(tokens, warps, warps per FP32 slab copy, chunk units) of the grouped dX.  A named
+        plan fixes the first three; otherwise unset fields come from SG_AUTO; if that does not
+        fit, copies are shared, then tiles halved."""
         p, S, D = rt.plan, rt.sg.S, rt.layout.input_dim
+        name, _ = self.sg_dx_plan(rt, B)
+        if name in DX_PLANS:
+            d = DX_PLANS[name]
+            return d["tokens"], d["warps"], d["reduction"], p.cuda_grouped_dx_chunk_units or SG_CHUNK_UNITS["dx"]
         T0, nw0, wg0 = self.sg_auto_phase(rt, "dx") or (64, 8, 8)
         T = p.cuda_grouped_dx_tokens or T0
         nw = p.cuda_grouped_dx_warps or nw0
@@ -569,10 +606,11 @@ class CudaBackend:
                     T //= 2
         return T, nw, wg, p.cuda_grouped_dx_chunk_units or SG_CHUNK_UNITS["dx"]
 
-    def sg_dx_scatter(self, rt, T: int, nw: int, wg: int):
+    def sg_dx_scatter(self, rt, T: int, nw: int, wg: int, plan: str = "tiles"):
         """(variant, fallback reason) of the grouped dX local accumulation.  An explicit
-        unsupported request raises; auto keeps the baseline outside the measured cases."""
-        req = rt.plan.cuda_grouped_dx_scatter
+        unsupported request (or a named plan's scatter) raises; auto keeps the baseline
+        outside the measured cases."""
+        req = DX_PLANS[plan]["scatter"] if plan in DX_PLANS else rt.plan.cuda_grouped_dx_scatter
         name = req
         if req == "auto":
             name = SG_AUTO_DX_SCATTER.get((rt.layout.block, rt.sg.S, T, nw, wg, rt.plan.grad_precision,
@@ -650,11 +688,12 @@ class CudaBackend:
 
     def _sg_dx(self, rt, a, dxt, c1T, B, split, dx_epi, stream):
         L = rt.layout
-        T, nw, wg, cu = self.sg_dx_cfg(rt)
+        plan, plan_why = self.sg_dx_plan(rt, B)
+        T, nw, wg, cu = self.sg_dx_cfg(rt, B)
         items, ch = rt.sg.item_chunks(cu)
         a.items, a.chunks, a.c1T, a.dXT, a.dx_group_warps = _ptr(items), _ptr(ch), _ptr(c1T), _ptr(dxt), wg
         epi = {"generic": 0, "mask": 2}[dx_epi]
-        scatter, why = self.sg_dx_scatter(rt, T, nw, wg)
+        scatter, why = self.sg_dx_scatter(rt, T, nw, wg, plan)
         sc = SG_DX_SCATTERS[scatter]["sc"]
         act = rt.level.act_id
         gx, gy = ch.shape[0], math.ceil(B / T)
@@ -672,7 +711,10 @@ class CudaBackend:
             kernel = f"sgx_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}, {sc}, 1>"
         if err != 0:
             raise RuntimeError(f"sp_sg_dx ({scatter}) failed (code {err})")
-        rt.last_info["grouped_dx"] = dict(tokens=T, warps=nw, reduction_group_warps=wg, chunk_units=cu,
+        st = rt.sg.item_chunk_stats(cu)
+        rt.last_info["grouped_dx"] = dict(plan=plan, plan_reason=plan_why, tokens=T, warps=nw, reduction_group_warps=wg,
+                                          chunk_units=cu, units_per_chunk_mean=st["units_per_chunk_mean"],
+                                          token_tiles=gy, tail_utilization=B / (gy * T),
                                           ctas=gx * gy, chunks=ch.shape[0],
                                           smem=sg_smem("dx", L.input_dim, rt.sg.S, T, nw, wg),
                                           scatter=scatter, scatter_layout=SG_DX_SCATTERS[scatter]["layout"],

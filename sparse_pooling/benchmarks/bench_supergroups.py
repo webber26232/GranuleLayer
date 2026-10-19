@@ -37,7 +37,7 @@ import torch
 from bench_kernels import POOLINGS, gpu_state
 from common import gpu_info, save
 from sparse_pooling import SparsePoolingLayer
-from sparse_pooling.config import PhysicalPlan
+from sparse_pooling.config import DX_PLANS, PhysicalPlan
 from sparse_pooling.kernels import cuda_ops
 from sparse_pooling.optim import FusedAdamW
 from sparse_pooling.supergroups import ConnectivityPlan, validate
@@ -259,6 +259,21 @@ def main():
             got_sc = (info.get("grouped_dx") or {}).get("scatter") if got["dx"] == "grouped" else None
             if want_sc != "auto" and got["dx"] == "grouped" and got_sc != want_sc:
                 raise SystemExit(f"variant {name}: dX scatter {want_sc} requested, ran {got_sc}")
+            if got["dx"] == "grouped":  # the whole requested dX plan (tile, copies, scatter) actually ran
+                gd = info["grouped_dx"]
+                pl = plans[name]
+                want_t = dict(DX_PLANS.get(pl.cuda_grouped_dx_plan, {}))
+                for f in ("tokens", "warps", "reduction"):
+                    if getattr(pl, f"cuda_grouped_dx_{f}"):
+                        want_t[f] = getattr(pl, f"cuda_grouped_dx_{f}")
+                gotk = {"tokens": gd["tokens"], "warps": gd["warps"], "reduction": gd["reduction_group_warps"],
+                        "scatter": gd["scatter"]}
+                bad = {f: (v, gotk[f]) for f, v in want_t.items() if gotk[f] != v}
+                if pl.cuda_grouped_dx_plan in DX_PLANS and gd["plan"] != pl.cuda_grouped_dx_plan:
+                    bad["plan"] = (pl.cuda_grouped_dx_plan, gd["plan"])
+                if bad:
+                    raise SystemExit(f"variant {name}: dX plan mismatch (requested, ran): {bad}")
+                res["descriptors"] = lay._rt.sg.item_chunk_stats(gd["chunk_units"])
             res["kernels"] = got
             res["info"] = {k: info.get(k) for k in ("grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
                                                     "dx_epilogue", "dw_epilogue", "dw_staging", "dw_cfg", "dx_warps",
@@ -312,6 +327,7 @@ def main():
                                  "warmup_peak_reserved_bytes": res["warm_peak_res"],
                                  "step_scratch_peak_bytes": res["scratch_peak"],
                                  "work_list_bytes": res.get("work_list_bytes", 0),
+                                 "descriptors": res.get("descriptors"),
                                  "restore_checks": res["restore_checks"]}
         ph = out["variants"][name]["phases"]
         fk = "fwd_kernel" if "fwd_kernel" in ph else "fwd_kernel_generic"

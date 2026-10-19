@@ -229,6 +229,12 @@ class PoolingConfig:
 
 DX_SCATTERS = ("auto", "baseline", "baseline_private", "swizzle4", "swizzle4_capped", "vectorized", "vectorized_transpose", "vectorized_hoisted",
                "vectorized_transpose_hoisted", "vectorized_parity", "feature_owner")
+# complete grouped C = 8 dX plans (PhysicalPlan.cuda_grouped_dx_plan): tile, local reduction and
+# scatter are one coupled decision (results/SCALE_DISPATCH_FUSED_BACKWARD.md)
+DX_PLANS = {
+    "shared_t64": dict(tokens=64, warps=8, reduction=8, scatter="swizzle4_capped"),  # 1 CTA slab, CAS
+    "private_t32": dict(tokens=32, warps=8, reduction=1, scatter="vectorized_transpose_hoisted"),  # warp-private
+}
 
 
 @dataclass
@@ -298,6 +304,12 @@ class PhysicalPlan:
     # (layout control: float4 records, 2 bank groups), "feature_owner" (MMA-routed register
     # accumulators, S <= 32, warp-private; different FP32 summation order), "auto" (measured)
     cuda_grouped_dx_scatter: str = "auto"
+    # whole grouped dX plan: "tiles" = the per-field settings above (SG_AUTO tiles + scatter
+    # rule), "shared_t64" / "private_t32" = DX_PLANS, "auto" = the measured scale-aware choice
+    # between them (cuda_ops.SG_AUTO_DX_PLAN) when the four dX fields above are all automatic;
+    # any explicit dX field makes "auto" behave as "tiles".  A named plan conflicting with an
+    # explicit field raises.
+    cuda_grouped_dx_plan: str = "auto"
     cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
     cuda_grouped_merge: str = "atomic"  # supergroup -> global merge (FP32 atomics, bounded scratch)
 
@@ -316,6 +328,18 @@ class PhysicalPlan:
         assert self.cuda_grouped_fwd_warps in (0, 4, 8, 16)
         assert self.cuda_grouped_dx_warps in (0, 8, 16)
         assert self.cuda_grouped_dx_scatter in DX_SCATTERS
+        assert self.cuda_grouped_dx_plan in ("auto", "tiles") + tuple(DX_PLANS), self.cuda_grouped_dx_plan
+        if self.cuda_grouped_dx_plan in DX_PLANS:
+            want = DX_PLANS[self.cuda_grouped_dx_plan]
+            for f, v in (("tokens", self.cuda_grouped_dx_tokens), ("warps", self.cuda_grouped_dx_warps),
+                         ("reduction", self.cuda_grouped_dx_reduction)):
+                if v and v != want[f]:
+                    raise ValueError(f"cuda_grouped_dx_plan={self.cuda_grouped_dx_plan!r} has {f}={want[f]}, "
+                                     f"conflicting with cuda_grouped_dx_{f}={v}")
+            if self.cuda_grouped_dx_scatter not in ("auto", want["scatter"]):
+                raise ValueError(f"cuda_grouped_dx_plan={self.cuda_grouped_dx_plan!r} has scatter "
+                                 f"{want['scatter']!r}, conflicting with cuda_grouped_dx_scatter="
+                                 f"{self.cuda_grouped_dx_scatter!r}")
         assert self.cuda_grouped_merge == "atomic"
 
     def grouped_request(self, phase: str) -> str:
