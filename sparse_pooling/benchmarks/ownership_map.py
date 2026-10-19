@@ -94,14 +94,16 @@ def main():
     ap.add_argument("--hidden", default="100000000,10000000,1000000")
     args = ap.parse_args()
     res = []
-    for H in map(int, args.hidden.split(",")):
+    shapes = [(H, 8192, 1024, 1024) for H in map(int, args.hidden.split(","))]
+    shapes.append((20_000_000, 1024, 64, 256))  # det_training.py medium cases (Q = 64, several chunks)
+    for H, M, G, D in shapes:
         for S, R, T, nw, wg in CASES:
-            r = one(H, 8192, S, R, T, wg)
+            r = one(H, M, S, R, T, wg, G=G, D=D)
             res.append(r)
             f, x = r["forward"], r["dx"]
-            print(f"H={H:,} S={S} R={R}: fwd items {f['items']} atomics/output {f['fast_atomics_per_output_token']} "
+            print(f"H={H:,} D={D} G={G} S={S} R={R}: fwd items {f['items']} atomics/output {f['fast_atomics_per_output_token']} "
                   f"det rows once {f['det_rows_written_once']} | dX chunks {x['chunks']} flush CTAs/feature "
-                  f"{x['fast_flush_ctas_per_feature_token']} rows==writers {x['det_rows_equal_fast_writers']} once "
+                  f"{x['fast_flush_ctas_per_feature_token']} (chunks/q {x['chunks_per_supergroup']['max']}) rows==writers {x['det_rows_equal_fast_writers']} once "
                   f"{x['det_rows_written_once']} | dW one CTA/unit {r['dw']['every_unit_one_cta']}", flush=True)
     json.dump(res, open(args.out + ".json", "w"), indent=1)
 
