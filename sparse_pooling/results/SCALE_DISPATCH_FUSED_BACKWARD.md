@@ -248,7 +248,8 @@ enormous ratio:
 
 The null control fails at the same rate as the candidates: 7 of 16 configs overall. So the check
 cannot tell production R > 1 candidates apart from run-to-run atomic noise; this stays
-characterization (§3.4), not a pass/fail gate. The final-step divergences overlap the null control:
+characterization (§3.4), not a pass/fail gate. With the optimizer race fixed, null-control failures still remain. The race was
+therefore not their only cause: zero-envelope steps under FP32 atomics are enough to produce them. The final-step divergences overlap the null control:
 * Plan B vs Plan A, mse/det: W 1.90e-6 / dX 2.57e-5, against null 1.78e-6 / 2.90e-5.
 * Fused, mse/det: W 3.18e-6 / dX 4.12e-5, against null 3.14e-6 / 3.98e-5.
 * Compose: every candidate is within 2% of the null on W and dX.
