@@ -156,8 +156,9 @@ def main():
     if args.protocol == "historical":  # device copies of the initial weights / bias (previous harness)
         w_snap, b_snap = lay.weight.detach().clone(), lay.bias.detach().clone()
 
-    def step(events):
+    def step(events, intervals=None):
         cuda_ops.PHASE_EVENTS = events
+        cuda_ops.PHASE_INTERVALS = intervals
         mark = cuda_ops._mark
         try:
             mark("step.begin")
@@ -169,6 +170,7 @@ def main():
             mark("opt.end")
         finally:
             cuda_ops.PHASE_EVENTS = None
+            cuda_ops.PHASE_INTERVALS = None
         x.grad = None
 
     plans = {name: PhysicalPlan(grad_precision=args.grad_precision, **kv) for name, kv in variants}
@@ -184,7 +186,9 @@ def main():
                 infeasible[name] = why
                 print(f"[{name}] infeasible: {why}", flush=True)
         variants = [v for v in variants if v[0] not in infeasible]
-    results = {name: {"rounds": [], "samples": {p[0]: [] for p in PHASES}, "peak_alloc": 0, "peak_res": 0,
+    det_phases = [f"det_{k}_{s}" for k in ("fwd", "dx") for s in ("stage1", "reduce")]
+    results = {name: {"rounds": [], "samples": {p: [] for p in [q[0] for q in PHASES] + det_phases},
+                      "peak_alloc": 0, "peak_res": 0,
                       "scratch_peak": 0, "warm_peak_alloc": 0, "warm_peak_res": 0, "restore_checks": 0}
                for name, _ in variants}
     # warm-up every variant (compilation, allocator, lazy Adam state, work lists).  The peaks of
@@ -234,8 +238,8 @@ def main():
                     torch.cuda.synchronize()
                     base = torch.cuda.memory_allocated()
                     torch.cuda.reset_peak_memory_stats()
-                    ev = []
-                    step(ev)
+                    ev, iv = [], []
+                    step(ev, iv)
                     torch.cuda.synchronize()
                     pk = torch.cuda.max_memory_allocated()
                     res["peak_alloc"] = max(res["peak_alloc"], pk)
@@ -247,6 +251,11 @@ def main():
                     for ph, a, b in PHASES:
                         if a in m and b in m:
                             rep[ph].append(m[a].elapsed_time(m[b]))
+                    tot = {}
+                    for nm, e0, e1 in iv:  # deterministic stages: summed over token windows
+                        tot[nm] = tot.get(nm, 0.0) + e0.elapsed_time(e1)
+                    for nm, v in tot.items():
+                        rep.setdefault(nm, []).append(v)
                 for ph, v in rep.items():
                     if v:
                         res["samples"][ph] += v
@@ -280,11 +289,15 @@ def main():
                     raise SystemExit(f"variant {name}: dX plan mismatch (requested, ran): {bad}")
                 res["descriptors"] = lay._rt.sg.item_chunk_stats(gd["chunk_units"])
             res["kernels"] = got
+            want_red = plans[name].reduction
+            got_red = (info.get("reduction") or {}).get("mode")
+            if want_red in ("fast", "deterministic") and got_red != want_red:
+                raise SystemExit(f"variant {name}: reduction {want_red} requested, ran {got_red}")
             want_org = plans[name].cuda_grouped_backward
             got_org = info.get("backward_organization", "separate")
             if want_org in ("fused", "fused_recompute") and got_org != want_org:
                 raise SystemExit(f"variant {name}: backward {want_org} requested, ran {got_org}")
-            res["info"] = {k: info.get(k) for k in ("backward_organization", "grouped_fused",
+            res["info"] = {k: info.get(k) for k in ("reduction", "backward_organization", "grouped_fused",
                                                     "grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
                                                     "dx_epilogue", "dw_epilogue", "dw_staging", "dw_cfg", "dx_warps",
                                                     "bwd_dx_grid", "bwd_dw_grid")}
@@ -331,7 +344,7 @@ def main():
                     "round_medians_ms": meds, "n": len(v)}
 
         out["variants"][name] = {"plan": kv, "kernels": res.get("kernels"), "info": res.get("info"),
-                                 "phases": {ph: summary(ph) for ph, _, _ in PHASES if res["samples"][ph]},
+                                 "phases": {ph: summary(ph) for ph in res["samples"] if res["samples"][ph]},
                                  "peak_allocated_bytes": res["peak_alloc"], "peak_reserved_bytes": res["peak_res"],
                                  "warmup_peak_allocated_bytes": res["warm_peak_alloc"],
                                  "warmup_peak_reserved_bytes": res["warm_peak_res"],

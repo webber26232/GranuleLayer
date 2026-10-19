@@ -302,6 +302,9 @@ DET_WORKSPACE_FILL = None
 # list, every phase boundary records a CUDA event on the current stream.  The
 # computation is identical with and without it.
 PHASE_EVENTS = None
+# with PHASE_EVENTS: (name, start event, end event) of repeated sub-phases (the token windows of the
+# deterministic stages), summed per name by the benchmarks
+PHASE_INTERVALS = None
 
 
 def _mark(name):
@@ -798,16 +801,25 @@ class CudaBackend:
         stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
         a.part, a.part_tw = _ptr(part), tw
         nwin = 0
+        timed = PHASE_EVENTS is not None and PHASE_INTERVALS is not None
         for w0 in range(0, B, tw):
             ntok = min(tw, B - w0)
             a.part_t0 = w0
+            if timed:
+                ev = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
+                ev[0].record()
             err = launch(math.ceil(ntok / T))
             if err != 0:
                 raise RuntimeError(f"deterministic {kind} stage 1 failed (code {err})")
+            if timed:
+                ev[1].record()
             err = self.lib.sp_sg_reduce(_ptr(part), tw, _ptr(off), _ptr(rec), out_rows, _ptr(out), out.stride(0), w0,
                                         ntok, stream)
             if err != 0:
                 raise RuntimeError(f"sp_sg_reduce ({kind}) failed (code {err})")
+            if timed:
+                ev[2].record()
+                PHASE_INTERVALS.extend([(f"det_{kind}_stage1", ev[0], ev[1]), (f"det_{kind}_reduce", ev[1], ev[2])])
             nwin += 1
         a.part, a.part_t0, a.part_tw = 0, 0, 0
         return dict(mode="ordered_partials", workspace_bytes=part.numel() * 4, window_tokens=tw, windows=nwin,
