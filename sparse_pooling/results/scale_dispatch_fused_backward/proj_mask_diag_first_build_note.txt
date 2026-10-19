@@ -1,0 +1,23 @@
+First build of kernels/cuda/diag_proj_c8.cu (superseded; its JSON was overwritten by the corrected run)
+----------------------------------------------------------------------------------------------------
+That build stored the decisions as booleans on the device: mdx[o] = (m[i] ? 1 : 0) | (mm[i] ? 2 : 0),
+mdwm[o] = (gm ? 1 : 0) | ..., with m / gm from gt0_mask (inline PTX set.gt.ftz.u32.f32).
+SASS of that build (cuobjdump -sass, diag_proj_c8-b82c57038a6c2b67.o): 8 x FSETP.GT.AND (no .FTZ),
+4 x FSETP.LEU.OR, 4 x FSETP.GT.FTZ.AND (the C++ `z > 0.f` of FastDz).  ptxas turned the
+set.gt.ftz mask that is only tested for non-zero into a predicate compare WITHOUT flush-to-zero.
+Observed effect (same regimes as proj_mask_diag.json; z bits of the two paths were identical in
+every regime):
+  zero_input_bias_zero_subnormal: active dX(gt0_mask) 2912608, dW fast 967552, dW gt0_mask 2912608
+                                  -> 1945056 decisions differ (all positive subnormal z)
+  subnormal_products_bias0 / _bias_tiny: active dX 4811067, dW fast 0, dW gt0_mask 4811067
+                                  -> 4811067 decisions differ
+  all other regimes: 0 differences.
+Production kernels consume the gt0_mask word by AND-ing it into the BF16 hi / lo operands; their SASS
+is FSET.BF.GT.FTZ.AND (e.g. 128 per sgx_dx_kernel<1, 8, 4, 8, 1, 2, 9, 1>, sg_dx_kernel<1, 8, 4, 8, 1, 2>,
+sgx_dx_kernel<1, 8, 4, 8, 1, 2, 10, 1>) and the generic / fast compares are FSETP.GT.FTZ.AND (sg_dw_kernel
+fast and generic bodies): positive subnormal z is inactive in every production path.  The corrected
+diagnostic stores the raw 32-bit masks / dz bits (SASS: 4 x FSET.BF.GT.FTZ.AND, 12 x FSETP.GT.FTZ.AND)
+and finds 0 decision differences in every regime.
+Consequence for a fused kernel: a mask that is consumed as a predicate (e.g. one-bit packing) must be
+checked in SASS for .FTZ, or built from an explicit flush (e.g. compare the bits of z against the
+smallest normal) -- the PTX qualifier alone did not survive.

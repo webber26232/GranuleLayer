@@ -1,0 +1,756 @@
+{
+ "args": {
+  "hidden": 100000000,
+  "batch": 8192,
+  "out": "../results/scale_dispatch_fused_backward/fusion_model"
+ },
+ "assumptions": {
+  "hmma_flop": {
+   "HMMA.1688": 2048,
+   "HMMA.16816": 4096
+  },
+  "measured_TFLOPS_illustration": 69.0,
+  "unit_param_bytes": 640,
+  "unit_grad_bytes": 1152,
+  "logical_bytes": "requests issued by the schedule; cache hits / DRAM traffic not modelled"
+ },
+ "results": [
+  {
+   "graph": {
+    "S": 16,
+    "R": 4,
+    "H": 100000000,
+    "M": 8192,
+    "Q": 256,
+    "units": 3125248,
+    "valid_neurons": 100000000,
+    "valid_blocks": 12500224,
+    "dx_chunks": 768,
+    "dw_ctas": {
+     "16": 195328,
+     "32": 97792,
+     "64": 48896
+    },
+    "param_bytes": 2000158720,
+    "grad_bytes": 3600285696
+   },
+   "schedules": [
+    {
+     "proj_hmma1688": 19200344064,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "useful_projection_TFLOP": 26.2144,
+     "ctas": {
+      "dx": 98304,
+      "dw": 195328
+     },
+     "dx_flush_atomics": 100663296,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 258020474880,
+     "input_staging_logical_bytes": 51405389824,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "dx": 36.0,
+      "dw": 6.0
+     },
+     "registers": {
+      "dx": 86,
+      "dw": 127
+     },
+     "launches": 3,
+     "note": "measured baseline",
+     "name": "separate: dX (T 64, 8 warps, private copies) + dW (cfg 2: 8 warps x 2 units)",
+     "hmma1688": 32000573440,
+     "issued_TFLOP": 91.752044167168,
+     "projection_evaluations_per_neuron_token": 2,
+     "mma_time_at_69TFLOPS_s": 1.3297397705386667
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 195328
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 25602031616,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 51204063232,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 14.0
+     },
+     "registers": {
+      "fused": ">= 127 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 48,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 16 units/CTA (8 warps x 2), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 195328
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 25602031616,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 51204063232,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 38.0
+     },
+     "registers": {
+      "fused": ">= 127 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 48,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 16 units/CTA (8 warps x 2), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 97792
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 12817793024,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 25635586048,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 14.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 32 units/CTA (8 warps x 4), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 97792
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 12817793024,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 25635586048,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 38.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 32 units/CTA (8 warps x 4), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 48896
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 6408896512,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 12817793024,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 22.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 64 units/CTA (16 warps x 4), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 48896
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 6408896512,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 12817793024,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 70.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 64 units/CTA (16 warps x 4), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 32,
+     "dx_flush_atomics": 100663296,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 64005079040,
+     "input_staging_logical_bytes": 201326592,
+     "dw_rmw_bytes": 230418284544,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 26.0
+     },
+     "fits_99KiB": true,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 256",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 16,
+     "dx_flush_atomics": 100663296,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 32002539520,
+     "input_staging_logical_bytes": 201326592,
+     "dw_rmw_bytes": 115209142272,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 50.0
+     },
+     "fits_99KiB": true,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 512",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 8,
+     "dx_flush_atomics": 100663296,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 16001269760,
+     "input_staging_logical_bytes": 201326592,
+     "dw_rmw_bytes": 57604571136,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 98.0
+     },
+     "fits_99KiB": true,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 1024",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 12800229376,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "pairs_of_launches": 1526
+     },
+     "dx_flush_atomics": null,
+     "mask_write_plus_read_bytes": 204800000000.0,
+     "mask_total_bytes": 102400000000.0,
+     "neurons_per_chunk": 65536,
+     "chunks": 1526,
+     "launches": 3053,
+     "param_logical_bytes": null,
+     "input_staging_logical_bytes": null,
+     "dw_rmw_bytes": 7200571392,
+     "dx_local_update_bytes": 6553717440512,
+     "scratch_bytes": 67108864,
+     "note": "the dW kernel keeps its projection (it needs z^T); dX reads masks instead of recomputing",
+     "name": "F3 one-bit mask exchange (64 MiB chunks, producer dW -> consumer dX)",
+     "hmma1688": 25600458752,
+     "issued_TFLOP": 78.644609286144,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 1.1397769461760001
+    }
+   ]
+  },
+  {
+   "graph": {
+    "S": 32,
+    "R": 8,
+    "H": 100000000,
+    "M": 8192,
+    "Q": 256,
+    "units": 3125248,
+    "valid_neurons": 100000000,
+    "valid_blocks": 12500224,
+    "dx_chunks": 768,
+    "dw_ctas": {
+     "16": 195328,
+     "32": 97792,
+     "64": 48896
+    },
+    "param_bytes": 2000158720,
+    "grad_bytes": 3600285696
+   },
+   "schedules": [
+    {
+     "proj_hmma1688": 19200344064,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "useful_projection_TFLOP": 26.2144,
+     "ctas": {
+      "dx": 196608,
+      "dw": 195328
+     },
+     "dx_flush_atomics": 201326592,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 514040791040,
+     "input_staging_logical_bytes": 102810779648,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "dx": 36.0,
+      "dw": 10.0
+     },
+     "registers": {
+      "dx": 78,
+      "dw": 127
+     },
+     "launches": 3,
+     "note": "measured baseline",
+     "name": "separate: dX (T 32, 8 warps, private copies) + dW (cfg 2: 8 warps x 2 units)",
+     "hmma1688": 32000573440,
+     "issued_TFLOP": 91.752044167168,
+     "projection_evaluations_per_neuron_token": 2,
+     "mma_time_at_69TFLOPS_s": 1.3297397705386667
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 195328
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 51204063232,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 102408126464,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 26.0
+     },
+     "registers": {
+      "fused": ">= 127 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 48,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 16 units/CTA (8 warps x 2), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 195328
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 51204063232,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 102408126464,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 74.0
+     },
+     "registers": {
+      "fused": ">= 127 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 48,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 16 units/CTA (8 warps x 2), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 97792
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 25635586048,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 51271172096,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 26.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 32 units/CTA (8 warps x 4), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 97792
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 25635586048,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 51271172096,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 74.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 32 units/CTA (8 warps x 4), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 48896
+     },
+     "windows_per_cta": 512,
+     "dx_flush_atomics": 12817793024,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 25635586048,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 42.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 64 units/CTA (16 warps x 4), window 16",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 48896
+     },
+     "windows_per_cta": 128,
+     "dx_flush_atomics": 12817793024,
+     "dx_local_update_bytes": 6553717440512,
+     "param_logical_bytes": 2000158720,
+     "input_staging_logical_bytes": 25635586048,
+     "dw_rmw_bytes": 7200571392,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 138.0
+     },
+     "registers": {
+      "fused": ">= 229 (dW cfg) + dX state"
+     },
+     "dw_accumulator_regs_per_thread": 96,
+     "launches": 2,
+     "note": "flush count = CTAs x S x M independent of the window; dW owner keeps accumulators over all M",
+     "name": "F1 dW-owned 64 units/CTA (16 warps x 4), window 64",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 32,
+     "dx_flush_atomics": 201326592,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 64005079040,
+     "input_staging_logical_bytes": 402653184,
+     "dw_rmw_bytes": 230418284544,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 50.0
+     },
+     "fits_99KiB": true,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 256",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 16,
+     "dx_flush_atomics": 201326592,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 32002539520,
+     "input_staging_logical_bytes": 402653184,
+     "dw_rmw_bytes": 115209142272,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 98.0
+     },
+     "fits_99KiB": true,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 512",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 6400114688,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "movm_per_block_tile": 2,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "fused": 768
+     },
+     "windows_per_cta": 8,
+     "dx_flush_atomics": 201326592,
+     "dx_local_update_bytes": 6553717440512,
+     "dx_local_update_kind": "one shared copy per CTA: 64-bit CAS (warps share features)",
+     "param_logical_bytes": 16001269760,
+     "input_staging_logical_bytes": 402653184,
+     "dw_rmw_bytes": 57604571136,
+     "scratch_bytes": 0,
+     "smem_KiB": {
+      "fused": 194.0
+     },
+     "fits_99KiB": false,
+     "registers": {
+      "fused": ">= 24 dW accumulators + dX tile state (one unit per warp at a time)"
+     },
+     "dw_accumulator_regs_per_thread": 24,
+     "launches": 2,
+     "note": "dW / db summed into main_grad once per window (order differs from the separate dW)",
+     "name": "F2 coarse chunks (4096 units), serial windows 1024",
+     "hmma1688": 19200344064,
+     "issued_TFLOP": 65.53717440512,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 0.9498141218133334
+    },
+    {
+     "proj_hmma1688": 12800229376,
+     "grad_hmma1688": 12800229376,
+     "grad_hmma16816": 6400114688,
+     "useful_projection_TFLOP": 13.1072,
+     "ctas": {
+      "pairs_of_launches": 1526
+     },
+     "dx_flush_atomics": null,
+     "mask_write_plus_read_bytes": 204800000000.0,
+     "mask_total_bytes": 102400000000.0,
+     "neurons_per_chunk": 65536,
+     "chunks": 1526,
+     "launches": 3053,
+     "param_logical_bytes": null,
+     "input_staging_logical_bytes": null,
+     "dw_rmw_bytes": 7200571392,
+     "dx_local_update_bytes": 6553717440512,
+     "scratch_bytes": 67108864,
+     "note": "the dW kernel keeps its projection (it needs z^T); dX reads masks instead of recomputing",
+     "name": "F3 one-bit mask exchange (64 MiB chunks, producer dW -> consumer dX)",
+     "hmma1688": 25600458752,
+     "issued_TFLOP": 78.644609286144,
+     "projection_evaluations_per_neuron_token": 1,
+     "mma_time_at_69TFLOPS_s": 1.1397769461760001
+    }
+   ]
+  }
+ ],
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 3090",
+  "sm": "8.6",
+  "sms": 82,
+  "memory_GiB": 23.68,
+  "torch": "2.7.0+cu128",
+  "cuda_runtime": "12.8"
+ },
+ "timestamp": "2026-10-18 22:06:57"
+}
