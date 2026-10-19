@@ -55,6 +55,9 @@ PHASES = [
     ("bwd_dx_init", "bwd.layout", "bwd.dx_init"),       # dX buffer zeroing
     ("dx_kernel", "bwd.dx_init", "bwd.dx"),             # local dX + global merge (atomics)
     ("dw_kernel", "bwd.dx", "bwd.dw"),                  # dW / db (+ non-finite fallback launch)
+    ("bwd_kernels", "bwd.dx_init", "bwd.dw"),           # dX + dW kernels, or the fused kernel + its fallbacks
+    ("fused_kernel", "bwd.dx_init", "bwd.fused"),       # fused shared-projection kernel alone
+    ("fused_fallbacks", "bwd.fused", "bwd.dx"),         # its guarded generic fallback launches (exit at once)
     ("bwd_post", "bwd.dw", "bwd.end"),                  # dX transpose + FP32 -> BF16, autograd
     ("bwd_total", "fwd.end", "bwd.end"),
     ("optimizer", "bwd.end", "opt.end"),
@@ -122,6 +125,7 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     variants = [parse_variant(v) for v in args.variant] or [("default", {})]
+    library = str(cuda_ops.build_library())  # the library this process loads (recorded before any timing)
 
     torch.manual_seed(args.input_seed)
     conn = None if args.S == 0 else ConnectivityPlan(args.S, args.R, args.gen, args.graph_seed)
@@ -259,7 +263,8 @@ def main():
             got_sc = (info.get("grouped_dx") or {}).get("scatter") if got["dx"] == "grouped" else None
             if want_sc != "auto" and got["dx"] == "grouped" and got_sc != want_sc:
                 raise SystemExit(f"variant {name}: dX scatter {want_sc} requested, ran {got_sc}")
-            if got["dx"] == "grouped":  # the whole requested dX plan (tile, copies, scatter) actually ran
+            if got["dx"] == "grouped" and info.get("backward_organization", "separate") == "separate":
+                # the whole requested dX plan (tile, copies, scatter) actually ran
                 gd = info["grouped_dx"]
                 pl = plans[name]
                 want_t = dict(DX_PLANS.get(pl.cuda_grouped_dx_plan, {}))
@@ -275,7 +280,12 @@ def main():
                     raise SystemExit(f"variant {name}: dX plan mismatch (requested, ran): {bad}")
                 res["descriptors"] = lay._rt.sg.item_chunk_stats(gd["chunk_units"])
             res["kernels"] = got
-            res["info"] = {k: info.get(k) for k in ("grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
+            want_org = plans[name].cuda_grouped_backward
+            got_org = info.get("backward_organization", "separate")
+            if want_org in ("fused", "fused_recompute") and got_org != want_org:
+                raise SystemExit(f"variant {name}: backward {want_org} requested, ran {got_org}")
+            res["info"] = {k: info.get(k) for k in ("backward_organization", "grouped_fused",
+                                                    "grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
                                                     "dx_epilogue", "dw_epilogue", "dw_staging", "dw_cfg", "dx_warps",
                                                     "bwd_dx_grid", "bwd_dw_grid")}
             if got["dx"] != "grouped":
@@ -285,7 +295,7 @@ def main():
             if got["dw"] != "grouped":
                 res["info"]["grouped_dw"] = None
             res["work_list_bytes"] = sum((res["info"].get(k) or {}).get("work_list_bytes", 0)
-                                         for k in ("grouped_fwd", "grouped_dx", "grouped_dw"))
+                                         for k in ("grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fused"))
     gpu_after = gpu_state()
 
     persistent = {
@@ -298,7 +308,7 @@ def main():
     }
     L = lay.layout
     out = {"commit": git_sha(), "dirty": git_dirty(), "nvcc_flags": cuda_ops.NVCC_FLAGS,
-           "library": str(cuda_ops.build_library()), "args": vars(args),
+           "library": library, "args": vars(args),
            "config": {"C": args.C, "S": args.S, "R": args.R, "Q": (conn.num_supergroups(args.input_dim) if conn else 0),
                       "H": args.hidden, "M": args.batch, "G": args.groups, "D": args.input_dim,
                       "pooling": args.pooling, "precision": args.grad_precision,
@@ -331,7 +341,7 @@ def main():
                                  "restore_checks": res["restore_checks"]}
         ph = out["variants"][name]["phases"]
         fk = "fwd_kernel" if "fwd_kernel" in ph else "fwd_kernel_generic"
-        line = "  ".join(f"{k} {ph[k]['median_ms']:.2f}" for k in (fk, "fwd_total", "dx_kernel", "dw_kernel",
+        line = "  ".join(f"{k} {ph[k]['median_ms']:.2f}" for k in (fk, "fwd_total", "dx_kernel", "dw_kernel", "bwd_kernels",
                                                                    "bwd_total", "step") if k in ph)
         print(f"[{name}] C={args.C} S={args.S} R={args.R} H={args.hidden:,} M={args.batch} {args.grad_precision}: "
               f"{line}  peak {res['peak_alloc'] / 2**30:.2f} GiB scratch {res['scratch_peak'] / 2**20:.0f} MiB "

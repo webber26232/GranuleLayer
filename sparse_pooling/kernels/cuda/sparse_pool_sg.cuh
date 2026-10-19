@@ -372,6 +372,9 @@ __device__ __forceinline__ void sg_dx_body(const SgArgs& a) {
 
 template <int ACT, int C, int MT, int NW, bool SPLIT, int EPI>
 __global__ void __launch_bounds__(NW * 32) sg_dx_kernel(SgArgs a) {
+  // guarded fallback launch of a fused backward (flags & BWD_FALLBACK): runs only for
+  // non-finite coefficients, when the fused kernel exited without contributing
+  if ((a.flags & BWD_FALLBACK) && !(a.nonfinite && *a.nonfinite)) return;
   // in-kernel generic fallback for non-finite coefficients (as k_dx)
   if (EPI && !(a.nonfinite && *a.nonfinite)) sg_dx_body<ACT, C, MT, NW, SPLIT, EPI>(a);
   else sg_dx_body<ACT, C, MT, NW, SPLIT, 0>(a);

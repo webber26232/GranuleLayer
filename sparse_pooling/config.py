@@ -310,6 +310,14 @@ class PhysicalPlan:
     # any explicit dX field makes "auto" behave as "tiles".  A named plan conflicting with an
     # explicit field raises.
     cuda_grouped_dx_plan: str = "auto"
+    # grouped C = 8 backward organization: "separate" = dX and dW kernels, each recomputing the
+    # projection; "fused" = experimental shared-projection kernel (sparse_pool_sg_bwdf.cuh: one
+    # projection per block-tile, dW-owned schedule, dX flushed per token window; Mean(ReLU),
+    # split, mask / fast epilogues); "fused_recompute" = the same schedule recomputing the dW
+    # projection (attribution control); "auto" = "separate" (fusion is not promoted).  An explicit
+    # fused request that cannot run raises.
+    cuda_grouped_backward: str = "auto"
+    cuda_grouped_fused_cfg: int = 0  # cuda_ops.SGF_CFGS key
     cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
     cuda_grouped_merge: str = "atomic"  # supergroup -> global merge (FP32 atomics, bounded scratch)
 
@@ -329,6 +337,7 @@ class PhysicalPlan:
         assert self.cuda_grouped_dx_warps in (0, 8, 16)
         assert self.cuda_grouped_dx_scatter in DX_SCATTERS
         assert self.cuda_grouped_dx_plan in ("auto", "tiles") + tuple(DX_PLANS), self.cuda_grouped_dx_plan
+        assert self.cuda_grouped_backward in ("auto", "separate", "fused", "fused_recompute")
         if self.cuda_grouped_dx_plan in DX_PLANS:
             want = DX_PLANS[self.cuda_grouped_dx_plan]
             for f, v in (("tokens", self.cuda_grouped_dx_tokens), ("warps", self.cuda_grouped_dx_warps),

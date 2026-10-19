@@ -340,6 +340,9 @@ class CudaBackend:
             f = getattr(self.lib, f"sp_sg_dw_c{C}")
             f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
             self.sg_fns[("dw", C)] = f
+        f = self.lib.sp_sgf_c8  # experimental fused backward (sparse_pool_sg_bwdf.cuh)
+        f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 3 + [ctypes.c_void_p]
+        self.sg_fns["fused"] = f
 
     @classmethod
     def get(cls, strict: bool = False):
@@ -743,6 +746,67 @@ class CudaBackend:
                                           work_list_bytes=units.numel() * units.element_size()
                                           + ch.numel() * ch.element_size())
 
+    def sg_fused_reason(self, rt, B: int, dx_epi: str, dw_epi: str) -> str:
+        """Why the fused shared-projection backward cannot run ("" if it can)."""
+        L, lv, p = rt.layout, rt.level, rt.plan
+        if L.block != 8:
+            return f"implemented for C = 8 only (C = {L.block})"
+        if lv.type != "mean" or lv.activation != "relu":
+            return f"implemented for Mean(ReLU) only ({lv.describe()}); Mean(identity) has no ReLU mask to share"
+        if p.grad_precision != "split":
+            return "implemented for split gradients only"
+        if dx_epi != "mask" or dw_epi != "fast":
+            return f"needs the mask dX / fast dW epilogues (got {dx_epi} / {dw_epi})"
+        for ph in ("dx", "dw"):
+            why = self.sg_reason(rt, ph, B)
+            if why:
+                return f"grouped {ph} unavailable: {why}"
+        smem = sgf_smem(L.input_dim, rt.sg.S, p.cuda_grouped_fused_cfg)
+        if smem > SG_MAX_SMEM:
+            return f"fused cfg {p.cuda_grouped_fused_cfg} needs {smem / 1024:.1f} KiB of shared memory > 99 KiB"
+        return ""
+
+    def _sg_fused(self, rt, a, dxt, c1T, B, stream, share):
+        """Fused backward + the guarded generic fallbacks (run only for non-finite coefficients,
+        when the fused kernel exits): exactly one path contributes."""
+        L = rt.layout
+        cfg = rt.plan.cuda_grouped_fused_cfg
+        nw, wpw, ts, _, minb = SGF_CFGS[cfg]
+        units, ch = rt.sg.unit_chunks(nw * wpw)
+        a.units, a.chunks, a.c1T, a.dXT, a.flags = _ptr(units), _ptr(ch), _ptr(c1T), _ptr(dxt), 0
+        err = self.sg_fns["fused"](ctypes.byref(a), cfg, int(share), ch.shape[0], stream)
+        if err != 0:
+            raise RuntimeError(f"sp_sgf_c8 failed (code {err})")
+        _mark("bwd.fused")
+        # fallback dX: the original grouped kernel, generic epilogue (private copies where they fit)
+        T, nwx, wg = 64, 8, (1 if rt.sg.S <= 32 else 8)
+        items, chx = rt.sg.item_chunks(SG_CHUNK_UNITS["dx"])
+        a.items, a.chunks, a.dx_group_warps, a.flags = _ptr(items), _ptr(chx), wg, BWD_FALLBACK
+        err = self.sg_fns[("dx", L.block, rt.level.act_id)](ctypes.byref(a), T // 16, nwx, 1, 0, chx.shape[0],
+                                                             math.ceil(B / T), stream)
+        if err != 0:
+            raise RuntimeError(f"sp_sg_dx fallback failed (code {err})")
+        # fallback dW / db: the grouped dW generic launch (BWD_FALLBACK), cfg with the same ownership
+        units_w, chw = rt.sg.unit_chunks(nw * wpw) if (nw, wpw) in ((8, 2), (8, 4)) else rt.sg.unit_chunks(16)
+        dwc = {(8, 2): 2, (8, 4): 3}.get((nw, wpw), 2)
+        a.units, a.chunks, a.flags = _ptr(units_w), _ptr(chw), BWD_FALLBACK
+        err = self.sg_fns[("dw", L.block)](ctypes.byref(a), rt.level.act_id, dwc, 1, 0, chw.shape[0], stream)
+        if err != 0:
+            raise RuntimeError(f"sp_sg_dw fallback failed (code {err})")
+        a.flags = 0
+        S = rt.sg.S
+        rt.last_info["grouped_fused"] = dict(
+            cfg=cfg, share=bool(share), warps=nw, units_per_warp=wpw, window_tokens=16 * ts, min_ctas_per_sm=minb,
+            ctas=ch.shape[0], windows=math.ceil(B / (16 * ts)), smem=sgf_smem(L.input_dim, S, cfg),
+            kernel=(f"sgf_kernel<{nw}, {wpw}, {ts}, {SGF_CFGS[cfg][3]}, {minb}, {str(bool(share)).lower()}>" if cfg < 6
+                    else f"sgf2_kernel<{nw}, {wpw}, {SGF_CFGS[cfg][3]}, {minb}, {str(bool(share)).lower()}>"),
+            dx_flush_atomics_upper=ch.shape[0] * S * B,
+            fallback="sg_dx_kernel generic + sg_dw generic, flags BWD_FALLBACK (run only if coefficients are non-finite)",
+            work_list_bytes=units.numel() * units.element_size() + ch.numel() * ch.element_size())
+        rt.last_info.pop("grouped_dx", None)
+        rt.last_info.pop("grouped_dw", None)
+        return dxt.t()
+
     # ---------------------------------------------------------------- backward
     def supports_backward(self, rt) -> bool:
         lv, L = rt.level, rt.layout
@@ -854,13 +918,32 @@ class CudaBackend:
         if sg_dx or sg_dw:
             sa = self._sg_args(rt, xop, w, b, B)
             sa.dW, sa.dB, sa.nonfinite = _ptr(dw_buf), _ptr(db_buf), _ptr(nonfinite)
-        if sg_dx:
+        org = plan.cuda_grouped_backward
+        fused = False
+        if org in ("fused", "fused_recompute") and getattr(rt, "sg", None) is not None:
+            why = self.sg_fused_reason(rt, B, dx_epi, dw_epi)
+            if why:
+                raise ValueError(f"cuda_grouped_backward={org!r} unavailable: {why}")
+            if not (sg_dx and sg_dw):
+                raise ValueError(f"cuda_grouped_backward={org!r} needs grouped dX and dW (requested generic)")
+            fused = True
+        rt.last_info["backward_organization"] = ("fused" if org == "fused" else "fused_recompute") if fused else "separate"
+        if not fused:
+            rt.last_info.pop("grouped_fused", None)
+        if fused:
+            dx = self._sg_fused(rt, sa, dxt, c1T, B, stream, share=(org == "fused"))
+            _mark("bwd.dx")
+            _mark("bwd.dw")
+        elif sg_dx:
             dx = self._sg_dx(rt, sa, dxt, c1T, B, split, dx_epi, stream)
         else:
             dx_flags = _EPI_BITS["dx"].get(dx_epi, 0)
             launch(0, dx_warps, n_tiles, gy, dx_flags, "dx")  # k_dx falls back to the generic body in-kernel
-        _mark("bwd.dx")
-        if sg_dw:
+        if not fused:
+            _mark("bwd.dx")
+        if fused:
+            pass
+        elif sg_dw:
             self._sg_dw(rt, sa, c1T, split, dw_epi, stream)
         else:
             kind = 1 if staging == "full" else {2: 2, 3: 3}[DW_INDEXED_STAGES]
@@ -868,7 +951,8 @@ class CudaBackend:
             launch(kind, cfg, n_chunks, U, dw_flags, "dw")
             if dw_flags:  # generic fallback launch: exits at once unless some coefficient is non-finite
                 launch(kind, cfg, n_chunks, U, BWD_FALLBACK, "dw fallback")
-        _mark("bwd.dw")
+        if not fused:
+            _mark("bwd.dw")
         rt.last_info.update(dx_kernel="grouped" if sg_dx else "generic", dw_kernel="grouped" if sg_dw else "generic")
         rt.last_info.update(bwd_dx_grid=(n_tiles, gy), bwd_dw_grid=(n_chunks, U), grad_precision=plan.grad_precision,
                             dw_staging=staging, dw_cfg=cfg, dx_warps=dx_warps,
