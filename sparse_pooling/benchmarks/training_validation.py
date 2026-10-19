@@ -43,7 +43,7 @@ from sparse_pooling import PhysicalPlan, SparsePoolingLayer
 from sparse_pooling.optim import FusedAdamW
 from sparse_pooling.supergroups import ConnectivityPlan
 
-CHECK_FACTOR = {"same": 2.0, "mma_accumulate": 10.0}
+CHECK_FACTOR = {"same": 2.0, "mma_accumulate": 10.0, "order_change": 10.0}  # order_change: whole-plan comparisons (C3 rule)
 ABS_FLOOR = 1e-12
 LOSS_FLOOR = 2.0 ** -23  # one FP32 ulp, relative (amendment (b))
 
@@ -121,7 +121,11 @@ class Run:
         if extra is not None:
             rec["P"] = extra[0].weight.detach()
         self.info = {k: lay.last_info.get(k) for k in ("forward_kernel", "dx_kernel", "dw_kernel")}
-        self.info["scatter"] = (lay.last_info.get("grouped_dx") or {}).get("scatter")
+        gd = lay.last_info.get("grouped_dx") or {}
+        self.info.update(scatter=gd.get("scatter"), dx_plan=gd.get("plan"), dx_tokens=gd.get("tokens"),
+                         dx_reduction=gd.get("reduction_group_warps"),
+                         backward_organization=lay.last_info.get("backward_organization"),
+                         fused=(lay.last_info.get("grouped_fused") or {}).get("kernel"))
         self.cur = rec
         return rec
 

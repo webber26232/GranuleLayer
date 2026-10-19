@@ -36,6 +36,50 @@ GRAPHS = {  # name: (graph, dX tile, candidate scatters, steps)
     "C8_S64_R16_shared": (dict(C=8, S=64, R=16), (64, 8, 8), ("swizzle4",), 8),
     "C64_S16_R4": (dict(C=64, S=16, R=4), None, (), 8),
 }
+# whole-plan comparisons (results/SCALE_DISPATCH_FUSED_BACKWARD.md): reference plan -> candidate
+# plans (order-changing: shared CAS copy vs warp-private copies, or a fused repartitioning)
+PLAN_GRAPHS = {
+    "C8_S64_R16_planB_vs_planA": (dict(C=8, S=64, R=16), dict(cuda_grouped_dx_plan="shared_t64"),
+                                  {"planB_private_t32": dict(cuda_grouped_dx_plan="private_t32")}, 8),
+    "C8_S16_R4_fused_vs_separate": (dict(C=8, S=16, R=4), dict(),
+                                    {"fused": dict(cuda_grouped_backward="fused"),
+                                     "fused_recompute": dict(cuda_grouped_backward="fused_recompute")}, 16),
+}
+
+
+def plan_graph(args, gname):
+    graph, ref_kw, cands, steps = PLAN_GRAPHS[gname]
+    base = dict(cuda_input_supergroup_backend="auto", **ref_kw)
+    out = []
+    for prec in args.precisions.split(","):
+        for model in args.models.split(","):
+            for om in args.opt_modes.split(","):
+                cfg = dict(graph, D=1024, H=args.hidden, G=args.groups, B=args.batch, model=model, precision=prec,
+                           D0=256, G2=64, lr=1e-3)
+                variants = {"baseline": (base, None), "baseline_null": (base, "order_change")}
+                for c, kw in cands.items():
+                    variants[c] = (dict(cuda_input_supergroup_backend="auto", **kw), "order_change")
+                data = batches(cfg, steps)
+                t0 = time.perf_counter()
+                r = lockstep(cfg, variants, om, data, args.repeats)
+                env = r["series"]["baseline"]
+                row = {"graph": gname, "cfg": cfg, "opt_mode": om, "steps": steps, "repeats": args.repeats,
+                       "kernels": r["kernels"], "finite": r["finite"], "losses": r["losses"],
+                       "baseline_envelope": env, "variants": {}}
+                for name, (_, order) in variants.items():
+                    if name != "baseline":
+                        row["variants"][name] = {"series": r["series"][name], "order": order,
+                                                 "check": check(env, r["series"][name], order)}
+                out.append(row)
+                print(f"{gname} {prec} {model} {om}: {time.perf_counter() - t0:.1f}s finite {all(r['finite'].values())}",
+                      flush=True)
+                for name, v in row["variants"].items():
+                    lv, ck = v["series"][-1], v["check"]
+                    print(f"    {name:22s} W {lv.get('W', 0):.2e} dX {lv.get('dX', 0):.2e} loss {lv['loss']:.2e}  "
+                          f"check x{ck['factor']:.0f}: {'PASS' if ck['pass'] else 'FAIL'} (worst "
+                          f"{ck['worst_ratio_to_limit']:.2f} of limit)", flush=True)
+                torch.cuda.empty_cache()
+    return out
 
 
 def main():
@@ -53,6 +97,9 @@ def main():
     args = ap.parse_args()
     results = []
     for gname in args.graphs.split(","):
+        if gname in PLAN_GRAPHS:
+            results += plan_graph(args, gname)
+            continue
         graph, tile, cands, steps = GRAPHS[gname]
         if args.candidates and tile is not None:
             cands = tuple(c for c in args.candidates.split(",")
