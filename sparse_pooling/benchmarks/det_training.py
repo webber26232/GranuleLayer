@@ -1,5 +1,4 @@
-"""Repeatability of complete composed-model training with PhysicalPlan.reduction (Track A,
-results/DETERMINISM_METRICS_DW_PROJECTION.md section 5).
+"""Repeatability of complete composed-model training with PhysicalPlan.reduction.
 
 Model (production dtypes): x0 [M, D0] -> Linear(D0, D) (FP32, torch AdamW) -> BF16 -> GranuleLayer
 (real R > 1 connectivity, normal work chunks; BF16 parameters, FP32 main_grad, FusedAdamW) ->
@@ -15,12 +14,21 @@ trajectory of --steps steps TWICE: trajectory 1, restore, trajectory 2.  Every s
     optimizer clears it), projection / head gradients, then after both optimizer steps all
     parameters, layer moments (and master weights), torch AdamW moments, step and SR counters.
 
---role write: trajectory 1 writes every record to --records (raw bytes + SHA-1); trajectory 2 is
-compared against them.  --role compare (a second, independent process): both trajectories are
-compared against the records of the writing process.  Comparison is exact (bitwise, streamed in
-chunks: no second copy of 8 GB state on the host), and reports the first differing (step, tensor,
-element).  With --characterize the run never stops on a difference and records max abs / relative
-differences instead (fast mode, or fast vs deterministic records via --records of a det run).
+--role write: the warm-up step and trajectory 1 are written to --records (det_records.py: raw bytes,
+published atomically with a manifest of the experiment identity and the writer's provenance; an
+existing record set is never overwritten unless --replace-records); trajectory 2 is compared against
+them.  --role compare (an independent process, possibly another implementation of the same
+experiment): the warm-up step and both trajectories are compared against the records.
+
+Verdict (``status`` in the JSON, the last log line, and the exit code):
+  * strict (default): "pass" only if every expected record was compared and is bitwise equal, no
+    record is missing / unexpected / malformed, the restored training state matches its capture,
+    and the resolved execution plan equals the writer's (unless --allow-plan-change); otherwise
+    "fail" and exit code 1.  The first differing (step, tensor, element) is reported.
+  * --characterize: never stops on a value difference and records max abs / relative differences
+    (fast mode, or fast vs deterministic records).  Its status is "characterization" (exit 0) and is
+    never a validation pass; structural errors still fail (exit 1).
+Unusable records (absent, incomplete, corrupt, other experiment) exit with code 2.
 
     python det_training.py --case P_S64_R16 --steps 4 --records /scratch/rec --role write --out ...
 """
@@ -31,20 +39,21 @@ import os
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import argparse  # noqa: E402
-import hashlib  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
 import json  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import common  # noqa: F401,E402
 from common import gpu_info, save  # noqa: E402
 from sparse_pooling import PhysicalPlan, SparsePoolingLayer  # noqa: E402
-from sparse_pooling.kernels import cuda_ops  # noqa: E402
+import sparse_pooling  # noqa: E402
 from sparse_pooling.optim import FusedAdamW  # noqa: E402
 from sparse_pooling.supergroups import ConnectivityPlan  # noqa: E402
+from det_records import RecordComparer, RecordError, RecordWriter, identity_mismatch  # noqa: E402
 from train_state import TrainState  # noqa: E402
 
 # name -> (D, G, H, M, S, R, D0, G2)
@@ -61,16 +70,9 @@ CASES = {
     "P_S16_R4": (1024, 1024, 100_000_000, 8192, 16, 4, 256, 256),
     "P_S32_R8": (1024, 1024, 100_000_000, 8192, 32, 8, 256, 256),
     "P_S64_R16": (1024, 1024, 100_000_000, 8192, 64, 16, 256, 256),
+    # harness self-test (run_det_training.sh selftest): seconds per process
+    "T_S16_R4": (256, 64, 400_000, 256, 16, 4, 64, 32),
 }
-CHUNK = 1 << 26  # bytes per streamed comparison chunk
-
-
-def bits_np(t: torch.Tensor) -> np.ndarray:
-    t = t.detach().contiguous().reshape(-1)
-    v = t.view({1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[t.element_size()])
-    return v
-
-
 class Model:
     def __init__(self, case, seed, precision, opt_mode, reduction, plan_kw):
         D, G, H, M, S, R, D0, G2 = case
@@ -130,77 +132,6 @@ class Model:
         sink("opt.step", torch.tensor([self.opt.state[lay.weight]["step"]], dtype=torch.int64))
 
 
-class Writer:
-    def __init__(self, d: Path):
-        self.d = d
-        d.mkdir(parents=True, exist_ok=True)
-        self.meta = {}
-
-    def __call__(self, step, name, t):
-        b = bits_np(t)
-        f = self.d / f"s{step}_{name}.bin"
-        h = hashlib.sha1()
-        with open(f, "wb") as fh:
-            n = b.numel()
-            per = max(1, CHUNK // b.element_size())
-            for i in range(0, n, per):
-                a = b[i:i + per].cpu().numpy()
-                fh.write(a.tobytes())
-                h.update(a.tobytes())
-        self.meta[f"s{step}_{name}"] = dict(dtype=str(t.dtype), shape=list(t.shape), sha1=h.hexdigest())
-        return None
-
-
-class Comparer:
-    """Streamed exact comparison against a record file; with characterize, difference statistics."""
-
-    def __init__(self, d: Path, characterize: bool):
-        self.d = d
-        self.meta = json.load(open(d / "meta.json"))["records"]
-        self.characterize = characterize
-
-    def __call__(self, step, name, t):
-        key = f"s{step}_{name}"
-        if key not in self.meta:
-            return dict(missing=True)
-        b = bits_np(t)
-        n = b.numel()
-        per = max(1, CHUNK // b.element_size())
-        first = None
-        ndiff = 0
-        stats = dict(max_abs=0.0, sq=0.0, ref_sq=0.0, nonfinite_mismatch=0)
-        npdt = {1: np.uint8, 2: np.int16, 4: np.int32, 8: np.int64}[b.element_size()]
-        with open(self.d / f"{key}.bin", "rb") as fh:
-            for i in range(0, n, per):
-                a = b[i:i + per]
-                ref = torch.from_numpy(np.frombuffer(fh.read(a.numel() * a.element_size()), dtype=npdt).copy()).to(a.device)
-                ne = a != ref
-                k = int(ne.sum())
-                if k:
-                    ndiff += k
-                    if first is None:
-                        first = i + int(torch.nonzero(ne)[0])
-                    if self.characterize and t.is_floating_point():
-                        x = a.view(t.dtype).double()
-                        y = ref.view(t.dtype).double()
-                        fin = torch.isfinite(x) & torch.isfinite(y)
-                        dd = (x - y)[fin]
-                        stats["max_abs"] = max(stats["max_abs"], float(dd.abs().max()) if dd.numel() else 0.0)
-                        stats["sq"] += float((dd * dd).sum())
-                        stats["nonfinite_mismatch"] += int((torch.isfinite(x) != torch.isfinite(y)).sum())
-                if self.characterize and t.is_floating_point():
-                    y = ref.view(t.dtype).double()
-                    y = y[torch.isfinite(y)]
-                    stats["ref_sq"] += float((y * y).sum())
-        out = dict(bitwise=ndiff == 0, n=n, n_diff=ndiff)
-        if first is not None:
-            out["first_index"] = first
-            if self.characterize and t.is_floating_point():
-                out.update(max_abs=stats["max_abs"], rel_l2=(stats["sq"] / max(stats["ref_sq"], 1e-300)) ** 0.5,
-                           rms=(stats["sq"] / n) ** 0.5, nonfinite_mismatch=stats["nonfinite_mismatch"])
-        return out
-
-
 def batches(case, steps, seed):
     D, G, H, M, S, R, D0, G2 = case
     g = torch.Generator(device="cuda")
@@ -209,18 +140,64 @@ def batches(case, steps, seed):
             for _ in range(steps)]
 
 
-def env_info():
-    lib = str(cuda_ops.build_library())
+
+
+PLAN_KEYS = {"grouped_fwd": ("tokens", "warps", "chunk_units"),
+             "grouped_dx": ("plan", "tokens", "warps", "reduction_group_warps", "chunk_units", "scatter", "kernel",
+                            "epilogue"),
+             "grouped_dw": ("cfg", "projection", "kernel")}
+
+
+def resolved_plan(info: dict) -> dict:
+    """The execution decisions that determine the arithmetic (from last_info; the same keys in every
+    implementation since the deterministic-reduction phase)."""
+    out = {k: info.get(k) for k in ("forward_kernel", "dx_kernel", "dw_kernel")}
+    out["reduction"] = (info.get("reduction") or {}).get("mode")
+    for sect, fields in PLAN_KEYS.items():
+        d = info.get(sect)
+        out[sect] = None if d is None else {f: d.get(f) for f in fields}
+    return out
+
+
+def _git(*a):
+    root = Path(sparse_pooling.__file__).resolve().parent
+    try:
+        r = subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def provenance() -> dict:
+    """The implementation and environment of this process (reported, not part of the identity)."""
+    out = dict(package=str(Path(sparse_pooling.__file__).resolve().parent), commit=_git("rev-parse", "HEAD"),
+               dirty=bool(_git("status", "--porcelain", "--untracked-files=no")), torch=torch.__version__,
+               cuda_runtime=torch.version.cuda, gpu=gpu_info(),
+               cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+               deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+               warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+               tf32_matmul=torch.backends.cuda.matmul.allow_tf32)
     try:
         import triton
-        tv = triton.__version__
+        out["triton"] = triton.__version__
     except Exception:  # noqa: BLE001
-        tv = None
-    return dict(torch=torch.__version__, cuda=torch.version.cuda, triton=tv, library=lib,
-                nvcc_flags=cuda_ops.NVCC_FLAGS, cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-                deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-                warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
-                tf32_matmul=torch.backends.cuda.matmul.allow_tf32, gpu=gpu_info())
+        out["triton"] = None
+    try:  # the native build this process loads (identity / kind where the implementation reports one)
+        from sparse_pooling.kernels import cuda_ops
+        if hasattr(cuda_ops, "build_info"):
+            out["build"] = cuda_ops.build_info()
+        else:
+            out["build"] = dict(library=str(cuda_ops.build_library()), nvcc_flags=cuda_ops.NVCC_FLAGS, kind="production")
+    except Exception as e:  # noqa: BLE001
+        out["build"] = dict(error=repr(e))
+    return out
+
+
+def identity(args, case) -> dict:
+    """The experiment: the same identity must give the same records under an unchanged plan."""
+    return dict(case=args.case, shape=dict(zip(("D", "G", "H", "M", "S", "R", "D0", "G2"), case)), seed=args.seed,
+                steps=args.steps, precision=args.precision, opt_mode=args.opt_mode, reduction=args.reduction,
+                plan=args.plan, warn_only=args.warn_only, model="det_training composed/1")
 
 
 def main():
@@ -235,7 +212,14 @@ def main():
     ap.add_argument("--plan", default="", help="extra PhysicalPlan fields k=v,...")
     ap.add_argument("--records", required=True)
     ap.add_argument("--role", default="write", choices=["write", "compare"])
-    ap.add_argument("--characterize", action="store_true", help="never stop on a difference: statistics")
+    ap.add_argument("--replace-records", action="store_true",
+                    help="write: replace an existing record set (only once the new one is complete)")
+    ap.add_argument("--characterize", action="store_true",
+                    help="never stop on a value difference: statistics (status 'characterization', never a pass)")
+    ap.add_argument("--ignore-identity", default="",
+                    help="characterize: identity fields allowed to differ from the records (e.g. reduction,warn_only)")
+    ap.add_argument("--allow-plan-change", action="store_true",
+                    help="compare: accept a resolved execution plan that differs from the writer's")
     ap.add_argument("--warn-only", action="store_true", help="torch deterministic algorithms with warn_only")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -248,23 +232,28 @@ def main():
         f = PhysicalPlan.__dataclass_fields__[k]
         plan_kw[k] = int(v) if f.type in ("int", int) else v
     case = CASES[args.case]
+    ident = identity(args, case)
+    prov = provenance()
+    rec = Path(args.records)
+    try:  # unusable records fail before any work
+        writer = RecordWriter(rec, ident, prov, replace=args.replace_records) if args.role == "write" else None
+        ignore = tuple(filter(None, args.ignore_identity.split(",")))
+        ref = None if writer else RecordComparer(rec, ident, args.characterize, ignore)
+    except RecordError as e:
+        print(f"{args.case} seed {args.seed} role {args.role}: status=error ({e})", flush=True)
+        sys.exit(2)
     t0 = time.perf_counter()
     torch.manual_seed(args.seed)
     model = Model(case, args.seed, args.precision, args.opt_mode, args.reduction, plan_kw)
     data = batches(case, args.steps + 1, args.seed)
     build_s = time.perf_counter() - t0
-    rec = Path(args.records)
-    traj = []
-    ok = True
+    failures = []  # strict-mode failures (value differences, structure, restore, plan)
+    stopped = False
 
-    def run_traj(label, sink_fn):
-        nonlocal ok
+    def run_traj(label, steps, sink_fn):
+        nonlocal stopped
         res = []
-        for s in range(args.steps + 1):
-            if label != "warm" and s == 0:
-                continue
-            if label == "warm" and s > 0:
-                break
+        for s in steps:
             out = {}
 
             def sink(name, t):
@@ -275,47 +264,89 @@ def main():
             ts = time.perf_counter()
             model.step(*data[s], sink)
             torch.cuda.synchronize()
-            diffs = [n for n, r in out.items() if not r.get("bitwise", True)]
-            res.append(dict(step=s, seconds=time.perf_counter() - ts, compared=len(out),
-                            differing=diffs, first=(diffs[0], out[diffs[0]]) if diffs else None,
+            diffs = [n for n, r in out.items() if not r.get("bitwise", False)]
+            errs = {n: out[n]["error"] for n in diffs if "error" in out[n]}
+            res.append(dict(step=s, seconds=time.perf_counter() - ts, compared=len(out), differing=diffs,
+                            errors=errs, first=(diffs[0], out[diffs[0]]) if diffs else None,
                             detail=out if args.characterize else {n: out[n] for n in diffs}))
             print(f"[{label}] step {s}: {len(out)} tensors compared, {len(diffs)} differ"
                   + (f" (first {diffs[0]} {out[diffs[0]]})" if diffs else ""), flush=True)
-            if diffs and not args.characterize:
-                ok = False
+            if errs:
+                failures.append(dict(kind="structure", trajectory=label, step=s, errors=errs))
+            if diffs and not errs:
+                failures.append(dict(kind="value", trajectory=label, step=s, first=(diffs[0], out[diffs[0]]),
+                                     n_tensors=len(diffs)))
+            if (diffs and not args.characterize) or errs:
+                stopped = True
                 return res
         return res
 
-    writer = Writer(rec) if args.role == "write" else None
-    # warm-up step 0 (writes / compares the post-step-0 state: identical construction)
-    w0 = run_traj("warm", writer if writer else Comparer(rec, args.characterize))
-    states = model.states()
-    for st in states:
-        st.capture()
-    fp0 = [st.fingerprint() for st in states]
-    if writer:
-        t1 = run_traj("trajectory1_write", writer)
-        json.dump({"records": writer.meta}, open(rec / "meta.json", "w"))
-    else:
-        t1 = run_traj("trajectory1_vs_records", Comparer(rec, args.characterize))
+    def check_complete(label, cmp, steps):
+        missing = cmp.unvisited(steps)
+        if missing and not stopped:
+            failures.append(dict(kind="incomplete", trajectory=label, missing=missing[:20], n_missing=len(missing)))
+            print(f"[{label}] {len(missing)} reference records were never compared (first {missing[0]})", flush=True)
+
+    traj_steps = range(1, args.steps + 1)
+    try:
+        if writer:  # warm-up step 0 and trajectory 1 are written, then published
+            w0 = run_traj("warm", [0], writer)
+        else:
+            w0 = run_traj("warm", [0], ref)
+            check_complete("warm", ref, [0])
+        states = model.states()
+        for st in states:
+            st.capture()
+        fp0 = [st.fingerprint() for st in states]
+        plan_now = resolved_plan(model.info)
+        if writer:
+            t1 = run_traj("trajectory1_write", traj_steps, writer)
+            writer.finalize(dict(resolved_plan=plan_now))
+        else:
+            t1 = run_traj("trajectory1_vs_records", traj_steps, ref) if not stopped else []
+            check_complete("trajectory1_vs_records", ref, traj_steps)
+    finally:
+        if writer:
+            writer.abort()  # no-op once published
     for st in states:
         st.restore()
     restored = [st.fingerprint() == f for st, f in zip(states, fp0)]
-    t2 = run_traj("trajectory2_vs_records", Comparer(rec, args.characterize)) if (ok or args.characterize) else []
+    if not all(restored):
+        failures.append(dict(kind="restore", restored=restored))
+    t2 = []
+    if not stopped:
+        cmp2 = RecordComparer(rec, ident, args.characterize, ignore)
+        t2 = run_traj("trajectory2_vs_records", traj_steps, cmp2)
+        check_complete("trajectory2_vs_records", cmp2, traj_steps)
+    man = RecordComparer(rec, ident, args.characterize, ignore).manifest if (writer is None or writer.published) else {}
+    ref_plan = man.get("resolved_plan")
+    plan_equal = ref_plan == plan_now
+    if not plan_equal and not args.allow_plan_change and not args.characterize:  # characterization: reported
+        failures.append(dict(kind="plan", reference=ref_plan, current=plan_now))
+    structural = [f for f in failures if f["kind"] != "value"]
+    if args.characterize:
+        status = "fail" if structural else "characterization"
+    else:
+        status = "pass" if not failures else "fail"
     lay = model.lay
     sg = lay._rt.sg
-    out = dict(args=vars(args), case=dict(zip(("D", "G", "H", "M", "S", "R", "D0", "G2"), case)), env=env_info(),
+    out = dict(args=vars(args), status=status, mode="characterization" if args.characterize else "strict",
+               failures=failures, identity=ident, provenance=prov,
+               reference_provenance=man.get("provenance"),
+               identity_mismatch=identity_mismatch(ident, man.get("identity") or {}), identity_ignored=ignore,
+               resolved_plan=plan_now, reference_resolved_plan=ref_plan, resolved_plan_equal=plan_equal,
                build_seconds=build_s, info=model.info, bucket_stats=sg.bucket_stats,
                restore_fingerprint_equal=restored, warm=w0, trajectory1=t1, trajectory2=t2,
-               all_bitwise=ok and all(not r["differing"] for r in w0 + t1 + t2),
+               all_bitwise=status == "pass",
                peak_allocated_bytes=torch.cuda.max_memory_allocated(),
                peak_reserved_bytes=torch.cuda.max_memory_reserved(),
                snapshot_bytes=sum(st.nbytes() for st in states))
-    if writer:
-        out["record_sha1"] = writer.meta
     save(args.out, out)
+    first = next((f for f in failures), None)
     print(f"{args.case} seed {args.seed} {args.precision} {args.opt_mode} reduction {args.reduction} role {args.role}: "
-          f"all_bitwise={out['all_bitwise']} restore={restored} ({time.perf_counter() - t0:.0f} s)", flush=True)
+          f"status={status} restore={restored} plan_equal={plan_equal}"
+          + (f" first_failure={first}" if first else "") + f" ({time.perf_counter() - t0:.0f} s)", flush=True)
+    sys.exit(0 if status in ("pass", "characterization") else 1)
 
 
 if __name__ == "__main__":
