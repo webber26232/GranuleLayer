@@ -243,3 +243,52 @@ at H = 100M, M = 8192 the C = 8 step drops another 10–11 % (S = 16: 2.80 s →
 3.10 s → 2.76 s, same-session A/B) with bitwise-identical per-CTA arithmetic; see
 `results/C8_DX_SCATTER_OPTIMIZATION.md`.  Benchmarks restore the complete training state
 (`benchmarks/train_state.py`).
+
+## Deterministic execution (`PhysicalPlan.reduction`)
+
+The fast grouped kernels sum across CTAs with FP32 atomics (forward: one per (token, bucket);
+dX: one per (feature, token) per CTA, plus a shared-memory CAS in the S = 64 `shared_t64` dX plan),
+so repeated runs differ in the last bits.  `PhysicalPlan(reduction="deterministic")` gives every
+reduction a fixed owner and order: the grouped forward and dX store each CTA's partial into
+workspace rows only that CTA writes, and a second kernel (`kernels/cuda/sg_det.cu`) sums each
+output / input feature's contributors in a static order (built once from the work lists); dX uses
+warp-private shared-memory copies; dW / db already have exclusive owners.  Repeated runs with the
+same graph, inputs, parameters, optimizer and RNG state, resolved plan, device and toolchain are
+bitwise identical (outputs, dX, dW / db, optimizer updates).  No claim is made across GPU models,
+compiler / driver versions, precision modes or different reduction trees (deterministic and fast
+results differ in the last bits, as any two summation orders do).
+
+```python
+import torch
+from sparse_pooling import PhysicalPlan, SparsePoolingLayer
+from sparse_pooling.supergroups import ConnectivityPlan
+
+lay = SparsePoolingLayer(1024, 1_000_000, 1024, shared_neurons=8, pooling="mean", device="cuda",
+                         connectivity=ConnectivityPlan(64, 16),
+                         plan=PhysicalPlan(reduction="deterministic"))   # or "fast" / "auto"
+x = torch.randn(1024, 1024, device="cuda").bfloat16()
+y = lay(x); y.float().square().sum().backward()
+print(lay.last_info["reduction"], lay.last_info["grouped_dx"]["reduction"])
+```
+
+`reduction="auto"` (the default) runs `"deterministic"` under
+`torch.use_deterministic_algorithms(True)` and `"fast"` otherwise; an explicit `"fast"` under the
+global flag raises (warns with `warn_only=True`).  The partial workspace per stage is capped by
+`deterministic_workspace_bytes` (default 1 GiB, `config.DET_WORKSPACE_DEFAULT`): larger problems run
+in token windows.  The window does not change the bits (each destination's sum has the same
+contributors in the same order); a cap below one token tile raises — there is never an atomic
+fallback.
+
+| Layer / plan | `reduction="deterministic"` |
+|---|---|
+| input-supergroup layers, packed Mode B C = 8 or 64, Mean(ReLU) / Mean(identity), split or BF16 gradients, `input_layout="feature_major"`, B % 8 == 0 | supported (forward grouped or generic, dX grouped, dW grouped or generic) |
+| grouped dX `auto` | warp-private copies; C = 8, S = 64 → `private_t32` (no fast-mode threshold); other S: the automatic tiles with `cuda_grouped_dx_reduction = 1` |
+| explicit `cuda_grouped_dx_plan="private_t32"`, explicit private tiles / scatters | honoured |
+| explicit `shared_t64`, `cuda_grouped_dx_reduction > 1` | `ValueError` (shared-copy CAS) |
+| `cuda_grouped_dx="generic"` / layers without connectivity (k_dx), Triton backend | `ValueError` (FP32 atomics) |
+| `cuda_grouped_backward="fused" / "fused_recompute"` | `ValueError` (atomic dX flush); `auto` is separate |
+| other pooling operators, semantic hierarchies, token-major input, B % 8 != 0 | `ValueError` |
+| non-finite upstream gradients | the in-kernel generic epilogue of the same kernels (one path; finite elements bitwise repeatable; inf / NaN positions reproduced, NaN payload bits not promised) |
+
+See `results/DETERMINISM_METRICS_DW_PROJECTION.md` for the ownership map, overheads and the
+production H = 100M repeatability evidence.

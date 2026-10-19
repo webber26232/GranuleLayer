@@ -19,6 +19,8 @@
 //           plain read-modify-write, no CAS; otherwise the 64-bit CAS of k_dx).  The copies
 //           are summed and flushed with one FP32 atomicAdd per (feature, token) per CTA into
 //           dXT [D, B] (token-contiguous).
+//           Deterministic mode (SgArgs::part): the flush stores the reduced copy into the
+//           CTA's own workspace rows instead (sg_det.cu orders the cross-CTA sum).
 //   sg_dw   CTA = (chunk of units of one supergroup), all tokens; exclusive ownership of its
 //           units' dW/db (register accumulators, plain RMW write-back, as k_dw_idx).  The S
 //           rows of TS 16-token tiles are staged per pipeline stage into a CTA-shared ring.
@@ -56,6 +58,13 @@ struct SgArgs {
   int dx_group_warps;
   int flags;
   const unsigned char* nonfinite;
+  // deterministic reduction (PhysicalPlan.reduction = "deterministic"; sg_det.cu): when part is
+  // set, sg_fwd / sg_dx store their per-CTA partials into exclusively owned workspace rows
+  // (fwd: row = item, dX: row = chunk * S + local feature; part_tw tokens per row, token
+  // window [part_t0, part_t0 + part_tw)) instead of FP32 atomics; sp_sg_reduce sums them in a
+  // fixed order.  Token tiles are offset by part_t0 (0 in the atomic mode).
+  float* part;
+  int part_t0, part_tw;
 };
 
 __device__ __forceinline__ int sg_align16(int bytes) { return (bytes + 15) & ~15; }
@@ -169,7 +178,7 @@ __global__ void __launch_bounds__(NW * 32) sg_fwd_kernel(SgArgs a) {
   bf16* slab = reinterpret_cast<bf16*>(smem_raw + sg_align16(a.D * 2));
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int q = a.chunks[3 * blockIdx.x], lo = a.chunks[3 * blockIdx.x + 1], hi = a.chunks[3 * blockIdx.x + 2];
-  const int t0 = blockIdx.y * BM;
+  const int t0 = a.part_t0 + blockIdx.y * BM;
   FwdArgs fa;
   fa.idx = a.idx; fa.W = a.W; fa.bias = a.bias;
   sg_stage<MT>(a, a.feat + (long long)q * a.S, smap, slab, t0);
@@ -203,7 +212,8 @@ __global__ void __launch_bounds__(NW * 32) sg_fwd_kernel(SgArgs a) {
       if (SP_ABLATE_SG == 3) {
         if (s[i] == 1.2345e-30f) a.ysum[g] = s[i];
       } else if (tok < a.B) {
-        atomicAdd(a.ysum + (long long)g * a.B + tok, s[i]);
+        if (a.part) a.part[(long long)it * a.part_tw + (tok - a.part_t0)] = s[i];  // exclusive row of item it
+        else atomicAdd(a.ysum + (long long)g * a.B + tok, s[i]);
       }
     }
   }
@@ -302,7 +312,7 @@ __device__ __forceinline__ void sg_dx_body(const SgArgs& a) {
   float* dxs = reinterpret_cast<float*>(smem_raw + sg_align16(a.D * 2) + a.S * BM * 2);
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int q = a.chunks[3 * blockIdx.x], lo = a.chunks[3 * blockIdx.x + 1], hi = a.chunks[3 * blockIdx.x + 2];
-  const int t0 = blockIdx.y * BM;
+  const int t0 = a.part_t0 + blockIdx.y * BM;
   const int WG = a.dx_group_warps;  // warps per FP32 slab copy
   const int ncopy = NW / WG;
   const bool priv = WG == 1;  // exclusive copy: plain read-modify-write
@@ -366,7 +376,11 @@ __device__ __forceinline__ void sg_dx_body(const SgArgs& a) {
     for (int c = 1; c < ncopy; c++) v += dxs[c * a.S * BM + o];
     const int tok = t0 + tl;
     if (SP_ABLATE_SG == 1) v = (v == 1.2345e-30f) ? v : 0.f;
-    if (tok < a.B && v != 0.f) atomicAdd(a.dXT + (long long)fq[f] * a.B + tok, v);
+    if (a.part) {  // exclusive row (chunk, local feature); zeros included (the reduction reads every row)
+      if (tok < a.B) a.part[((long long)blockIdx.x * a.S + f) * a.part_tw + (tok - a.part_t0)] = v;
+    } else if (tok < a.B && v != 0.f) {
+      atomicAdd(a.dXT + (long long)fq[f] * a.B + tok, v);
+    }
   }
 }
 

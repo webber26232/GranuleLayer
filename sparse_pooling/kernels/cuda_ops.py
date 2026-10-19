@@ -20,7 +20,7 @@ from pathlib import Path
 
 import torch
 
-from ..config import DX_PLANS, PhysicalPlan
+from ..config import DET_WORKSPACE_DEFAULT, DX_PLANS, PhysicalPlan
 from . import ops
 
 SRC_DIR = Path(__file__).parent / "cuda"
@@ -150,6 +150,7 @@ class SgArgs(ctypes.Structure):
         ("B", ctypes.c_int), ("G", ctypes.c_int), ("D", ctypes.c_int), ("S", ctypes.c_int),
         ("NB", ctypes.c_int), ("NU", ctypes.c_int), ("dx_group_warps", ctypes.c_int), ("flags", ctypes.c_int),
         ("nonfinite", ctypes.c_void_p),
+        ("part", ctypes.c_void_p), ("part_t0", ctypes.c_int), ("part_tw", ctypes.c_int),
     ]
 
 
@@ -217,7 +218,8 @@ SG_AUTO_DX_SCATTER = {
 # mean work units per nonempty (output, supergroup) bucket (cached at construction) reaches
 # min_units_per_bucket, else ``below``.  Anything else keeps "tiles" (the per-field defaults).
 # Measured (H = 1M-100M, G = 256 / 1024, R = 8 / 16 / 32, M = 1024-8192): the private T = 32 plan
-# gains with longer buckets (split: +16 % at 0.12 units / bucket ... -3.5 % at 14; crossover ~3);
+# gains with longer buckets (split: +16 % at 1.0 units / nonempty bucket ... -3.5 % at 14; crossover ~3;
+# the H = 1M row was first tabulated as 0.12 = units per POSSIBLE bucket, results/DETERMINISM_METRICS_DW_PROJECTION.md);
 # thresholds keep the ambiguous region on the shared plan.  BF16: the shared plan beats the
 # previous BF16 default (the original scatter) by 5.7-7.3 % at H = 1M-100M; crossover ~1.5.
 SG_AUTO_DX_PLAN = [
@@ -226,6 +228,25 @@ SG_AUTO_DX_PLAN = [
     dict(C=8, S=64, precisions=("bf16",), act="relu", cc=(8, 6), min_tokens=1024, min_units_per_bucket=2.0,
          plan="private_t32", below="shared_t64"),
 ]
+
+
+def scale_rule(C: int, S: int, precision: str, act: str, cc, B: int, bucket_stats: dict):
+    """(plan, reason) of SG_AUTO_DX_PLAN for a fully automatic grouped dX: host-only, reads the
+    canonical mean_units_per_nonempty_bucket (supergroups.bucket_statistics; 0.0 without work)."""
+    for r in SG_AUTO_DX_PLAN:
+        if (r["C"], r["S"], act) != (C, S, r["act"]) or precision not in r["precisions"]:
+            continue
+        if tuple(cc) != r["cc"]:
+            return "tiles", f"scale rule validated on sm_{r['cc'][0]}{r['cc'][1]} only (device sm_{cc[0]}{cc[1]})"
+        if B < r["min_tokens"]:
+            return "tiles", f"scale rule: M = {B} < {r['min_tokens']} (not measured)"
+        ub = bucket_stats["mean_units_per_nonempty_bucket"] or 0.0
+        ctx = (f"(possible-bucket mean {bucket_stats['mean_units_per_possible_bucket'] or 0:.2f}, occupancy "
+               f"{bucket_stats['bucket_occupancy'] or 0:.3f}; M = {B})")
+        if ub >= r["min_units_per_bucket"]:
+            return r["plan"], f"scale rule: mean units per nonempty bucket {ub:.2f} >= {r['min_units_per_bucket']} {ctx}"
+        return r["below"], f"scale rule: mean units per nonempty bucket {ub:.2f} < {r['min_units_per_bucket']} {ctx}"
+    return "tiles", f"no scale rule for C = {C}, S = {S}, {precision}, {act}"
 
 
 # experimental fused shared-projection backward tilings (kernels/cuda/sg_bwdf_c8.cu SGF_CFGS):
@@ -272,6 +293,10 @@ DW_INDEXED_STAGES = 2  # cp.async ring depth of the indexed k_dw (2 or 3)
 # softmax-weighted / power epilogues, which keep 8 warps x 4 work units
 DW_CFG_INDEXED = {"mean": 3, "logmeanexp": 3, "power_mean": 1, "softmax_weighted": 1}
 
+
+# tests only: fill value of every deterministic partial workspace before use (None = no fill);
+# a NaN poison shows any partial row that is read without having been written
+DET_WORKSPACE_FILL = None
 
 # Optional per-phase instrumentation (benchmarks/bench_kernels.py): when set to a
 # list, every phase boundary records a CUDA event on the current stream.  The
@@ -361,6 +386,10 @@ class CudaBackend:
             f = getattr(self.lib, f"sp_sg_dw_c{C}")
             f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p]
             self.sg_fns[("dw", C)] = f
+        f = self.lib.sp_sg_reduce  # fixed-order second stage of the deterministic reductions (sg_det.cu)
+        f.restype = ctypes.c_int
+        f.argtypes = [ctypes.c_void_p, ctypes.c_longlong, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                      ctypes.c_void_p, ctypes.c_longlong, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         f = self.lib.sp_sgf_c8  # experimental fused backward (sparse_pool_sg_bwdf.cuh)
         f.restype, f.argtypes = ctypes.c_int, [ctypes.POINTER(SgArgs)] + [ctypes.c_int] * 3 + [ctypes.c_void_p]
         self.sg_fns["fused"] = f
@@ -555,6 +584,8 @@ class CudaBackend:
             fb[phase] = reason
             return False
         if req == "auto":
+            if phase == "dx" and getattr(rt, "det", False):
+                return True  # deterministic: the generic k_dx flushes with FP32 atomics
             return self.sg_auto_phase(rt, phase) is not None
         return True
 
@@ -586,6 +617,10 @@ class CudaBackend:
         """(plan, reason) of the grouped dX: a DX_PLANS key or "tiles" (per-field settings).
         Host-only: the scale rule reads descriptors cached with the chunk table."""
         p = rt.plan
+        det = getattr(rt, "det", False)
+        if det and p.cuda_grouped_dx_plan == "shared_t64":
+            raise ValueError("cuda_grouped_dx_plan='shared_t64' reduces into one shared FP32 copy with CAS "
+                             "(unordered): unsupported with reduction='deterministic' (use 'private_t32' or 'auto')")
         if p.cuda_grouped_dx_plan != "auto":
             return p.cuda_grouped_dx_plan, "explicit cuda_grouped_dx_plan"
         explicit = [f for f in ("tokens", "warps", "reduction", "chunk_units") if getattr(p, f"cuda_grouped_dx_{f}")]
@@ -594,20 +629,12 @@ class CudaBackend:
         if explicit:
             return "tiles", "explicit grouped dX fields take precedence (" + ", ".join(explicit) + ")"
         C, S, prec, act = rt.layout.block, rt.sg.S, p.grad_precision, rt.level.activation
-        for r in SG_AUTO_DX_PLAN:
-            if (r["C"], r["S"], act) != (C, S, r["act"]) or prec not in r["precisions"]:
-                continue
-            cc = torch.cuda.get_device_capability(rt.idx.device)
-            if cc != r["cc"]:
-                return "tiles", f"scale rule validated on sm_{r['cc'][0]}{r['cc'][1]} only (device sm_{cc[0]}{cc[1]})"
-            if B < r["min_tokens"]:
-                return "tiles", f"scale rule: M = {B} < {r['min_tokens']} (not measured)"
-            ub = rt.sg.mean_bucket_units()
-            if ub >= r["min_units_per_bucket"]:
-                return r["plan"], f"scale rule: {ub:.2f} units / bucket >= {r['min_units_per_bucket']} (M = {B})"
-            return r["below"], f"scale rule: {ub:.2f} units / bucket < {r['min_units_per_bucket']} (M = {B})"
-
-        return "tiles", f"no scale rule for C = {C}, S = {S}, {prec}, {act}"
+        if det:  # no fast-mode thresholds: the private plan wherever the fast tiles share copies
+            if C == 8 and S == 64:
+                return "private_t32", "deterministic: warp-private copies (the fast S = 64 shared plan uses CAS)"
+            return "tiles", "deterministic: the per-field tiles with warp-private copies"
+        cc = torch.cuda.get_device_capability(rt.idx.device)
+        return scale_rule(C, S, prec, act, cc, B, rt.sg.bucket_stats)
 
     def sg_dx_cfg(self, rt, B: int = 0):
         """(tokens, warps, warps per FP32 slab copy, chunk units) of the grouped dX.  A named
@@ -622,6 +649,14 @@ class CudaBackend:
         T = p.cuda_grouped_dx_tokens or T0
         nw = p.cuda_grouped_dx_warps or nw0
         wg = p.cuda_grouped_dx_reduction
+        if getattr(rt, "det", False):
+            if wg > 1:
+                raise ValueError(f"cuda_grouped_dx_reduction={wg} shares FP32 slab copies through CAS (unordered): "
+                                 "unsupported with reduction='deterministic' (use 1 or 0 = auto)")
+            wg = 1
+            if not p.cuda_grouped_dx_tokens:
+                while T > 16 and sg_smem("dx", D, S, T, nw, wg) > SG_MAX_SMEM:
+                    T //= 2
         if not wg:
             wg = min(wg0, nw)
             while wg < nw and sg_smem("dx", D, S, T, nw, wg) > SG_MAX_SMEM:
@@ -692,15 +727,21 @@ class CudaBackend:
         _mark("fwd.begin")
         xop = x.t().contiguous()  # [D, B] (same transpose as the generic path)
         _mark("fwd.layout")
-        ysum = torch.zeros((L.groups, B), device=x.device, dtype=torch.float32)
+        det = getattr(rt, "det", False)
+        ysum = (torch.empty if det else torch.zeros)((L.groups, B), device=x.device, dtype=torch.float32)
         _mark("fwd.zero")
         items, ch = rt.sg.item_chunks(cu)
         a = self._sg_args(rt, xop, w, b, B)
         a.items, a.chunks, a.ysum = _ptr(items), _ptr(ch), _ptr(ysum)
-        err = self.sg_fns[("fwd", L.block)](ctypes.byref(a), lv.act_id, T // 16, nw, ch.shape[0], math.ceil(B / T),
-                                            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
-        if err != 0:
-            raise RuntimeError(f"sp_sg_fwd failed (code {err})")
+        stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
+        fn = self.sg_fns[("fwd", L.block)]
+        if det:  # per-item partials, then the fixed-order sum over each output's items
+            ws = self._sg_det_run(rt, a, "fwd", cu, items.shape[0], T, B, ysum, L.groups,
+                                  lambda gy: fn(ctypes.byref(a), lv.act_id, T // 16, nw, ch.shape[0], gy, stream))
+        else:
+            err = fn(ctypes.byref(a), lv.act_id, T // 16, nw, ch.shape[0], math.ceil(B / T), stream)
+            if err != 0:
+                raise RuntimeError(f"sp_sg_fwd failed (code {err})")
         _mark("fwd.kernel")
         pre = (ysum / rt.units.counts[:, None]).t().contiguous()
         _mark("fwd.finalize")
@@ -708,8 +749,70 @@ class CudaBackend:
                             grouped_fwd=dict(tokens=T, warps=nw, chunk_units=cu, ctas=ch.shape[0] * math.ceil(B / T),
                                              chunks=ch.shape[0], items=items.shape[0],
                                              work_list_bytes=items.numel() * items.element_size()
-                                             + ch.numel() * ch.element_size()))
+                                             + ch.numel() * ch.element_size(),
+                                             reduction=ws if det else "fp32_atomics"))
         return {"pre": pre}
+
+    # ------------------------------------------------ deterministic reductions
+    def det_reason(self, rt, B: int) -> str:
+        """Why reduction='deterministic' cannot run for this layer / batch ("" if it can).
+        Supported: input-supergroup layers, packed C = 8 / 64 Mode B, Mean(ReLU / identity), split
+        or BF16 gradients, feature-major input (B % 8 == 0), grouped dX (forced; warp-private
+        copies), grouped or generic forward and dW, separate backward."""
+        lv, p = rt.level, rt.plan
+        if getattr(rt, "sg", None) is None:
+            return "needs input-supergroup connectivity (the generic dX kernel k_dx flushes with FP32 atomics)"
+        if lv.type != "mean" or lv.activation not in ("relu", "identity"):
+            return f"implemented for Mean(ReLU / identity) (pooling {lv.describe()})"
+        if not self.supports_forward(rt, False) or not self.supports_backward(rt):
+            return "the CUDA kernels do not support this layer (the Triton kernels use FP32 atomics)"
+        if p.grouped_request("dx") == "generic":
+            return "explicit generic dX (k_dx flushes with FP32 atomics)"
+        if p.cuda_grouped_backward in ("fused", "fused_recompute"):
+            return f"cuda_grouped_backward={p.cuda_grouped_backward!r} flushes dX with FP32 atomics"
+        why = self.sg_reason(rt, "dx", B)
+        if why:
+            return f"grouped dX unavailable: {why}"
+        return ""  # forward: grouped (ordered partials) or generic (no atomics for Mean); dW: exclusive owners
+
+    def det_window(self, rt, rows: int, T: int, B: int, what: str) -> int:
+        """Tokens per window of a deterministic partial stage: the largest multiple of the token
+        tile T whose [rows, window] FP32 workspace fits the cap (all of B if it fits)."""
+        cap = rt.plan.deterministic_workspace_bytes or DET_WORKSPACE_DEFAULT
+        full = math.ceil(B / T) * T
+        tw = min(full, (cap // (4 * rows)) // T * T)
+        if tw < T:
+            raise RuntimeError(f"deterministic {what} workspace: one {T}-token window needs {rows * T * 4} bytes "
+                               f"> deterministic_workspace_bytes = {cap} (raise the cap; no atomic fallback)")
+        return tw
+
+    def _sg_det_run(self, rt, a, kind, cu, rows, T, B, out, out_rows, launch):
+        """Token-windowed deterministic stage: per window, the first-stage kernel stores the
+        partials of its CTAs into exclusive rows of ``part``; sp_sg_reduce then writes
+        out[r, window] = fixed-order sum of row r's contributors (SgExec.det_rows)."""
+        off, rec = rt.sg.det_rows(kind, cu)
+        tw = self.det_window(rt, rows, T, B, kind)
+        part = torch.empty((rows, tw), device=out.device, dtype=torch.float32)
+        if DET_WORKSPACE_FILL is not None:  # tests: poison the workspace (every read row must be written)
+            part.fill_(DET_WORKSPACE_FILL)
+        stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
+        a.part, a.part_tw = _ptr(part), tw
+        nwin = 0
+        for w0 in range(0, B, tw):
+            ntok = min(tw, B - w0)
+            a.part_t0 = w0
+            err = launch(math.ceil(ntok / T))
+            if err != 0:
+                raise RuntimeError(f"deterministic {kind} stage 1 failed (code {err})")
+            err = self.lib.sp_sg_reduce(_ptr(part), tw, _ptr(off), _ptr(rec), out_rows, _ptr(out), out.stride(0), w0,
+                                        ntok, stream)
+            if err != 0:
+                raise RuntimeError(f"sp_sg_reduce ({kind}) failed (code {err})")
+            nwin += 1
+        a.part, a.part_t0, a.part_tw = 0, 0, 0
+        return dict(mode="ordered_partials", workspace_bytes=part.numel() * 4, window_tokens=tw, windows=nwin,
+                    launches=2 * nwin, partial_rows=rows, contributors=rec.numel(),
+                    list_bytes=(off.numel() + rec.numel()) * 4)
 
     def _sg_dx(self, rt, a, dxt, c1T, B, split, dx_epi, stream):
         L = rt.layout
@@ -722,22 +825,34 @@ class CudaBackend:
         sc = SG_DX_SCATTERS[scatter]["sc"]
         act = rt.level.act_id
         gx, gy = ch.shape[0], math.ceil(B / T)
+        if sc == 1 and wg == 1:
+            sc = 6  # SC_SWZ4P: the swizzle4 layout compiled for warp-private copies
         if sc == 0:
-            err = self.sg_fns[("dx", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy, stream)
             kernel = f"sg_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}>"
+            launch = lambda gy_: self.sg_fns[("dx", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy_,
+                                                                    stream)
         elif sc == 4:
-            err = self.sg_fns[("dxo", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy, stream)
             ns = 1 if rt.sg.S <= 8 else (2 if rt.sg.S <= 16 else 4)
             kernel = f"sgx_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}, 4, {ns}>"
+            launch = lambda gy_: self.sg_fns[("dxo", L.block, act)](ctypes.byref(a), T // 16, nw, split, epi, gx, gy_,
+                                                                     stream)
         else:
-            if sc == 1 and wg == 1:
-                sc = 6  # SC_SWZ4P: the swizzle4 layout compiled for warp-private copies
-            err = self.sg_fns[("dxs", L.block, act)](ctypes.byref(a), sc, T // 16, nw, split, epi, gx, gy, stream)
             kernel = f"sgx_dx_kernel<{act}, {L.block}, {T // 16}, {nw}, {split}, {epi}, {sc}, 1>"
-        if err != 0:
-            raise RuntimeError(f"sp_sg_dx ({scatter}) failed (code {err})")
+            launch = lambda gy_: self.sg_fns[("dxs", L.block, act)](ctypes.byref(a), sc, T // 16, nw, split, epi, gx,
+                                                                     gy_, stream)
+        det = getattr(rt, "det", False)
+        if det:  # per-(chunk, local feature) partials, then the fixed-order sum per input feature
+            ws = self._sg_det_run(rt, a, "dx", cu, gx * rt.sg.S, T, B, dxt, L.input_dim, launch)
+        else:
+            err = launch(gy)
+            if err != 0:
+                raise RuntimeError(f"sp_sg_dx ({scatter}) failed (code {err})")
         st = rt.sg.item_chunk_stats(cu)
-        rt.last_info["grouped_dx"] = dict(plan=plan, plan_reason=plan_why, tokens=T, warps=nw, reduction_group_warps=wg,
+        bs = rt.sg.bucket_stats
+        rt.last_info["grouped_dx"] = dict(plan=plan, plan_reason=plan_why,
+                                          mean_units_per_nonempty_bucket=bs["mean_units_per_nonempty_bucket"],
+                                          mean_units_per_possible_bucket=bs["mean_units_per_possible_bucket"],
+                                          bucket_occupancy=bs["bucket_occupancy"], tokens=T, warps=nw, reduction_group_warps=wg,
                                           chunk_units=cu, units_per_chunk_mean=st["units_per_chunk_mean"],
                                           token_tiles=gy, tail_utilization=B / (gy * T),
                                           ctas=gx * gy, chunks=ch.shape[0],
@@ -746,7 +861,9 @@ class CudaBackend:
                                           scatter_order=SG_DX_SCATTERS[scatter]["order"], scatter_fallback=why,
                                           kernel=kernel, epilogue=dx_epi,
                                           work_list_bytes=items.numel() * items.element_size()
-                                          + ch.numel() * ch.element_size())
+                                          + ch.numel() * ch.element_size(),
+                                          reduction=ws if det else ("fp32_atomics" if wg == 1 else
+                                                                    "shared_cas+fp32_atomics"))
         return dxt.t()
 
     def _sg_dw(self, rt, a, c1T, split, dw_epi, stream):
@@ -888,7 +1005,11 @@ class CudaBackend:
             sxf, sxb = xop.stride(1), xop.stride(0)
         _mark("bwd.layout")
         dx = None if sg_dx else torch.zeros((B, D), device=x.device, dtype=torch.float32)
-        dxt = torch.zeros((D, B), device=x.device, dtype=torch.float32) if sg_dx else None  # grouped: [D, B]
+        det = getattr(rt, "det", False)
+        if det and not sg_dx:
+            raise RuntimeError("deterministic reduction resolved without the grouped dX (internal error)")
+        # grouped: [D, B]; the deterministic second stage writes every element (no zeroing)
+        dxt = (torch.empty if det else torch.zeros)((D, B), device=x.device, dtype=torch.float32) if sg_dx else None
         _mark("bwd.dx_init")
         n_tiles = math.ceil(B / 16)
         gy = max(1, min(U, math.ceil(4096 / n_tiles)))  # ~4096 CTAs; one dX flush per CTA

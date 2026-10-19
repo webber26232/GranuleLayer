@@ -104,7 +104,8 @@ class SparsePoolingLayer(nn.Module):
 
     # ------------------------------------------------------------------
     def _runtime(self) -> Level1Runtime:
-        key = (self.indices.device, self.indices.data_ptr(), id(self.plan))
+        key = (self.indices.device, self.indices.data_ptr(), id(self.plan),
+               self.sg_buckets.data_ptr() if self.connectivity is not None else 0)  # graph rebuilds -> new metadata
         if self._rt is None or self._rt_key != key:
             backend = None
             if self.backend_name in ("cuda", "auto") and self.indices.is_cuda:
@@ -121,7 +122,7 @@ class SparsePoolingLayer(nn.Module):
                                      l1.neurons_per_shard if self.cfg.is_semantic_hierarchy else None,
                                      self.workspace_budget, backend)
             if self.connectivity is not None:
-                self._rt.sg = SgExec(self.layout, self.sg_feat, self.sg_buckets)
+                self._rt.sg = SgExec(self.layout, self.sg_feat, self.sg_buckets, self.connectivity)
             self._rt_key = key
         return self._rt
 

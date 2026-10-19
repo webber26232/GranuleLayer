@@ -29,7 +29,12 @@ def row(path, name, v, cfg):
             "WG": gd.get("reduction_group_warps"), "scatter": gd.get("scatter"), "kernel": gd.get("kernel"),
             "ctas": gd.get("ctas"), "chunks": de.get("chunks"), "units": de.get("units"),
             "units_per_chunk": round(de.get("units_per_chunk_mean", float("nan")), 1),
-            "units_per_bucket": round(de.get("units_per_bucket_mean", float("nan")), 2),
+            # mean work units per NONEMPTY bucket (schema-1 JSONs: units_per_bucket_mean, the same quantity)
+            "mean_units_per_nonempty_bucket": round(de.get("mean_units_per_nonempty_bucket",
+                                                           de.get("units_per_bucket_mean", float("nan"))), 3),
+            "mean_units_per_possible_bucket": de.get("mean_units_per_possible_bucket"),  # schema 2 only
+            "bucket_occupancy": de.get("bucket_occupancy"),
+            "stats_schema": de.get("schema", "granule.bucket_stats/1"),
             "chunks_per_q": de.get("chunks_per_q_mean"), "fwd": round(m("fwd_total"), 2),
             "dx_kernel": round(m("dx_kernel"), 2), "dx_round_range": rng("dx_kernel"), "dw_kernel": round(m("dw_kernel"), 2),
             "bwd_total": round(m("bwd_total"), 2), "step": round(m("step"), 2), "step_round_range": rng("step"),

@@ -139,7 +139,7 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
   float* dxs = reinterpret_cast<float*>(smem_raw + sg_align16(a.D * 2) + a.S * BM * 2);
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int q = a.chunks[3 * blockIdx.x], lo = a.chunks[3 * blockIdx.x + 1], hi = a.chunks[3 * blockIdx.x + 2];
-  const int t0 = blockIdx.y * BM;
+  const int t0 = a.part_t0 + blockIdx.y * BM;
   constexpr bool CT_PRIV = SC != SC_SWZ4 && SC != SC_SWZ4M;  // compile-time warp-private (the launch checks dx_group_warps == 1)
   const int WG = CT_PRIV ? 1 : a.dx_group_warps;
   const int ncopy = NW / WG;
@@ -285,7 +285,11 @@ __device__ __forceinline__ void sgx_dx_body(const SgArgs& a) {
     float v = dxs[o];
     for (int c = 1; c < ncopy; c++) v += dxs[c * a.S * BM + o];
     const int tok = t0 + tl;
-    if (tok < a.B && v != 0.f) atomicAdd(a.dXT + (long long)fq[f] * a.B + tok, v);
+    if (a.part) {  // deterministic mode: the CTA's exclusive workspace rows (sparse_pool_sg.cuh)
+      if (tok < a.B) a.part[((long long)blockIdx.x * a.S + f) * a.part_tw + (tok - a.part_t0)] = v;
+    } else if (tok < a.B && v != 0.f) {
+      atomicAdd(a.dXT + (long long)fq[f] * a.B + tok, v);
+    }
   }
 }
 

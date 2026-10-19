@@ -80,7 +80,7 @@ def test_auto_rule_selects_and_reports(monkeypatch):
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
     _, _, _, _, info = run(lay, x, dy)
     plan, cfg, why = ran_plan(info)
-    assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped") and "units / bucket <" in why
+    assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped") and "mean units per nonempty bucket" in why and " < " in why
     # a named plan below the threshold
     monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9, below="shared_t64"))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")

@@ -177,6 +177,26 @@ def make_feature_sets(D: int, plan: ConnectivityPlan, device="cpu") -> torch.Ten
     return feat.to(torch.int16).to(device)
 
 
+def bucket_table(layout: SparseLayout, plan: ConnectivityPlan):
+    """(feat [Q, S] int16, buckets [n, 4] int32) on the CPU: the compact metadata of the graph
+    without its index records (generate_indices uses exactly this; the statistics of a
+    recorded graph can be reconstructed from its plan and layout alone)."""
+    D = layout.input_dim
+    Q = plan.num_supergroups(D)
+    feat = make_feature_sets(D, plan)  # CPU int16 [Q, S]
+    counts, keys = unit_quotas(layout, Q, plan.partition_rounds)  # [G, Q]
+    # bucket unit ranges inside each output, in key order (tail unit lands in the last bucket)
+    order_in_g = torch.argsort(keys, dim=1)
+    cnt_sorted = torch.gather(counts, 1, order_in_g)
+    start_sorted = torch.cumsum(cnt_sorted, 1) - cnt_sorted
+    start = torch.empty_like(start_sorted)
+    start.scatter_(1, order_in_g, start_sorted)
+    gq = torch.nonzero(counts.t() > 0)  # (q, g) sorted by q then g
+    q_b, g_b = gq[:, 0], gq[:, 1]
+    buckets = torch.stack([q_b, g_b, start[g_b, q_b], counts[g_b, q_b]], 1).to(torch.int32)
+    return feat, buckets
+
+
 @torch.no_grad()
 def generate_indices(layout: SparseLayout, plan: ConnectivityPlan, device, chunk_elems: int = 1 << 26):
     """Return (canonical Mode-B indices [G, NB, 8] int16 (global ids), SupergroupGraph, stats)."""
@@ -190,17 +210,8 @@ def generate_indices(layout: SparseLayout, plan: ConnectivityPlan, device, chunk
     D, G, NB, UB = layout.input_dim, layout.groups, layout.blocks_per_group, layout.unit_blocks
     S, R = plan.input_supergroup_dim, plan.partition_rounds
     Q = plan.num_supergroups(D)
-    feat = make_feature_sets(D, plan)  # CPU int16 [Q, S]
-    counts, keys = unit_quotas(layout, Q, R)  # [G, Q]
-    # bucket unit ranges inside each output, in key order (tail unit lands in the last bucket)
-    order_in_g = torch.argsort(keys, dim=1)
-    cnt_sorted = torch.gather(counts, 1, order_in_g)
-    start_sorted = torch.cumsum(cnt_sorted, 1) - cnt_sorted
-    start = torch.empty_like(start_sorted)
-    start.scatter_(1, order_in_g, start_sorted)
-    gq = torch.nonzero(counts.t() > 0)  # (q, g) sorted by q then g
-    q_b, g_b = gq[:, 0], gq[:, 1]
-    buckets = torch.stack([q_b, g_b, start[g_b, q_b], counts[g_b, q_b]], 1).to(torch.int32)
+    feat, buckets = bucket_table(layout, plan)
+    q_b, g_b = buckets[:, 0].to(torch.int64), buckets[:, 1].to(torch.int64)
 
     # ---- records: per-supergroup stream of local permutation rounds
     dev = torch.device(device)
@@ -444,9 +455,13 @@ def validate(layout: SparseLayout, idx_canonical: torch.Tensor, graph: Optional[
             "rounds_min": int((out_r > 0).sum(1).min()), "rounds_max": int((out_r > 0).sum(1).max()),
             "round_units_spread_max": int((out_r.max(1).values - out_r.min(1).values).max()),
         }
-        nb_units = b[:, 3]
-        rep["buckets"] = {"nonempty": len(b), "possible": G * Q, "units_min": int(nb_units.min()),
-                          "units_max": int(nb_units.max()), "units_mean": float(nb_units.double().mean())}
+        bs = bucket_statistics(layout, b, Q, S, graph.plan)
+        rep["buckets"] = {"nonempty": bs["nonempty_buckets"], "possible": bs["total_possible_buckets"],
+                          "units_min": bs["bucket_units_min"], "units_max": bs["bucket_units_max"],
+                          "units_mean": bs["mean_units_per_nonempty_bucket"],  # schema-1 name: nonempty mean
+                          "occupancy": bs["bucket_occupancy"],
+                          "mean_units_per_possible_bucket": bs["mean_units_per_possible_bucket"]}
+        rep["bucket_stats"] = bs
         # set co-membership: pairs covered by at least one set (vs the independent-round formula)
         oh = onehot.to(torch.float32)
         co = oh.t() @ oh  # [D, D] number of sets containing both
@@ -499,19 +514,111 @@ def matched_c8_from_c64(lay64: SparseLayout, idx64, w64, b64, graph64: Optional[
     return lay8, idx, w, b, g8
 
 
+# ----------------------------------------------------------------------------------------
+# canonical workload statistics (one implementation: runtime dispatch, last_info, benchmarks,
+# CSV / JSON summaries and the reports all read these fields)
+# ----------------------------------------------------------------------------------------
+STATS_SCHEMA = "granule.bucket_stats/2"
+STATS_QUANTILES = (0.0, 0.1, 0.5, 0.9, 0.99, 1.0)
+QUANTILE_CONVENTION = "nearest rank: q_p = x_(max(1, ceil(p n))) of the n sorted values (p = 0 -> min, 1 -> max)"
+
+
+def nearest_rank_quantiles(values: torch.Tensor, ps=STATS_QUANTILES) -> Optional[list]:
+    """Nearest-rank quantiles (QUANTILE_CONVENTION) of a 1-D tensor; None when empty."""
+    v = values.to("cpu", torch.float64).reshape(-1).sort().values
+    n = len(v)
+    if n == 0:
+        return None
+    return [float(v[max(1, math.ceil(p * n)) - 1]) for p in ps]
+
+
+def bucket_statistics(layout: SparseLayout, buckets: torch.Tensor, Q: int, S: Optional[int] = None,
+                      plan: Optional[ConnectivityPlan] = None) -> Dict:
+    """Canonical (output, supergroup) bucket statistics of a graph's compact metadata.
+
+    U = total work units in positive bucket records, Nnz = nonempty buckets = distinct (q, g)
+    pairs with units > 0, G = declared outputs, Q = declared supergroups.  A work unit is the
+    fragment-packed parameter quantum of the layout (unit_blocks blocks of C neurons: 32 neurons
+    at C = 8, 64 at C = 64), counted from the records themselves (never H / unit size).
+      mean_units_per_nonempty_bucket = U / Nnz  (None when Nnz = 0: no work; dispatch reads 0.0)
+      mean_units_per_possible_bucket = U / (G Q) = bucket_occupancy * mean_units_per_nonempty_bucket
+    Duplicate (q, g) records are a malformed representation and raise (they are never merged)."""
+    b = buckets.to("cpu", torch.int64).reshape(-1, 4)
+    G = layout.groups
+    pos = b[b[:, 3] > 0]
+    if len(b) and int(b[:, 3].min()) < 0:
+        raise ValueError("bucket table has a negative unit count")
+    key = pos[:, 0] * G + pos[:, 1]
+    nnz = int(torch.unique(key).numel())
+    if nnz != len(pos):
+        raise ValueError(f"bucket table has {len(pos) - nnz} duplicate (supergroup, output) records")
+    if len(pos) and (int(pos[:, 0].max()) >= Q or int(pos[:, 1].max()) >= G or int(pos.min()) < 0):
+        raise ValueError("bucket record outside the declared (Q, G) range")
+    U = int(pos[:, 3].sum())
+    possible = G * Q
+    lens = pos[:, 3]
+    st = dict(
+        schema=STATS_SCHEMA,
+        D=layout.input_dim, G=G, Q=Q, S=S, R=None if plan is None else plan.partition_rounds,
+        C=layout.block, unit_blocks=layout.unit_blocks, neurons_per_work_unit=layout.unit_blocks * layout.block,
+        work_unit_packing=f"{layout.unit_blocks} blocks x {layout.block} neurons (fragment-packed parameter quantum)",
+        valid_neurons=layout.hidden_dim, padded_neuron_capacity=G * layout.blocks_per_group * layout.block,
+        graph_seed=None if plan is None else plan.seed, graph_generation=None if plan is None else plan.generation,
+        graph_version=None if plan is None else plan.version,
+        total_work_units=U, total_possible_buckets=possible, nonempty_buckets=nnz, empty_buckets=possible - nnz,
+        zero_unit_records=int((b[:, 3] == 0).sum()),
+        bucket_occupancy=nnz / possible if possible else None,
+        mean_units_per_nonempty_bucket=U / nnz if nnz else None,
+        mean_units_per_possible_bucket=U / possible if possible else None,
+        bucket_units_min=int(lens.min()) if nnz else None, bucket_units_max=int(lens.max()) if nnz else None,
+        bucket_units_quantiles=nearest_rank_quantiles(lens), quantile_ps=list(STATS_QUANTILES),
+        quantile_convention=QUANTILE_CONVENTION,
+        zero_work_convention="Nnz = 0: mean_units_per_nonempty_bucket = None; the dispatch rules read 0.0",
+    )
+    if nnz:  # identities of the definitions (exact up to FP64 rounding)
+        assert abs(st["mean_units_per_possible_bucket"]
+                   - st["bucket_occupancy"] * st["mean_units_per_nonempty_bucket"]) <= 1e-12 * max(1.0, U)
+        assert st["mean_units_per_nonempty_bucket"] >= 1.0
+    return st
+
+
+def chunk_statistics(items: torch.Tensor, chunks: torch.Tensor, Q: int, target_units: int, max_units: int = 0) -> Dict:
+    """Canonical per-CTA chunk statistics of an item chunk table (sg_fwd / sg_dx): chunk count,
+    work units per chunk (distribution), chunks per supergroup; distinct from bucket lengths."""
+    nu = items[:, 2].to("cpu", torch.int64)
+    c = chunks.to("cpu", torch.int64).reshape(-1, 3)
+    cw = torch.cat([torch.zeros(1, dtype=torch.int64), torch.cumsum(nu, 0)])
+    upc = cw[c[:, 2]] - cw[c[:, 1]]
+    ipc = c[:, 2] - c[:, 1]
+    per_q = torch.bincount(c[:, 0], minlength=Q)
+    return dict(chunk_target_units=target_units, item_max_units=max_units, chunks=len(c), items=len(nu),
+                units_per_chunk_mean=float(upc.double().mean()) if len(c) else None,
+                units_per_chunk_min=int(upc.min()) if len(c) else None,
+                units_per_chunk_max=int(upc.max()) if len(c) else None,
+                units_per_chunk_quantiles=nearest_rank_quantiles(upc),
+                items_per_chunk_mean=float(ipc.double().mean()) if len(c) else None,
+                chunks_per_supergroup_mean=float(per_q.double().mean()) if Q else None,
+                chunks_per_supergroup_max=int(per_q.max()) if Q else None,
+                supergroups_without_chunks=int((per_q == 0).sum()),
+                units_per_supergroup_mean=float(nu.sum()) / Q if Q else None)
+
+
 class SgExec:
     """Per-layer execution metadata of a supergroup graph: work lists for the grouped
     kernels, built once per execution configuration and cached (steady-state training
     reuses them; X-dependent data is never cached)."""
 
-    def __init__(self, layout: SparseLayout, feat: torch.Tensor, buckets: torch.Tensor):
+    def __init__(self, layout: SparseLayout, feat: torch.Tensor, buckets: torch.Tensor,
+                 plan: Optional[ConnectivityPlan] = None):
         self.layout = layout
+        self.plan = plan
         self.feat = feat.contiguous()
         self.graph = SupergroupGraph(None, self.feat, buckets.contiguous())
         self.S, self.Q = self.feat.shape[1], self.feat.shape[0]
-        b = self.graph.buckets
-        # host copy once at construction: no device sync in the per-step dispatch
-        self._mean_bucket_units = float(b[:, 3].double().mean()) if len(b) else 0.0
+        # host copy once at construction (and on every rebuild, layer._runtime): no device sync
+        # in the per-step dispatch
+        self.bucket_stats = bucket_statistics(layout, self.graph.buckets, self.Q, self.S, plan)
+        self._mean_bucket_units = self.bucket_stats["mean_units_per_nonempty_bucket"] or 0.0
         self._cache: Dict = {}
         self._stats: Dict = {}
 
@@ -543,36 +650,50 @@ class SgExec:
             self._cache[key] = (units, ch)
         return self._cache[key]
 
+    def det_rows(self, kind: str, target_units: int):
+        """Static contributor lists of the deterministic second stage (kernels/cuda/sg_det.cu):
+        (off [rows + 1], rec [n]) int32 on the device, CSR by destination row.
+
+        kind "fwd": row = output g, rec = the sg_fwd items (partial rows) of g, ascending item
+                    index (items are ordered by supergroup);
+        kind "dx":  row = global input feature d, rec = chunk * S + local feature f for every
+                    sg_dx chunk (target_units) whose supergroup has feat[q, f] = d, ascending.
+        Built once per target on the host (one device -> host copy at first use) and cached."""
+        key = ("det", kind, target_units)
+        if key not in self._cache:
+            items, ch = self.item_chunks(target_units)
+            if kind == "fwd":
+                dest, rows = items[:, 0].to("cpu", torch.int64), self.layout.groups
+            else:
+                qc = ch[:, 0].to("cpu", torch.int64)
+                dest, rows = self.feat.to("cpu", torch.int64)[qc].reshape(-1), self.layout.input_dim
+            rec = torch.sort(dest, stable=True).indices  # within a row: ascending partial-row index
+            off = torch.zeros(rows + 1, dtype=torch.int64)
+            off[1:] = torch.cumsum(torch.bincount(dest, minlength=rows), 0)
+            dev = self.feat.device
+            self._cache[key] = (off.to(torch.int32).to(dev), rec.to(torch.int32).to(dev))
+        return self._cache[key]
+
     def mean_bucket_units(self) -> float:
+        """mean_units_per_nonempty_bucket (canonical bucket_statistics; 0.0 for a graph without
+        work): the descriptor of the scale-aware dispatch rules."""
         return self._mean_bucket_units
 
     def item_chunk_stats(self, target_units: int) -> Dict:
-        """Host-side workload descriptors of the sg_fwd / sg_dx item chunks for ``target_units``
-        (work units: valid units, buckets, units per bucket / chunk, chunks per supergroup).
-        Computed once per target together with the chunk table (one device -> host copy at
-        first use, none per step) and cached."""
+        """Workload descriptors of the sg_fwd / sg_dx item chunks for ``target_units``: the
+        canonical bucket_statistics and chunk_statistics merged (schema STATS_SCHEMA), plus
+        compatibility aliases of the schema-1 benchmark fields (``units_per_bucket_mean`` =
+        mean_units_per_nonempty_bucket, ``buckets`` = nonempty_buckets, ``units`` =
+        total_work_units).  Computed once per target with the chunk table and cached."""
         if target_units not in self._stats:
             items, ch = self.item_chunks(target_units)
-            nu = items[:, 2].to("cpu", torch.int64)
-            c = ch.to("cpu", torch.int64)
-            cw = torch.cat([torch.zeros(1, dtype=torch.int64), torch.cumsum(nu, 0)])
-            upc = (cw[c[:, 2]] - cw[c[:, 1]]).double()
-            per_q = torch.bincount(c[:, 0], minlength=self.Q).double()
-            bu = self.graph.buckets[:, 3].to("cpu").double()
-
-            def qs(t):
-                if not len(t):
-                    return [0.0] * 5
-                t = t.sort().values
-                return [float(t[min(len(t) - 1, int(p * (len(t) - 1) + 0.5))]) for p in (0.1, 0.5, 0.9, 0.99, 1.0)]
-
-            self._stats[target_units] = dict(
-                units=int(nu.sum()), buckets=len(bu), Q=self.Q, S=self.S, chunk_target_units=target_units,
-                units_per_bucket_mean=float(bu.mean()) if len(bu) else 0.0, units_per_bucket_q=qs(bu),
-                chunks=len(c), chunks_per_q_mean=float(per_q.mean()), chunks_per_q_max=float(per_q.max()),
-                units_per_q_mean=float(nu.sum()) / max(self.Q, 1),
-                units_per_chunk_mean=float(upc.mean()) if len(upc) else 0.0, units_per_chunk_q=qs(upc),
-                quantiles="p10, p50, p90, p99, max")
+            d = dict(self.bucket_stats)
+            d.update(chunk_statistics(items, ch, self.Q, target_units))
+            d.update(units=d["total_work_units"], buckets=d["nonempty_buckets"],
+                     units_per_bucket_mean=d["mean_units_per_nonempty_bucket"] or 0.0,
+                     compat_aliases="units_per_bucket_mean = mean_units_per_nonempty_bucket (schema 1 name); "
+                                    "buckets = nonempty_buckets; units = total_work_units")
+            self._stats[target_units] = d
         return self._stats[target_units]
 
     def runtime_bytes(self) -> int:

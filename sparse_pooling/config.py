@@ -319,7 +319,23 @@ class PhysicalPlan:
     cuda_grouped_backward: str = "auto"
     cuda_grouped_fused_cfg: int = 0  # cuda_ops.SGF_CFGS key
     cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
-    cuda_grouped_merge: str = "atomic"  # supergroup -> global merge (FP32 atomics, bounded scratch)
+    cuda_grouped_merge: str = "atomic"  # supergroup -> global merge of the fast mode (FP32 atomics)
+    # reduction policy (kernels/cuda/sg_det.cu, README "Deterministic execution"):
+    #   "fast"          the cross-CTA sums of the grouped forward / dX use FP32 atomics (and
+    #                   shared-copy CAS where the dX plan selects it): run-to-run bits vary;
+    #   "deterministic" every reduction has a fixed owner and order: repeated runs with the same
+    #                   graph, inputs, parameters, optimizer / RNG state, resolved plan, device
+    #                   and toolchain give bitwise-identical outputs and gradients.  The grouped
+    #                   forward and dX store per-CTA partials into exclusively owned workspace
+    #                   rows (token-windowed to deterministic_workspace_bytes) and a second
+    #                   kernel sums each destination's contributors in a static order; dX uses
+    #                   warp-private copies.  Unsupported combinations raise (never a silent
+    #                   atomic fallback);
+    #   "auto"          "deterministic" under torch.use_deterministic_algorithms(True) (warn_only:
+    #                   unsupported combinations warn and run "fast"), else "fast".
+    # An explicit "fast" under torch.use_deterministic_algorithms(True) raises (warns with warn_only).
+    reduction: str = "auto"
+    deterministic_workspace_bytes: int = 0  # per-stage partial-workspace cap; 0 = DET_WORKSPACE_DEFAULT
 
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
@@ -350,10 +366,45 @@ class PhysicalPlan:
                                  f"{want['scatter']!r}, conflicting with cuda_grouped_dx_scatter="
                                  f"{self.cuda_grouped_dx_scatter!r}")
         assert self.cuda_grouped_merge == "atomic"
+        if self.reduction not in REDUCTIONS:
+            raise ValueError(f"reduction must be one of {REDUCTIONS} (got {self.reduction!r})")
+        if self.deterministic_workspace_bytes < 0:
+            raise ValueError("deterministic_workspace_bytes must be >= 0")
 
     def grouped_request(self, phase: str) -> str:
         """Requested execution of a phase ("fwd" | "dx" | "dw") of a supergroup layer."""
         return getattr(self, f"cuda_grouped_{phase}") or self.cuda_input_supergroup_backend
+
+
+REDUCTIONS = ("auto", "fast", "deterministic")
+DET_WORKSPACE_DEFAULT = 1 << 30  # bytes per deterministic partial stage (fwd, dX); token windows beyond
+
+
+def resolve_reduction(plan: "PhysicalPlan"):
+    """(mode, reason, strict) of a plan's reduction policy under the current global PyTorch
+    setting.  mode is "fast" or "deterministic"; strict = an unsupported deterministic request
+    must raise (False only for "auto" under warn_only, which warns and runs "fast")."""
+    import torch
+
+    glob = torch.are_deterministic_algorithms_enabled()
+    warn_only = glob and torch.is_deterministic_algorithms_warn_only_enabled()
+    if plan.reduction == "deterministic":
+        return "deterministic", "explicit reduction='deterministic'", True
+    if plan.reduction == "fast":
+        if glob and not warn_only:
+            raise RuntimeError("PhysicalPlan(reduction='fast') uses FP32 atomics, but "
+                               "torch.use_deterministic_algorithms(True) is set: use reduction='deterministic' "
+                               "or 'auto', or enable warn_only")
+        if glob:
+            import warnings
+
+            warnings.warn("reduction='fast' under torch.use_deterministic_algorithms(warn_only=True): "
+                          "GranuleLayer reductions use FP32 atomics", stacklevel=3)
+            return "fast", "explicit reduction='fast' (global deterministic warn_only)", False
+        return "fast", "explicit reduction='fast'", False
+    if glob:
+        return "deterministic", "torch.use_deterministic_algorithms(True)", not warn_only
+    return "fast", "default (torch deterministic algorithms off)", False
 
 
 def state_fields(level: LevelSpec) -> int:
