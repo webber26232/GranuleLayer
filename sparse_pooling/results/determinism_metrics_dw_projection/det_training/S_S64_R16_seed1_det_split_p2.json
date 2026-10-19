@@ -1,0 +1,454 @@
+{
+ "args": {
+  "case": "S_S64_R16",
+  "seed": 1,
+  "steps": 16,
+  "precision": "split",
+  "opt_mode": "det",
+  "reduction": "auto",
+  "plan": "",
+  "records": "/tmp/claude-1000/-home-evga-Projects-pamachine-GranuleLayer/cf50e5c9-b68d-4ad7-9994-10d0edfe4dbf/scratchpad/dt/rec_S_S64_R16_seed1_det_split",
+  "role": "compare",
+  "characterize": false,
+  "warn_only": false,
+  "out": "../results/determinism_metrics_dw_projection/det_training/S_S64_R16_seed1_det_split_p2"
+ },
+ "case": {
+  "D": 1024,
+  "G": 1024,
+  "H": 1000000,
+  "M": 1000,
+  "S": 64,
+  "R": 16,
+  "D0": 128,
+  "G2": 64
+ },
+ "env": {
+  "torch": "2.7.0+cu128",
+  "cuda": "12.8",
+  "triton": "3.3.0",
+  "library": "/home/evga/Projects/pamachine/GranuleLayer-det/sparse_pooling/kernels/cuda/build/1dcb3ae5acfa7a62/libsparse_pool.so",
+  "nvcc_flags": [
+   "-O3",
+   "-arch=sm_86",
+   "--use_fast_math",
+   "-lineinfo",
+   "-std=c++17",
+   "-Xcompiler",
+   "-fPIC"
+  ],
+  "cublas_workspace_config": ":4096:8",
+  "deterministic_algorithms": true,
+  "warn_only": false,
+  "tf32_matmul": false,
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 3090",
+   "sm": "8.6",
+   "sms": 82,
+   "memory_GiB": 23.68,
+   "torch": "2.7.0+cu128",
+   "cuda_runtime": "12.8"
+  }
+ },
+ "build_seconds": 1.2250075500051025,
+ "info": {
+  "reduction": {
+   "mode": "deterministic",
+   "reason": "torch.use_deterministic_algorithms(True)"
+  },
+  "grouped_fwd": {
+   "tokens": 128,
+   "warps": 8,
+   "chunk_units": 2048,
+   "ctas": 2048,
+   "chunks": 256,
+   "items": 31744,
+   "work_list_bytes": 384000,
+   "reduction": {
+    "mode": "ordered_partials",
+    "workspace_bytes": 130023424,
+    "window_tokens": 1024,
+    "windows": 1,
+    "launches": 2,
+    "partial_rows": 31744,
+    "contributors": 31744,
+    "list_bytes": 131076
+   }
+  },
+  "grouped_dx": {
+   "plan": "private_t32",
+   "plan_reason": "deterministic: warp-private copies (the fast S = 64 shared plan uses CAS)",
+   "mean_units_per_nonempty_bucket": 1.0,
+   "mean_units_per_possible_bucket": 0.12109375,
+   "bucket_occupancy": 0.12109375,
+   "tokens": 32,
+   "warps": 8,
+   "reduction_group_warps": 1,
+   "chunk_units": 4096,
+   "units_per_chunk_mean": 124.0,
+   "token_tiles": 32,
+   "tail_utilization": 0.9765625,
+   "ctas": 8192,
+   "chunks": 256,
+   "smem": 71680,
+   "scatter": "vectorized_transpose_hoisted",
+   "scatter_layout": "float4 records after a shuffle transpose; per-block record addresses",
+   "scatter_order": "same",
+   "scatter_fallback": "",
+   "kernel": "sgx_dx_kernel<1, 8, 2, 8, 1, 2, 9, 1>",
+   "epilogue": "mask",
+   "work_list_bytes": 384000,
+   "reduction": {
+    "mode": "ordered_partials",
+    "workspace_bytes": 67108864,
+    "window_tokens": 1024,
+    "windows": 1,
+    "launches": 2,
+    "partial_rows": 16384,
+    "contributors": 16384,
+    "list_bytes": 69636
+   }
+  },
+  "grouped_dw": {
+   "cfg": 2,
+   "ctas": 2048,
+   "smem": 18432,
+   "work_list_bytes": 151552
+  },
+  "forward_kernel": "grouped",
+  "dx_kernel": "grouped",
+  "dw_kernel": "grouped"
+ },
+ "bucket_stats": {
+  "schema": "granule.bucket_stats/2",
+  "D": 1024,
+  "G": 1024,
+  "Q": 256,
+  "S": 64,
+  "R": 16,
+  "C": 8,
+  "unit_blocks": 4,
+  "neurons_per_work_unit": 32,
+  "work_unit_packing": "4 blocks x 8 neurons (fragment-packed parameter quantum)",
+  "valid_neurons": 1000000,
+  "padded_neuron_capacity": 1015808,
+  "graph_seed": 1,
+  "graph_generation": "balanced_permutation",
+  "graph_version": 1,
+  "total_work_units": 31744,
+  "total_possible_buckets": 262144,
+  "nonempty_buckets": 31744,
+  "empty_buckets": 230400,
+  "zero_unit_records": 0,
+  "bucket_occupancy": 0.12109375,
+  "mean_units_per_nonempty_bucket": 1.0,
+  "mean_units_per_possible_bucket": 0.12109375,
+  "bucket_units_min": 1,
+  "bucket_units_max": 1,
+  "bucket_units_quantiles": [
+   1.0,
+   1.0,
+   1.0,
+   1.0,
+   1.0,
+   1.0
+  ],
+  "quantile_ps": [
+   0.0,
+   0.1,
+   0.5,
+   0.9,
+   0.99,
+   1.0
+  ],
+  "quantile_convention": "nearest rank: q_p = x_(max(1, ceil(p n))) of the n sorted values (p = 0 -> min, 1 -> max)",
+  "zero_work_convention": "Nnz = 0: mean_units_per_nonempty_bucket = None; the dispatch rules read 0.0"
+ },
+ "restore_fingerprint_equal": [
+  true,
+  true
+ ],
+ "warm": [
+  {
+   "step": 0,
+   "seconds": 0.9022104090254288,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  }
+ ],
+ "trajectory1": [
+  {
+   "step": 1,
+   "seconds": 0.050033136998536065,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 2,
+   "seconds": 0.049200075009139255,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 3,
+   "seconds": 0.05370041000423953,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 4,
+   "seconds": 0.04832199099473655,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 5,
+   "seconds": 0.04986677801935002,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 6,
+   "seconds": 0.10497774698887952,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 7,
+   "seconds": 0.050608605990419164,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 8,
+   "seconds": 0.04920370600302704,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 9,
+   "seconds": 0.05020721899927594,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 10,
+   "seconds": 0.0494036280142609,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 11,
+   "seconds": 0.051072341011604294,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 12,
+   "seconds": 0.04906184200081043,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 13,
+   "seconds": 0.049360802018782124,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 14,
+   "seconds": 0.04923105100169778,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 15,
+   "seconds": 0.05139486998086795,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 16,
+   "seconds": 0.049167596007464454,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  }
+ ],
+ "trajectory2": [
+  {
+   "step": 1,
+   "seconds": 0.04939206299604848,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 2,
+   "seconds": 0.048716781981056556,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 3,
+   "seconds": 0.04875826500938274,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 4,
+   "seconds": 0.04874675799510442,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 5,
+   "seconds": 0.04855938602122478,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 6,
+   "seconds": 0.05127574101788923,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 7,
+   "seconds": 0.0485964739928022,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 8,
+   "seconds": 0.05197481598588638,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 9,
+   "seconds": 0.048993483011145145,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 10,
+   "seconds": 0.050446160981664434,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 11,
+   "seconds": 0.050882777984952554,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 12,
+   "seconds": 0.05020713998237625,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 13,
+   "seconds": 0.050020985974697396,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 14,
+   "seconds": 0.04904959400300868,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 15,
+   "seconds": 0.05097804800607264,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  },
+  {
+   "step": 16,
+   "seconds": 0.049172178987646475,
+   "compared": 33,
+   "differing": [],
+   "first": null,
+   "detail": {}
+  }
+ ],
+ "all_bitwise": true,
+ "peak_allocated_bytes": 317581824,
+ "peak_reserved_bytes": 455081984,
+ "snapshot_bytes": 93795088,
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 3090",
+  "sm": "8.6",
+  "sms": 82,
+  "memory_GiB": 23.68,
+  "torch": "2.7.0+cu128",
+  "cuda_runtime": "12.8"
+ },
+ "timestamp": "2026-10-19 11:01:55"
+}
