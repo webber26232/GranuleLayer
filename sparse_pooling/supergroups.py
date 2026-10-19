@@ -203,10 +203,12 @@ def generate_indices(layout: SparseLayout, plan: ConnectivityPlan, device, chunk
     if not layout.shared_indices:
         raise ValueError("input supergroups are defined for Mode B (shared index records)")
     t_start = time.perf_counter()
-    if torch.cuda.is_available() and torch.device(device).type == "cuda":
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        mem0 = torch.cuda.memory_allocated()
+    cdev = torch.device(device)
+    if torch.cuda.is_available() and cdev.type == "cuda":  # statistics of THIS device, not the current one
+        cdev = torch.device("cuda", cdev.index if cdev.index is not None else torch.cuda.current_device())
+        torch.cuda.synchronize(cdev)
+        torch.cuda.reset_peak_memory_stats(cdev)
+        mem0 = torch.cuda.memory_allocated(cdev)
     D, G, NB, UB = layout.input_dim, layout.groups, layout.blocks_per_group, layout.unit_blocks
     S, R = plan.input_supergroup_dim, plan.partition_rounds
     Q = plan.num_supergroups(D)
@@ -263,9 +265,9 @@ def generate_indices(layout: SparseLayout, plan: ConnectivityPlan, device, chunk
     graph = SupergroupGraph(plan, feat.to(dev), buckets.to(dev))
     stats = {"generation_seconds": time.perf_counter() - t_start}
     if dev.type == "cuda":
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(cdev)
         stats["generation_seconds"] = time.perf_counter() - t_start
-        stats["generation_peak_extra_bytes"] = torch.cuda.max_memory_allocated() - mem0
+        stats["generation_peak_extra_bytes"] = torch.cuda.max_memory_allocated(cdev) - mem0
     return idx, graph, stats
 
 

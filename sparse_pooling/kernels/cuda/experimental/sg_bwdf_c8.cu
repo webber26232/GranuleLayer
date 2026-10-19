@@ -1,5 +1,5 @@
-#include "sg_dispatch.cuh"
-#include "sparse_pool_sg_bwdf.cuh"
+#include "../sg_dispatch.cuh"
+#include "../sparse_pool_sg_bwdf.cuh"
 // experimental fused shared-projection backward, C = 8, Mean(ReLU), split (sparse_pool_sg_bwdf.cuh)
 // cfg -> (warps, units per warp, 16-token tiles per window / ring stage, stages, min CTAs / SM);
 // must match SGF_CFGS in kernels/cuda_ops.py
@@ -20,16 +20,16 @@
 
 template <int NW, int WPW, int ST, int MINB, bool SHARE>
 static int sgf2_launch(const SgArgs& a, int gx, cudaStream_t s) {
-  static size_t configured = 0;
+  static LaunchSlot slot;
   size_t smem = sg_map_bytes(a) + (size_t)ST * 2 * a.S * 16 * 2 + (size_t)NW * a.S * 32 * 4;
-  return sg_launch(sgf2_kernel<NW, WPW, ST, MINB, SHARE>, dim3(gx), NW * 32, smem, a, s, configured);
+  return sg_launch(sgf2_kernel<NW, WPW, ST, MINB, SHARE>, dim3(gx), NW * 32, smem, a, s, slot);
 }
 
 template <int NW, int WPW, int TS, int ST, int MINB, bool SHARE>
 static int sgf_launch(const SgArgs& a, int gx, cudaStream_t s) {
-  static size_t configured = 0;
+  static LaunchSlot slot;
   size_t smem = sg_map_bytes(a) + (size_t)ST * TS * a.S * 16 * 2 + (size_t)NW * a.S * 16 * TS * 4;
-  return sg_launch(sgf_kernel<NW, WPW, TS, ST, MINB, SHARE>, dim3(gx), NW * 32, smem, a, s, configured);
+  return sg_launch(sgf_kernel<NW, WPW, TS, ST, MINB, SHARE>, dim3(gx), NW * 32, smem, a, s, slot);
 }
 
 extern "C" int sp_sgf_c8(const SgArgs* a, int cfg, int share, int gx, void* stream) {

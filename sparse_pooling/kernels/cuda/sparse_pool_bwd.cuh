@@ -84,20 +84,10 @@ __device__ __forceinline__ void split_bf16(float x0, float x1, uint32_t& hi, uin
   lo = pack_bf16x2(x0 - hf.x, x1 - hf.y);
 }
 
-// (z > 0) as a 32-bit mask with the generic path's compare semantics (FTZ, NaN -> false)
-__device__ __forceinline__ uint32_t gt0_mask(float z) {
-  uint32_t m;
-  asm("set.gt.ftz.u32.f32 %0, %1, 0f00000000;" : "=r"(m) : "f"(z));
-  return m;
-}
+// gt0_mask / mul_ftz: numerics.cuh (FTZ compare / multiply semantics)
 // low 16 bits from m0, high 16 bits from m1 (the two BF16 lanes of a packed pair)
 __device__ __forceinline__ uint32_t pair_mask(uint32_t m0, uint32_t m1) { return __byte_perm(m0, m1, 0x7610); }
 
-__device__ __forceinline__ float mul_ftz(float a, float b) {
-  float r;
-  asm("mul.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));  // not foldable: keeps the FTZ of a * 1
-  return r;
-}
 // With finite c1 the generic c1 * 0 is a signed zero, so ReLU only needs the
 // FTZ-flushed c1 (one = c1 * 1 under FTZ, precomputed per token by Row/ColCoef::load)
 // against RZ: one FSETP + FSEL per element.  Non-finite c1 (inf/NaN upstream gradient,
@@ -650,7 +640,7 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
         cp_async16(nxt_slab + Swz<1>::off(f, c), src, bytes);
       }
     }
-    asm volatile("cp.async.commit_group;\n" ::);
+    cp_async_commit();
     ColCoef cc;
     cc.load(a, tt * 16, u, lane);
     const uint32_t slab_s = smem_u32(cur_slab);
@@ -674,7 +664,7 @@ __global__ void __launch_bounds__(NW * 32) k_dw(BwdArgs a) {
       __syncthreads();
       stage_slab<1>(fa, nxt_slab, (tt + 1) * 16);
     }
-    asm volatile("cp.async.wait_all;\n" ::);
+    cp_async_wait_all();
     if (SP_ABLATE_DW != 2) __syncthreads();
   }
 
@@ -792,14 +782,14 @@ __device__ __forceinline__ void k_dw_idx_body(const BwdArgs& a) {
 #pragma unroll
   for (int s = 0; s < ST - 1; s++) {
     if (s < n_tiles) stage(s, s * 16);
-    asm volatile("cp.async.commit_group;\n" ::);
+    cp_async_commit();
   }
   for (int tt = 0; tt < n_tiles; tt++) {
     // refill the slot consumed in iteration tt - 1 (all lanes left it at the
     // trailing __syncwarp), then wait for tile tt: ST - 1 groups stay in flight
     if (tt + ST - 1 < n_tiles && SP_ABLATE_DW != 1) stage((tt + ST - 1) % ST, (tt + ST - 1) * 16);
-    asm volatile("cp.async.commit_group;\n" ::);
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(ST - 1));
+    cp_async_commit();
+    cp_async_wait_group<ST - 1>();
     __syncwarp();
     ColCoef cc;
     cc.load(a, tt * 16, u, lane);
@@ -823,7 +813,7 @@ __device__ __forceinline__ void k_dw_idx_body(const BwdArgs& a) {
     }
     __syncwarp();
   }
-  asm volatile("cp.async.wait_all;\n" ::);
+  cp_async_wait_all();
   dw_writeback<C, WPW>(a, acc, wid, ubase, lane);
 }
 

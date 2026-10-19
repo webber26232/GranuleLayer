@@ -32,12 +32,12 @@ for C, pooling, pol, backend in CASES:
           flush=True)
 
 # indexed / full-slab k_dw variants at C = 64 (partial blocks, ragged token tail)
-from sparse_pooling.kernels import cuda_ops  # noqa: E402
+from sparse_pooling.backends.profiles import rtx3090  # noqa: E402
 
 for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed", 3, 2, "split", 40),
                                       ("indexed", 1, 3, "split", 24), ("indexed", 3, 3, "bf16", 40),
                                       ("indexed", 2, 2, "split", 8), ("full", 1, 2, "split", 40)]:
-    cuda_ops.DW_INDEXED_STAGES = stages
+    rtx3090.DW_INDEXED_STAGES = stages
     lay = SparsePoolingLayer(1024, 20011, 16, shared_neurons=64, pooling="mean", device="cuda", bias_std=0.1,
                              backend="cuda", plan=PhysicalPlan(block_m=32, cuda_dw_staging=staging, cuda_dw_cfg=cfg,
                                                                grad_precision=prec))
@@ -48,7 +48,7 @@ for staging, cfg, stages, prec, B in [("indexed", 1, 2, "split", 40), ("indexed"
           "B", B, flush=True)
 
 # backward-compute variants (epilogues, fallbacks, dX warp dispatch)
-cuda_ops.DW_INDEXED_STAGES = 2
+rtx3090.DW_INDEXED_STAGES = 2
 for pooling, dxe, dwe, prec, B, H, bad in [
         ("mean", "mask", "mask", "split", 40, 20011, None), ("mean", "fast", "fast", "bf16", 24, 20011, None),
         ("mean", "auto", "auto", "split", 40, 20011, float("nan")),  # non-finite: in-kernel / separate-launch fallback

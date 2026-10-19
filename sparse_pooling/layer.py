@@ -107,20 +107,24 @@ class SparsePoolingLayer(nn.Module):
         key = (self.indices.device, self.indices.data_ptr(), id(self.plan),
                self.sg_buckets.data_ptr() if self.connectivity is not None else 0)  # graph rebuilds -> new metadata
         if self._rt is None or self._rt_key != key:
-            backend = None
+            backend, why = None, ""
             if self.backend_name in ("cuda", "auto") and self.indices.is_cuda:
-                try:
-                    from .kernels.cuda_ops import CudaBackend
+                try:  # the native library of THIS device's build target (built on first use)
+                    from .backends.cuda.runtime import backend_for
 
-                    backend = CudaBackend.get(strict=(self.backend_name == "cuda"))
-                except Exception:
+                    backend = backend_for(self.indices.device)
+                except Exception as e:  # noqa: BLE001
                     if self.backend_name == "cuda":
                         raise
-                    backend = None
+                    why = f"native CUDA backend unavailable ({type(e).__name__}: {e}); using Triton"
+            elif self.backend_name in ("cuda", "auto"):
+                why = f"parameters on {self.indices.device}: no CUDA backend"
             l1 = self.cfg.levels[0]
             self._rt = Level1Runtime(self.layout, self.indices, l1, self.plan,
                                      l1.neurons_per_shard if self.cfg.is_semantic_hierarchy else None,
                                      self.workspace_budget, backend)
+            if why:
+                self._rt.last_info["backend_fallback"] = why
             if self.connectivity is not None:
                 self._rt.sg = SgExec(self.layout, self.sg_feat, self.sg_buckets, self.connectivity)
             self._rt_key = key
@@ -140,6 +144,28 @@ class SparsePoolingLayer(nn.Module):
     @property
     def last_info(self):
         return {} if self._rt is None else dict(self._rt.last_info)
+
+    def explain(self, batch: int = 8192) -> dict:
+        """The execution the layer would use for a batch of ``batch`` tokens, without running it:
+        backend, device, build target, tuning profile and validation status, and the resolved
+        forward / backward choices with reasons (the same records as last_info["execution"])."""
+        from .config import resolve_reduction
+
+        rt = self._runtime()
+        out = dict(backend_requested=self.backend_name, backend_fallback=rt.last_info.get("backend_fallback"))
+        if not self.indices.is_cuda or rt.backend is None:
+            out["backend"] = "triton" if self.indices.is_cuda else "none (CPU parameters)"
+            return out
+        mode, why, _ = resolve_reduction(self.plan)
+        prev = rt.det
+        rt.det = mode == "deterministic"
+        try:
+            out.update(rt.describe_execution(), reduction=dict(mode=mode, reason=why),
+                       forward=rt.resolver.resolve(rt, batch, "fwd").as_dict(),
+                       backward=rt.resolver.resolve(rt, batch, "bwd").as_dict())
+        finally:
+            rt.det = prev
+        return out
 
     @property
     def effective_policy(self) -> str:

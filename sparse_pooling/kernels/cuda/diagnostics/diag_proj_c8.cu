@@ -16,7 +16,7 @@
 // converted to booleans on the device: when a set.gt.ftz mask is only tested for non-zero,
 // ptxas 12.1 emits FSETP.GT without .FTZ (positive subnormal z -> active), whereas the
 // production kernels AND the mask into the BF16 operands (FSET.BF.GT.FTZ: inactive).
-#include "sparse_pool_sg.cuh"
+#include "../sparse_pool_sg.cuh"
 
 __global__ void diag_proj_c8_kernel(const SgArgs a, const int* work, int n, float* zdx, float* zdw, uint32_t* mdx,
                                     uint32_t* mdxm, uint32_t* mdwf, uint32_t* mdwfm, uint32_t* mdwm, uint32_t* mdwmm) {

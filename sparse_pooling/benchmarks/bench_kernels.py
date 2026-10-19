@@ -77,7 +77,11 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(0)
-    cuda_ops.DW_INDEXED_STAGES = args.dw_stages
+    try:  # indexed k_dw ring depth: RTX 3090 profile (older checkouts: the cuda_ops global)
+        from sparse_pooling.backends.profiles import rtx3090 as stages_home
+    except ImportError:
+        stages_home = cuda_ops
+    stages_home.DW_INDEXED_STAGES = args.dw_stages
     plan = PhysicalPlan(grad_precision=args.grad_precision, cuda_dw_cfg=args.dw_cfg, cuda_dw_staging=args.dw_staging,
                         cuda_dx_warps=args.dx_warps, cuda_dx_epilogue=args.dx_epilogue,
                         cuda_dw_epilogue=args.dw_epilogue)
@@ -142,7 +146,8 @@ def main():
     info = lay.last_info
     rec = {"hidden": args.hidden, "C": args.C, "batch": args.batch, "pooling": args.pooling,
            "grad_precision": args.grad_precision, "dw_staging": args.dw_staging, "dw_stages": args.dw_stages,
-           "nvcc_extra": " ".join(cuda_ops.NVCC_FLAGS[7:]), "tag": args.tag,
+           "build": cuda_ops.build_info() if hasattr(cuda_ops, "build_info") else
+           {"library": str(cuda_ops.build_library()), "flags": cuda_ops.NVCC_FLAGS}, "tag": args.tag,
            "dw_cfg": info.get("dw_cfg"), "dx_warps": info.get("dx_warps"),
            "dx_epilogue": info.get("dx_epilogue"), "dw_epilogue": info.get("dw_epilogue"),
            "forward_backend": info.get("forward_backend"), "backward_backend": info.get("backward_backend"),

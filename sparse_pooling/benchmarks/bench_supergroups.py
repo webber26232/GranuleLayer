@@ -31,9 +31,11 @@ import argparse
 import statistics
 import subprocess
 import time
+from pathlib import Path
 
 import torch
 
+import sparse_pooling
 from bench_kernels import POOLINGS, gpu_state
 from common import gpu_info, save
 from sparse_pooling import SparsePoolingLayer
@@ -75,16 +77,23 @@ def parse_variant(spec: str):
     return name, out
 
 
+def _impl_dir():
+    return str(Path(sparse_pooling.__file__).resolve().parent)
+
+
 def git_sha():
+    """Commit of the implementation under test (not of the current directory)."""
     try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        return subprocess.run(["git", "-C", _impl_dir(), "rev-parse", "HEAD"], capture_output=True,
+                              text=True).stdout.strip()
     except Exception:  # noqa: BLE001
         return ""
 
 
 def git_dirty():
     try:
-        return bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True,
+        return bool(subprocess.run(["git", "-C", _impl_dir(), "status", "--porcelain", "--untracked-files=no"],
+                                   capture_output=True,
                                    text=True).stdout.strip())
     except Exception:  # noqa: BLE001
         return None
@@ -129,6 +138,8 @@ def main():
     args = ap.parse_args()
     variants = [parse_variant(v) for v in args.variant] or [("default", {})]
     library = str(cuda_ops.build_library())  # the library this process loads (recorded before any timing)
+    build = cuda_ops.build_info() if hasattr(cuda_ops, "build_info") else {"library": library,
+                                                                          "flags": cuda_ops.NVCC_FLAGS}
 
     torch.manual_seed(args.input_seed)
     conn = None if args.S == 0 else ConnectivityPlan(args.S, args.R, args.gen, args.graph_seed)
@@ -349,7 +360,8 @@ def main():
         else lay._rt.sg.runtime_bytes(),  # all work lists cached by the LAST runtime (see per-variant entries)
     }
     L = lay.layout
-    out = {"commit": git_sha(), "dirty": git_dirty(), "nvcc_flags": cuda_ops.NVCC_FLAGS,
+    out = {"commit": git_sha(), "dirty": git_dirty(), "nvcc_flags": build.get("flags"), "build": build,
+           "implementation": str(Path(sparse_pooling.__file__).resolve().parent),
            "library": library, "args": vars(args),
            "config": {"C": args.C, "S": args.S, "R": args.R, "Q": (conn.num_supergroups(args.input_dim) if conn else 0),
                       "H": args.hidden, "M": args.batch, "G": args.groups, "D": args.input_dim,

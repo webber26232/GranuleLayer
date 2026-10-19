@@ -8,6 +8,7 @@ import torch
 
 from conftest import make_layer, rel_err, requires_cuda_backend, run_both
 from sparse_pooling import PhysicalPlan
+from sparse_pooling.backends.profiles import rtx3090
 from sparse_pooling.kernels import cuda_ops
 from sparse_pooling.optim import FusedAdamW
 
@@ -43,7 +44,7 @@ def _inputs(B, D, G, seed=1):
 
 @pytest.fixture(params=[2, 3], ids=["2stage", "3stage"])
 def stages(request, monkeypatch):
-    monkeypatch.setattr(cuda_ops, "DW_INDEXED_STAGES", request.param)
+    monkeypatch.setattr(rtx3090, "DW_INDEXED_STAGES", request.param)
     return request.param
 
 

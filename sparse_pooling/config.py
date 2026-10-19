@@ -256,6 +256,11 @@ class PhysicalPlan:
     token_tiles_per_program: int = 1
     input_layout: str = "feature_major"  # or "token_major"
     backend: str = "auto"  # "triton" | "cuda" | "auto"
+    # tuning profile of the CUDA backend (sparse_pooling/backends/profiles): "auto" = the measured
+    # profile matching the device (RTX 3090), else "generic_cuda"; or a profile name to force it
+    # (still subject to every legality check; reported as user-forced / unvalidated on other devices).
+    # SPARSE_POOL_PROFILE overrides "auto" process-wide.  Never changes the function computed.
+    tuning_profile: str = "auto"
     # native CUDA kernels: tokens per CTA (16 or 32 -> 32/64 KiB smem slab at D=1024)
     cuda_block_m: int = 32
     cuda_warps: int = 16
@@ -268,12 +273,12 @@ class PhysicalPlan:
     # All variants give gradients bitwise identical to "generic" (dX: up to atomic order).
     cuda_dx_epilogue: str = "auto"
     cuda_dw_epilogue: str = "auto"
-    cuda_dx_warps: int = 0  # 8 | 16 | 32; 0 = auto (32 at C = 64, else 16; results/MEMORY_TRAFFIC_OPTIMIZATION.md)
-    cuda_dw_cfg: int = -1  # -1 = per-C default (see cuda_ops.DW_CFG)
+    cuda_dx_warps: int = 0  # 8 | 16 | 32; 0 = the tuning profile's choice (RTX 3090: 32 at C = 64 with >= 32 work units per unit, else 16)
+    cuda_dw_cfg: int = -1  # backends/cuda/variants.DW_CFGS id; -1 = the tuning profile's choice
     # k_dw input staging: "full" stages all D features per token tile; "indexed"
-    # stages only the rows the CTA's index records use (sm_86, C = 64, packed,
-    # feature-major input; anything else falls back to "full"); "auto" = indexed
-    # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
+    # stages only the rows the CTA's index records use (C = 64, packed, feature-major
+    # input, cp.async; anything else falls back to "full"); "auto" = the tuning profile's
+    # choice where legal (RTX 3090: indexed; generic: full)
     cuda_dw_staging: str = "auto"
     # ---- input-supergroup execution (only for layers built with a ConnectivityPlan;
     # supergroups.py, kernels/cuda/sparse_pool_sg.cuh).  Same graph, different kernels:
@@ -346,6 +351,8 @@ class PhysicalPlan:
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
         assert self.backend in ("triton", "cuda", "auto")
+        if not isinstance(self.tuning_profile, str) or not self.tuning_profile:
+            raise ValueError("tuning_profile must be 'auto' or a registered profile name")
         assert self.grad_precision in ("split", "bf16")
         assert self.cuda_dw_staging in ("auto", "full", "indexed")
         assert self.cuda_dx_epilogue in ("auto", "generic", "fast", "mask")

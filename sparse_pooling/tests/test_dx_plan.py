@@ -1,12 +1,13 @@
-"""Whole grouped dX plan selection (PhysicalPlan.cuda_grouped_dx_plan, cuda_ops.SG_AUTO_DX_PLAN):
-named plans, the scale-aware auto rule, precedence of explicit fields, device / precision
-scoping, last_info, and numerical equivalence of the plans."""
+"""Whole grouped dX plan selection (PhysicalPlan.cuda_grouped_dx_plan, the RTX 3090 profile rule
+backends/profiles/rtx3090.SG_AUTO_DX_PLAN): named plans, the scale-aware auto rule, precedence of
+explicit fields, profile / precision scoping, last_info, and numerical equivalence of the plans."""
 import pytest
 import torch
 
 from conftest import rel_err, requires_cuda_backend
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.config import DX_PLANS
+from sparse_pooling.backends.profiles import rtx3090
 from sparse_pooling.kernels import cuda_ops
 from test_input_supergroups import inputs, reference, run, sg_layer
 
@@ -24,8 +25,8 @@ def test_named_plan_conflicts_raise():
 
 
 def rule(**kw):
-    r = dict(C=8, S=64, precisions=("split",), act="relu", cc=torch.cuda.get_device_capability(),
-             min_units_per_bucket=0, min_tokens=0, plan="private_t32", below="tiles")
+    r = dict(C=8, S=64, precisions=("split",), act="relu", min_units_per_bucket=0, min_tokens=0, plan="private_t32",
+             below="tiles")
     r.update(kw)
     return [r]
 
@@ -68,7 +69,7 @@ def test_plans_agree_and_dw_is_unchanged():
 
 @requires_cuda_backend
 def test_auto_rule_selects_and_reports(monkeypatch):
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule())
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule())
     lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped"))
     x, dy = inputs(64, 1024, 64)
     _, _, _, _, info = run(lay, x, dy)
@@ -76,18 +77,18 @@ def test_auto_rule_selects_and_reports(monkeypatch):
     assert plan == "private_t32" and cfg == (32, 8, 1, "vectorized_transpose_hoisted") and "scale rule" in why
     assert info["grouped_dx"]["kernel"] == "sgx_dx_kernel<1, 8, 2, 8, 1, 2, 9, 1>"
     # below the work threshold: the per-field automatic tiles (shared_t64 at C = 8, S = 64)
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9))
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
     _, _, _, _, info = run(lay, x, dy)
     plan, cfg, why = ran_plan(info)
     assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped") and "mean units per nonempty bucket" in why and " < " in why
     # a named plan below the threshold
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9, below="shared_t64"))
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule(min_units_per_bucket=1e9, below="shared_t64"))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
     _, _, _, _, info = run(lay, x, dy)
     assert ran_plan(info)[0] == "shared_t64"
     # below the token threshold
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(min_tokens=65))
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule(min_tokens=65))
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="grouped")
     _, _, _, _, info = run(lay, x, dy)
     assert ran_plan(info)[0] == "tiles"
@@ -98,7 +99,7 @@ def test_auto_rule_selects_and_reports(monkeypatch):
                                          ("cuda_grouped_dx_warps", 8), ("cuda_grouped_dx_scatter", "baseline"),
                                          ("cuda_grouped_dx_chunk_units", 4096)])
 def test_explicit_fields_take_precedence(monkeypatch, field, value):
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule())
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule())
     lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped", **{field: value}))
     x, dy = inputs(64, 1024, 64)
     _, _, _, _, info = run(lay, x, dy)
@@ -108,18 +109,22 @@ def test_explicit_fields_take_precedence(monkeypatch, field, value):
 
 
 @requires_cuda_backend
-@pytest.mark.parametrize("what", ["device", "precision", "activation", "S"])
+@pytest.mark.parametrize("what", ["profile", "precision", "activation", "S"])
 def test_rule_scope(monkeypatch, what):
-    kw = {"device": dict(cc=(9, 0)), "precision": dict(precisions=("bf16",)), "activation": dict(act="identity"),
+    """The rule applies only within its (C, S, precision, activation) scope and only under the
+    profile that measured it (the device scope is the profile matcher: tests/test_profiles.py)."""
+    kw = {"profile": {}, "precision": dict(precisions=("bf16",)), "activation": dict(act="identity"),
           "S": dict(S=32)}[what]
-    monkeypatch.setattr(cuda_ops, "SG_AUTO_DX_PLAN", rule(**kw))
-    lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped"))
+    monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule(**kw))
+    prof = "generic_cuda" if what == "profile" else "rtx3090"
+    lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped", tuning_profile=prof))
     x, dy = inputs(64, 1024, 64)
     _, _, _, _, info = run(lay, x, dy)
     plan, cfg, why = ran_plan(info)
-    assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped")
-    if what == "device":
-        assert "validated on sm_90 only" in why
+    if what == "profile":  # generic: no whole-plan rule; conservative tiles that fit the device
+        assert plan == "tiles" and "profile generic_cuda" in why and cfg[3] == "baseline"
+    else:
+        assert plan == "tiles" and cfg == (64, 8, 8, "swizzle4_capped")
 
 
 @requires_cuda_backend

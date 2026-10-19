@@ -1,16 +1,14 @@
 #pragma once
 // backward launch templates (instantiated per pooling op in bwd_<op>.cu)
+#include "launch.cuh"
 #include "sparse_pool_bwd.cuh"
 
 template <int POOL, int ACT, int C, int NW, bool SPLIT, int PI, int EPI = 0>
 static int launch_dx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   auto k = k_dx<POOL, ACT, C, NW, SPLIT, PI, EPI>;
   size_t smem = (size_t)a.D * 16 * (2 + 4);
-  static size_t configured = 0;  // per instantiation: grow the opt-in as needed
-  if (smem > configured) {
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    configured = smem;
-  }
+  static LaunchSlot slot;  // per instantiation and device
+  if (int e = sp_prepare(k, smem, NW * 32, slot)) return e;
   k<<<dim3(gx, gy), NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();
 }
@@ -29,11 +27,8 @@ template <int POOL, int ACT, int C, int NW, int WPW, bool SPLIT, int PI>
 static int launch_dw(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   auto k = k_dw<POOL, ACT, C, NW, WPW, SPLIT, PI>;
   size_t smem = (size_t)a.D * 16 * 2 * 2;
-  static size_t configured = 0;  // per instantiation: grow the opt-in as needed
-  if (smem > configured) {
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    configured = smem;
-  }
+  static LaunchSlot slot;  // per instantiation and device
+  if (int e = sp_prepare(k, smem, NW * 32, slot)) return e;
   k<<<dim3(gx, gy), NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();
 }
@@ -42,11 +37,8 @@ template <int POOL, int ACT, int C, int NW, int WPW, int ST, bool SPLIT, int PI,
 static int launch_dw_idx_v(const BwdArgs& a, int gx, int gy, cudaStream_t s) {
   auto k = k_dw_idx<POOL, ACT, C, NW, WPW, ST, SPLIT, PI, MINB, EPI>;
   size_t smem = (size_t)NW * ST * (WPW * Unit<C>::UB * 8) * 16 * 2;  // per-warp ring of compact slabs
-  static size_t configured = 0;
-  if (smem > configured) {
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    configured = smem;
-  }
+  static LaunchSlot slot;  // per instantiation and device
+  if (int e = sp_prepare(k, smem, NW * 32, slot)) return e;
   k<<<dim3(gx, gy), NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();
 }

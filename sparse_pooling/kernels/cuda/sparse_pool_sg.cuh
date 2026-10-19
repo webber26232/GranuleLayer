@@ -537,13 +537,13 @@ __device__ __forceinline__ void sg_dw_body(const SgArgs& a) {
 #pragma unroll
   for (int s = 0; s < ST - 1; s++) {
     if (s < n_st) stage(s);
-    asm volatile("cp.async.commit_group;\n" ::);
+    cp_async_commit();
   }
   for (int s = 0; s < n_st; s++) {
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(ST - 2));
+    cp_async_wait_group<ST - 2>();
     __syncthreads();  // stage s visible to all; every warp is done with stage s - 1's slot
     if (s + ST - 1 < n_st) stage(s + ST - 1);
-    asm volatile("cp.async.commit_group;\n" ::);
+    cp_async_commit();
     const bf16* base = ring + (s % ST) * stage_elems;
 #pragma unroll 1
     for (int sub = 0; sub < TS; sub++) {
@@ -578,7 +578,7 @@ __device__ __forceinline__ void sg_dw_body(const SgArgs& a) {
       }
     }
   }
-  asm volatile("cp.async.wait_all;\n" ::);
+  cp_async_wait_all();
   sg_dw_writeback<C, WPW>(a, acc, unit, lane);
 }
 
