@@ -227,6 +227,16 @@ class PoolingConfig:
         return " -> ".join(lv.describe() for lv in self.levels)
 
 
+DX_SCATTERS = ("auto", "baseline", "baseline_private", "swizzle4", "swizzle4_capped", "vectorized", "vectorized_transpose", "vectorized_hoisted",
+               "vectorized_transpose_hoisted", "vectorized_parity", "feature_owner")
+# complete grouped C = 8 dX plans (PhysicalPlan.cuda_grouped_dx_plan): tile, local reduction and
+# scatter are one coupled decision (results/SCALE_DISPATCH_FUSED_BACKWARD.md)
+DX_PLANS = {
+    "shared_t64": dict(tokens=64, warps=8, reduction=8, scatter="swizzle4_capped"),  # 1 CTA slab, CAS
+    "private_t32": dict(tokens=32, warps=8, reduction=1, scatter="vectorized_transpose_hoisted"),  # warp-private
+}
+
+
 @dataclass
 class PhysicalPlan:
     """Execution-only reduction hierarchy (does not change the model).
@@ -252,13 +262,156 @@ class PhysicalPlan:
     # backward: dZ operand precision for tensor-core gradient products:
     #   "split" = hi + lo BF16 pair (~16-bit mantissa), "bf16" = single BF16
     grad_precision: str = "split"
-    cuda_dx_warps: int = 16
+    # dZ epilogue of k_dx / k_dw_idx: "generic", "fast" (per-element select; Mean, LME and
+    # integer-p power mean), "mask" (per-token BF16 hi/lo + bit masks; Mean only, else
+    # "fast") or "auto" (measured per operator and precision: cuda_ops.auto_epilogue).
+    # All variants give gradients bitwise identical to "generic" (dX: up to atomic order).
+    cuda_dx_epilogue: str = "auto"
+    cuda_dw_epilogue: str = "auto"
+    cuda_dx_warps: int = 0  # 8 | 16 | 32; 0 = auto (32 at C = 64, else 16; results/MEMORY_TRAFFIC_OPTIMIZATION.md)
     cuda_dw_cfg: int = -1  # -1 = per-C default (see cuda_ops.DW_CFG)
+    # k_dw input staging: "full" stages all D features per token tile; "indexed"
+    # stages only the rows the CTA's index records use (sm_86, C = 64, packed,
+    # feature-major input; anything else falls back to "full"); "auto" = indexed
+    # where supported (results/MEMORY_TRAFFIC_OPTIMIZATION.md)
+    cuda_dw_staging: str = "auto"
+    # ---- input-supergroup execution (only for layers built with a ConnectivityPlan;
+    # supergroups.py, kernels/cuda/sparse_pool_sg.cuh).  Same graph, different kernels:
+    # "generic" = the kernels above, "grouped" = supergroup-scheduled kernels (Mean(ReLU /
+    # identity), packed C = 8 / 64, feature-major input), "auto" = the measured choice per
+    # phase.  An explicit "grouped" that cannot run raises; "auto" records the fallback
+    # reason in last_info["grouped_fallback"].  Per-phase overrides take precedence.
+    cuda_input_supergroup_backend: str = "auto"
+    cuda_grouped_fwd: str = ""  # "" = cuda_input_supergroup_backend
+    cuda_grouped_dx: str = ""
+    cuda_grouped_dw: str = ""
+    cuda_grouped_fwd_tokens: int = 0  # 16 | 32 | 64 | 128; 0 = auto
+    cuda_grouped_fwd_warps: int = 0  # 4 | 8 | 16; 0 = auto
+    cuda_grouped_fwd_chunk_units: int = 0  # work units per CTA (whole buckets); 0 = auto
+    cuda_grouped_dx_tokens: int = 0  # 16 | 32 | 64 | 128; 0 = auto
+    cuda_grouped_dx_warps: int = 0  # 8 | 16; 0 = auto
+    # dX local accumulation: warps sharing one FP32 [S][T] slab copy. 1 = warp-private
+    # copies (plain read-modify-write), = warps: one CTA slab with 64-bit CAS; 0 = auto
+    cuda_grouped_dx_reduction: int = 0
+    cuda_grouped_dx_chunk_units: int = 0
+    # grouped C = 8 dX local accumulation (sparse_pool_sg_dxs.cuh): "baseline" (float2 slab
+    # read-modify-write, 2 bank groups), "baseline_private" (control: same layout compiled for
+    # warp-private copies), "swizzle4" (same order, 4 bank groups; "_capped": <= 80 registers for
+    # 3 CTAs / SM at 8 warps), "vectorized"
+    # (float4 records of two m16 tiles, 4 bank groups; warp-private copies), "vectorized_transpose"
+    # (float4 records after a shuffle transpose: one feature per 128-bit phase), "*_hoisted" (the
+    # same with record addresses computed once per block), "vectorized_parity"
+    # (layout control: float4 records, 2 bank groups), "feature_owner" (MMA-routed register
+    # accumulators, S <= 32, warp-private; different FP32 summation order), "auto" (measured)
+    cuda_grouped_dx_scatter: str = "auto"
+    # whole grouped dX plan: "tiles" = the per-field settings above (SG_AUTO tiles + scatter
+    # rule), "shared_t64" / "private_t32" = DX_PLANS, "auto" = the measured scale-aware choice
+    # between them (cuda_ops.SG_AUTO_DX_PLAN) when the four dX fields above are all automatic;
+    # any explicit dX field makes "auto" behave as "tiles".  A named plan conflicting with an
+    # explicit field raises.
+    cuda_grouped_dx_plan: str = "auto"
+    # grouped C = 8 backward organization: "separate" = dX and dW kernels, each recomputing the
+    # projection; "fused" = experimental shared-projection kernel (sparse_pool_sg_bwdf.cuh: one
+    # projection per block-tile, dW-owned schedule, dX flushed per token window; Mean(ReLU),
+    # split, mask / fast epilogues); "fused_recompute" = the same schedule recomputing the dW
+    # projection (attribution control); "auto" = "separate" (fusion is not promoted).  An explicit
+    # fused request that cannot run raises.
+    cuda_grouped_backward: str = "auto"
+    cuda_grouped_fused_cfg: int = 0  # cuda_ops.SGF_CFGS key
+    cuda_grouped_dw_cfg: int = -1  # cuda_ops.SG_DW_CFGS key; -1 = auto
+    # grouped C = 8 dW projection (sparse_pool_bwd.cuh dw_block_c8_compact): "padded" = dw_block's two
+    # m16n8k8 per 16-token tile with structural zero neuron rows (the original), "compact" = one
+    # m16n8k8 in the dX orientation + movmatrix mask transposes (fast Mean(ReLU) epilogue; dW / db
+    # bitwise equal), "auto" = cuda_ops.sg_dw_projection (measured).  An explicit "compact" that
+    # cannot run raises.
+    cuda_grouped_dw_projection: str = "auto"
+    cuda_grouped_merge: str = "atomic"  # supergroup -> global merge of the fast mode (FP32 atomics)
+    # reduction policy (kernels/cuda/sg_det.cu, README "Deterministic execution"):
+    #   "fast"          the cross-CTA sums of the grouped forward / dX use FP32 atomics (and
+    #                   shared-copy CAS where the dX plan selects it): run-to-run bits vary;
+    #   "deterministic" every reduction has a fixed owner and order: repeated runs with the same
+    #                   graph, inputs, parameters, optimizer / RNG state, resolved plan, device
+    #                   and toolchain give bitwise-identical outputs and gradients.  The grouped
+    #                   forward and dX store per-CTA partials into exclusively owned workspace
+    #                   rows (token-windowed to deterministic_workspace_bytes) and a second
+    #                   kernel sums each destination's contributors in a static order; dX uses
+    #                   warp-private copies.  Unsupported combinations raise (never a silent
+    #                   atomic fallback);
+    #   "auto"          "deterministic" under torch.use_deterministic_algorithms(True) (warn_only:
+    #                   unsupported combinations warn and run "fast"), else "fast".
+    # An explicit "fast" under torch.use_deterministic_algorithms(True) raises (warns with warn_only).
+    reduction: str = "auto"
+    deterministic_workspace_bytes: int = 0  # per-stage partial-workspace cap; 0 = DET_WORKSPACE_DEFAULT
 
     def __post_init__(self):
         assert self.input_layout in ("feature_major", "token_major")
         assert self.backend in ("triton", "cuda", "auto")
         assert self.grad_precision in ("split", "bf16")
+        assert self.cuda_dw_staging in ("auto", "full", "indexed")
+        assert self.cuda_dx_epilogue in ("auto", "generic", "fast", "mask")
+        assert self.cuda_dw_epilogue in ("auto", "generic", "fast", "mask")
+        assert self.cuda_input_supergroup_backend in ("auto", "generic", "grouped")
+        for p in (self.cuda_grouped_fwd, self.cuda_grouped_dx, self.cuda_grouped_dw):
+            assert p in ("", "auto", "generic", "grouped")
+        assert self.cuda_grouped_fwd_tokens in (0, 16, 32, 64, 128)
+        assert self.cuda_grouped_dx_tokens in (0, 16, 32, 64, 128)
+        assert self.cuda_grouped_fwd_warps in (0, 4, 8, 16)
+        assert self.cuda_grouped_dx_warps in (0, 8, 16)
+        assert self.cuda_grouped_dx_scatter in DX_SCATTERS
+        assert self.cuda_grouped_dx_plan in ("auto", "tiles") + tuple(DX_PLANS), self.cuda_grouped_dx_plan
+        assert self.cuda_grouped_backward in ("auto", "separate", "fused", "fused_recompute")
+        if self.cuda_grouped_dx_plan in DX_PLANS:
+            want = DX_PLANS[self.cuda_grouped_dx_plan]
+            for f, v in (("tokens", self.cuda_grouped_dx_tokens), ("warps", self.cuda_grouped_dx_warps),
+                         ("reduction", self.cuda_grouped_dx_reduction)):
+                if v and v != want[f]:
+                    raise ValueError(f"cuda_grouped_dx_plan={self.cuda_grouped_dx_plan!r} has {f}={want[f]}, "
+                                     f"conflicting with cuda_grouped_dx_{f}={v}")
+            if self.cuda_grouped_dx_scatter not in ("auto", want["scatter"]):
+                raise ValueError(f"cuda_grouped_dx_plan={self.cuda_grouped_dx_plan!r} has scatter "
+                                 f"{want['scatter']!r}, conflicting with cuda_grouped_dx_scatter="
+                                 f"{self.cuda_grouped_dx_scatter!r}")
+        assert self.cuda_grouped_merge == "atomic"
+        assert self.cuda_grouped_dw_projection in ("auto", "padded", "compact"), self.cuda_grouped_dw_projection
+        if self.reduction not in REDUCTIONS:
+            raise ValueError(f"reduction must be one of {REDUCTIONS} (got {self.reduction!r})")
+        if self.deterministic_workspace_bytes < 0:
+            raise ValueError("deterministic_workspace_bytes must be >= 0")
+
+    def grouped_request(self, phase: str) -> str:
+        """Requested execution of a phase ("fwd" | "dx" | "dw") of a supergroup layer."""
+        return getattr(self, f"cuda_grouped_{phase}") or self.cuda_input_supergroup_backend
+
+
+REDUCTIONS = ("auto", "fast", "deterministic")
+DET_WORKSPACE_DEFAULT = 1 << 30  # bytes per deterministic partial stage (fwd, dX); token windows beyond
+
+
+def resolve_reduction(plan: "PhysicalPlan"):
+    """(mode, reason, strict) of a plan's reduction policy under the current global PyTorch
+    setting.  mode is "fast" or "deterministic"; strict = an unsupported deterministic request
+    must raise (False only for "auto" under warn_only, which warns and runs "fast")."""
+    import torch
+
+    glob = torch.are_deterministic_algorithms_enabled()
+    warn_only = glob and torch.is_deterministic_algorithms_warn_only_enabled()
+    if plan.reduction == "deterministic":
+        return "deterministic", "explicit reduction='deterministic'", True
+    if plan.reduction == "fast":
+        if glob and not warn_only:
+            raise RuntimeError("PhysicalPlan(reduction='fast') uses FP32 atomics, but "
+                               "torch.use_deterministic_algorithms(True) is set: use reduction='deterministic' "
+                               "or 'auto', or enable warn_only")
+        if glob:
+            import warnings
+
+            warnings.warn("reduction='fast' under torch.use_deterministic_algorithms(warn_only=True): "
+                          "GranuleLayer reductions use FP32 atomics", stacklevel=3)
+            return "fast", "explicit reduction='fast' (global deterministic warn_only)", False
+        return "fast", "explicit reduction='fast'", False
+    if glob:
+        return "deterministic", "torch.use_deterministic_algorithms(True)", not warn_only
+    return "fast", "default (torch deterministic algorithms off)", False
 
 
 def state_fields(level: LevelSpec) -> int:

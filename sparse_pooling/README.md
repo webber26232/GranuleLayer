@@ -7,7 +7,9 @@ forward nor in backward.  Neuron activations live only in registers of the kerne
 consumes them; backward recomputes them.
 
 Everything in this document was measured on the machine it was developed on:
-**RTX 3090 (GA102, sm_86, 82 SMs, 5 MB L2)** — note this card exposes **20 GiB**, not 24 GB —
+**RTX 3090 (GA102, sm_86, 82 SMs, 5 MB L2, 24 GiB, 370 W limit)** — results were re-measured
+after a hardware repair (the card previously exposed only 20 GiB at 744 GB/s; now 23.7 GiB
+usable to PyTorch, 819 GB/s device-to-device copy) —
 driver 550.67, CUDA 12.1 `nvcc`, PyTorch 2.7 (CUDA 12.8 runtime), Triton 3.3.
 Measured tables: [`results/TABLES.md`](results/TABLES.md) (generated from `results/*.json`).
 The analysis and answers to the research questions are in [REPORT.md](REPORT.md).
@@ -61,9 +63,10 @@ bash sparse_pooling/benchmarks/run_all.sh python && python sparse_pooling/benchm
 Memory at H = 100M, B = 8192 (C = 8): BF16 weights 1.6 GB + bias/indices 0.4 GB, FP32
 `main_grad` 3.6 GB, Adam moments 3.6 GB (BF16) or 7.2 GB (FP32), optional FP32 master
 weights 3.6 GB; checkpoints are 32–288 MiB for single-level models.  Measured peaks
-(`results/TABLES.md`): 8.6–9.8 GiB with BF16 moments, 17.2 GiB with FP32 moments + master
-weights.  Two-level models with Top-K level-1 features need 12.5–16.2 GiB with BF16 moments
-and do not fit the 20 GiB card with FP32 moments + master weights.  If saved winner ids would
+(`results/TABLES.md`): 8.6–9.3 GiB with BF16 moments, 17.2 GiB with FP32 moments + master
+weights.  Two-level models with Top-K level-1 features need 12.5–16.2 GiB with BF16 moments;
+with FP32 moments + master weights the 6,144-unit variant fits (19.2 GiB) but the 49,152-unit
+variants need ~23 GiB and run out of memory on this 24 GiB card with a desktop attached.  If saved winner ids would
 exceed 2 GiB (`autograd.CHECKPOINT_BUDGET`) the layer recomputes winners in token chunks.
 
 ## Layout of the repository
@@ -153,21 +156,34 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
 
 * **Max / Top-K** — sparse winner events (Triton): one event per (token, unit, winner);
   z of the winner is recomputed (8 MACs) for `act'(z)`; gradients by FP32 atomics
-  (8.4M events at B = 8192 → ~13 ms).
+  (8.4M events at B = 8192 → ~11 ms).
 * **Smooth operators** (CUDA): two kernels, because the two reductions want opposite loop
   orders and both must stay on chip:
   * `k_dx` token-stationary: CTA = (16 tokens, ~128 groups).  Recompute z (m16n8k8),
     dZ from compact coefficients, `dA = dZ Wᵀ` on tensor cores (Wᵀ via `movmatrix`), scatter
     into a `[1024 × 16]` FP32 slab in shared memory, one global flush per CTA.  GA102 has no
     native FP32 shared-memory atomics (`atomicAdd` compiles to a CAS loop); tokens t and t+8
-    are interleaved so each lane updates its 4 values with two 64-bit CAS.
+    are interleaved so each lane updates its 4 values with two 64-bit CAS.  The 96 KiB of
+    shared memory hold it at 1 CTA/SM; at C = 64 it runs 32 warps per CTA (64 registers fill
+    the register file), 9–14 % faster than 16 (`PhysicalPlan.cuda_dx_warps`).
   * `k_dw` weight-stationary: CTA = chunk of work units of one unit, loops over all tokens
     with a double-buffered slab.  Recomputes `zᵀ = W X_gᵀ` (the packed W fragment is directly
     the A operand, the forward's `ldmatrix.trans` registers the B operand), so `dZᵀ` comes
     out in exactly the A layout of `dWᵀ = dZᵀ X_g` — no transposes.  At C = 8 the structurally
     empty neuron rows 8–15 carry the lo half of the split dZ, giving hi+lo precision for the
     price of one MMA.  dW/db live in registers for the whole kernel and are written once
-    (exclusive ownership: no atomics, deterministic).
+    (exclusive ownership: no atomics, deterministic).  At C = 64 (packed, feature-major X,
+    sm_86) the default `k_dw_idx` stages only the 8 index rows of each work unit into a
+    per-warp `cp.async` ring instead of all 1024 features (192 vs 768 GiB of logical staging
+    at H = 100M), with warp-level instead of CTA-level synchronisation; results are bitwise
+    identical to `k_dw` and 1.4× faster (`PhysicalPlan.cuda_dw_staging = "full"` restores
+    the original kernel).  Details: `results/MEMORY_TRAFFIC_OPTIMIZATION.md`.
+  * dZ epilogues (`PhysicalPlan.cuda_{dx,dw}_epilogue`, default `"auto"`): for Mean, LME and
+    integer-p power mean the token-validity select and the multiply by act'(z) are dropped; for
+    Mean, dZ is one of two values per token, so its BF16 hi/lo split is computed per token and
+    each element needs only a bit mask.  Gradients are bitwise identical to the generic path
+    (FTZ and non-finite coefficients included, via a device-side fallback flag).  Details:
+    `results/BACKWARD_COMPUTE_OPTIMIZATION.md`.
 * dZ enters the tensor-core products as hi + lo BF16 pair (`grad_precision="split"`,
   ~16-bit mantissa, gradients within ~3e-6 of FP32 autograd) or a single BF16
   (`"bf16"`, the usual mixed-precision semantics, ~1.5e-3).  Accumulation is FP32 always.
@@ -211,3 +227,80 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
   `benchmarks/profile_ncu.sh` profiles the hot kernels with the relevant metrics when run with
   sudo.  Bottlenecks in this work were established with micro-benchmarks and ablation builds
   (see REPORT.md); DRAM/L2 byte counts quoted are analytic.
+
+## Input-supergroup connectivity (optional architecture)
+
+`SparsePoolingLayer(..., connectivity=ConnectivityPlan(input_supergroup_dim=S, partition_rounds=R))`
+restricts every index record to one of Q = R·D/S seeded input sets (`supergroups.py`: generator,
+validator, compact metadata saved in the state dict).  The default stays unrestricted.  With
+`PhysicalPlan(cuda_input_supergroup_backend="auto")` the measured grouped Mean kernels run where they
+are faster (H = 100M, M = 8192, C = 8, S = 16: step 4.85 s → 2.72 s; C = 64: 1.76 s → 1.70 s); see
+`results/INPUT_SUPERGROUP_OPTIMIZATION.md`.
+
+The grouped C = 8 dX local accumulation has conflict-reduced slab layouts
+(`PhysicalPlan.cuda_grouped_dx_scatter`; `auto` selects the measured variant, the baseline elsewhere):
+at H = 100M, M = 8192 the C = 8 step drops another 10–11 % (S = 16: 2.80 s → 2.51 s, S = 32:
+3.10 s → 2.76 s, same-session A/B) with bitwise-identical per-CTA arithmetic; see
+`results/C8_DX_SCATTER_OPTIMIZATION.md`.  Benchmarks restore the complete training state
+(`benchmarks/train_state.py`).
+
+## Deterministic execution (`PhysicalPlan.reduction`)
+
+The fast grouped kernels sum across CTAs with FP32 atomics (forward: one per (token, bucket);
+dX: one per (feature, token) per CTA, plus a shared-memory CAS in the S = 64 `shared_t64` dX plan),
+so repeated runs differ in the last bits.  `PhysicalPlan(reduction="deterministic")` gives every
+reduction a fixed owner and order: the grouped forward and dX store each CTA's partial into
+workspace rows only that CTA writes, and a second kernel (`kernels/cuda/sg_det.cu`) sums each
+output / input feature's contributors in a static order (built once from the work lists); dX uses
+warp-private shared-memory copies; dW / db already have exclusive owners.  Repeated runs with the
+same graph, inputs, parameters, optimizer and RNG state, resolved plan, device and toolchain are
+bitwise identical (outputs, dX, dW / db, optimizer updates).  No claim is made across GPU models,
+compiler / driver versions, precision modes or different reduction trees (deterministic and fast
+results differ in the last bits, as any two summation orders do).
+
+```python
+import torch
+from sparse_pooling import PhysicalPlan, SparsePoolingLayer
+from sparse_pooling.supergroups import ConnectivityPlan
+
+lay = SparsePoolingLayer(1024, 1_000_000, 1024, shared_neurons=8, pooling="mean", device="cuda",
+                         connectivity=ConnectivityPlan(64, 16),
+                         plan=PhysicalPlan(reduction="deterministic"))   # or "fast" / "auto"
+x = torch.randn(1024, 1024, device="cuda").bfloat16()
+y = lay(x); y.float().square().sum().backward()
+print(lay.last_info["reduction"], lay.last_info["grouped_dx"]["reduction"])
+```
+
+`reduction="auto"` (the default) runs `"deterministic"` under
+`torch.use_deterministic_algorithms(True)` and `"fast"` otherwise; an explicit `"fast"` under the
+global flag raises (warns with `warn_only=True`).  The partial workspace per stage is capped by
+`deterministic_workspace_bytes` (default 1 GiB, `config.DET_WORKSPACE_DEFAULT`): larger problems run
+in token windows.  The window does not change the bits (each destination's sum has the same
+contributors in the same order); a cap below one token tile raises — there is never an atomic
+fallback.
+
+| Layer / plan | `reduction="deterministic"` |
+|---|---|
+| input-supergroup layers, packed Mode B C = 8 or 64, Mean(ReLU) / Mean(identity), split or BF16 gradients, `input_layout="feature_major"`, B % 8 == 0 | supported (forward grouped or generic, dX grouped, dW grouped or generic) |
+| grouped dX `auto` | warp-private copies; C = 8, S = 64 → `private_t32` (no fast-mode threshold); other S: the automatic tiles with `cuda_grouped_dx_reduction = 1` |
+| explicit `cuda_grouped_dx_plan="private_t32"`, explicit private tiles / scatters | honoured |
+| explicit `shared_t64`, `cuda_grouped_dx_reduction > 1` | `ValueError` (shared-copy CAS) |
+| `cuda_grouped_dx="generic"` / layers without connectivity (k_dx), Triton backend | `ValueError` (FP32 atomics) |
+| `cuda_grouped_backward="fused" / "fused_recompute"` | `ValueError` (atomic dX flush); `auto` is separate |
+| other pooling operators, semantic hierarchies, token-major input, B % 8 != 0 | `ValueError` |
+| non-finite upstream gradients | the in-kernel generic epilogue of the same kernels (one path; finite elements bitwise repeatable; inf / NaN positions reproduced, NaN payload bits not promised) |
+
+Cost (RTX 3090, C = 8, H = 100M, M = 8192, paired complete step): +0.34 / +0.21 / +0.20 % for
+S / R = 16 / 4, 32 / 8, 64 / 16 (+0.25 % BF16 gradients), almost all of it the forward reduce
+(about 10 ms: 8 GiB of partials in 8 token windows); peak allocated memory +0.8 / +0.8 / +1.0 GiB.
+Smaller S = 64 graphs whose fast plan is `shared_t64` cost more (+11 to +24 % at H <= 10M), as
+does C = 64, S = 64 (+12.8 %: private copies need 32-token tiles).
+
+`PhysicalPlan.cuda_grouped_dw_projection` (`"auto"` = `"padded"`, `"compact"`): the compact C = 8
+Mean(ReLU) dW projection computes z with one `mma.m16n8k8` in dX orientation and transposes the
+ReLU mask with `movmatrix`.  It is bitwise equal to the padded projection but 3-4 % slower in dW
+(8 % with BF16 gradients) on the RTX 3090, so it is explicit / experimental;
+`last_info["grouped_dw"]["projection"]` records the choice.
+
+See `results/DETERMINISM_METRICS_DW_PROJECTION.md` for the ownership map, overheads and the
+production H = 100M repeatability evidence.

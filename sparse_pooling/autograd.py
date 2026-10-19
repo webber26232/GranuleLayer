@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from .config import LevelSpec, PhysicalPlan, PoolingConfig
+from .config import LevelSpec, PhysicalPlan, PoolingConfig, resolve_reduction
 from .kernels import ops
 from .layout import SparseLayout
 from .reference.pytorch_reference import level2_forward
@@ -80,13 +80,42 @@ class Level1Runtime:
         self.counts_i32 = layout.counts_tensor(idx.device).contiguous()
         self.workspace_budget = workspace_budget
         self.backend = backend  # optional CUDA backend (kernels/cuda_ops.py)
+        self.sg = None  # input-supergroup execution metadata (supergroups.SgExec), if any
         self.last_info: Dict = {}
+        self.det = False  # resolved reduction of the current call (resolve_reduction)
+
+    def resolve_reduction(self, B: int) -> bool:
+        """Resolve PhysicalPlan.reduction (and the global PyTorch deterministic setting) for this
+        call; sets self.det.  An unsupported deterministic request raises (warn_only: warns and
+        runs fast); the decision is recorded in last_info["reduction"]."""
+        mode, why, strict = resolve_reduction(self.plan)
+        if mode == "deterministic":
+            if self.backend is None:
+                reason = "needs the CUDA backend (the Triton kernels reduce with FP32 atomics)"
+            else:
+                self.det = True  # det_reason resolves the deterministic dX configuration
+                try:
+                    reason = self.backend.det_reason(self, B)
+                finally:
+                    self.det = False
+            if reason:
+                msg = f"reduction='deterministic' ({why}) is unsupported for this layer: {reason}"
+                if strict:
+                    raise ValueError(msg)
+                import warnings
+
+                warnings.warn(msg + "; running reduction='fast'", stacklevel=4)
+                mode, why = "fast", why + f"; unsupported ({reason}) -> fast (warn_only)"
+        self.det = mode == "deterministic"
+        self.last_info["reduction"] = {"mode": mode, "reason": why}
+        return self.det
 
     # ---------------------------------------------------------------- forward
     def forward(self, x: torch.Tensor, w, b, track_ids: bool) -> Dict[str, torch.Tensor]:
         """Return merged statistics: 'pre' [B, U] and operator extras."""
         B = x.shape[0]
         lv = self.level
+        self.resolve_reduction(B)
         track_ids = track_ids and lv.type in ("max", "topk_mean")
         if self.backend is not None and self.backend.supports_forward(self, track_ids):
             out = self.backend.forward(self, x, w, b, track_ids)
@@ -110,6 +139,7 @@ class Level1Runtime:
         B, D = x.shape
         info = self.last_info
         info["policy"] = policy
+        self.resolve_reduction(B)
         # recompute statistics that were not saved
         need = {
             "max": "winner",
@@ -257,7 +287,8 @@ class SparsePoolFunction(torch.autograd.Function):
         dx = rt.backward(xc, wc, bc, g_pre.contiguous(), saved, ctx.policy, dw_buf, db_buf, recomputed)
         gw = None if use_main else dw_buf.to(w.dtype)
         gb = None if use_main else db_buf.to(b.dtype)
-        return dx.to(x.dtype), gw, gb, None, None, None
+        # contiguous: the grouped dX is a transposed [D, B] view (one fused transpose + cast)
+        return dx.to(x.dtype, memory_format=torch.contiguous_format), gw, gb, None, None, None
 
 
 class SemanticPoolFunction(torch.autograd.Function):

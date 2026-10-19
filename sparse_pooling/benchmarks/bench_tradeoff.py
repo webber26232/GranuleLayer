@@ -64,7 +64,10 @@ def main():
         lay = SparsePoolingLayer(1024, args.hidden, 1024, shared_neurons=args.C, pooling=pooling, device="cuda",
                                  checkpoint_policy=pol_b)
         # FP32 tensor holding BF16-exact values: kernels see the same BF16 operands,
-        # and the returned gradients are not rounded to BF16 (error is then measurable)
+        # and the returned gradients are not rounded to BF16 (error is then measurable).
+        # Seeded per case: for Max/Top-K/ReLU an FP32-vs-FP64 near-tie flips a winner and
+        # moves the error from ~1e-7 to ~1e-4, so unseeded inputs make the column noisy.
+        torch.manual_seed(0)
         x = torch.randn(args.batch, 1024, device="cuda").bfloat16().float().requires_grad_(True)
         dy = torch.randn(args.batch, 1024, device="cuda")
         # FP64 reference gradient for numerical error

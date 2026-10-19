@@ -40,6 +40,14 @@ def _adamw_kernel(P, G, M, V, MASTER, n, lr, beta1, beta2, eps, wd, bc1, bc2, se
     v = beta2 * v + (1.0 - beta2) * g * g
     upd = (m / bc1) / (tl.sqrt(v / bc2) + eps)
     p = p * (1.0 - lr * wd) - lr * upd
+    # Every buffer is updated in place, and Triton (3.3) gives a load and the store of the same
+    # element to different threads: G and MASTER (FP32) are loaded in the 8-elements-per-thread
+    # layout of the BF16 math but stored in a 4-per-thread layout (TTGIR #blocked1 vs #blocked).
+    # Without this barrier a thread could zero G[i] (or overwrite MASTER[i]) before the thread
+    # loading it had read it, which dropped that step's gradient of a few elements
+    # nondeterministically (results/SCALE_DISPATCH_FUSED_BACKWARD.md section 3).  All loads of
+    # the program precede all of its stores; programs touch disjoint elements.
+    tl.debug_barrier()
     tl.store(M + offs, m.to(M.dtype.element_ty), mask=mask)
     tl.store(V + offs, v.to(V.dtype.element_ty), mask=mask)
     tl.store(G + offs, tl.zeros_like(g), mask=mask)  # fused zero_grad

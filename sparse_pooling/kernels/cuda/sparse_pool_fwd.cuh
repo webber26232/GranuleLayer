@@ -14,6 +14,12 @@
 #pragma once
 #include "common.cuh"
 
+// SP_ABLATE_FWD 1 (benchmarks only, WRONG results): every warp re-loads its first
+// work unit, so parameter streaming becomes cache hits (attribution of param traffic)
+#ifndef SP_ABLATE_FWD
+#define SP_ABLATE_FWD 0
+#endif
+
 struct FwdArgs {
   const bf16* X;
   long long sxf, sxb;  // element (b, f) at X[f * sxf + b * sxb]
@@ -342,7 +348,8 @@ __global__ void __launch_bounds__(NW * 32) fwd_mma_kernel(FwdArgs a) {
         const int uu = u0 + q * NW;
         if (uu < nu_full) {
           Unit<C> cur = ring[q];
-          if (uu + QPD * NW < nu_full) load_unit<C>(ring[q], a, ubase + uu + QPD * NW, lane);
+          if (uu + QPD * NW < nu_full)
+            load_unit<C>(ring[q], a, ubase + (SP_ABLATE_FWD == 1 ? warp + q * NW : uu + QPD * NW), lane);
 #pragma unroll
           for (int bu = 0; bu < UB; bu++) {
             BlockRegs<C> blk;
