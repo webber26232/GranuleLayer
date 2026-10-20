@@ -6,7 +6,7 @@ must be bitwise identical to it; both are also checked against the reference."""
 import pytest
 import torch
 
-from conftest import make_layer, rel_err, requires_cuda_backend, run_both
+from conftest import make_layer, rel_err, requires_cuda_backend, rtx3090_policy, run_both
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.backends.profiles import rtx3090
 from sparse_pooling.kernels import cuda_ops
@@ -167,6 +167,7 @@ def test_indexed_training_trajectory_matches_full():
 @pytest.mark.parametrize("pooling,cfg", [("mean", 3), ({"type": "logmeanexp", "temperature": 0.5}, 3),
                                          ({"type": "softmax_weighted", "beta": 1.0}, 1),
                                          ({"type": "power_mean", "p": 2}, 1)], ids=str)
+@rtx3090_policy
 def test_default_plan_uses_indexed_staging(pooling, cfg):
     lay, w, b = make_layer(1024, 20000, 8, 64, pooling, "auto", "cuda", plan=PhysicalPlan(block_m=32))
     r = run_both(lay, w, b, 40, 1024)
@@ -192,6 +193,7 @@ def test_dx_warp_counts_against_reference(pooling, C, warps):
         assert rel_err(a, e) < 2e-5, k
 
 
+@rtx3090_policy
 @requires_cuda_backend
 def test_default_dx_warps():
     # H = 20000 over 8 groups: 2500 neurons -> 40 work units per unit at C = 64

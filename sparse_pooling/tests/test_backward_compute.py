@@ -5,7 +5,7 @@ dX up to the (already non-deterministic) order of its global FP32 atomics."""
 import pytest
 import torch
 
-from conftest import make_layer, rel_err, requires_cuda_backend, run_both
+from conftest import active_profile, make_layer, rel_err, requires_cuda_backend, rtx3090_policy, run_both
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.kernels.cuda_ops import _epilogue
 from test_dw_indexed import SMOOTH, _grads, _inputs
@@ -51,8 +51,11 @@ def test_variant_matches_baseline(variant, pooling, precision, D, H, G, B, C):
     kw = dict(VARIANTS[variant], grad_precision=precision)
     info = _compare(lay, x, dy, dict(BASE, grad_precision=precision), kw)
     lv = lay.cfg.levels[0]
-    want_dx = _epilogue(kw["cuda_dx_epilogue"], lv, precision, "dx")
-    want_dw = _epilogue(kw["cuda_dw_epilogue"], lv, precision, "dw") if C == 64 else "generic"
+    prof = active_profile()
+    want_dx = _epilogue(kw["cuda_dx_epilogue"], lv, precision, "dx", prof)
+    # the generic C = 64 dW has epilogue variants only with indexed staging (a profile choice)
+    want_dw = (_epilogue(kw["cuda_dw_epilogue"], lv, precision, "dw", prof)
+               if C == 64 and prof.dw_staging() == "indexed" else "generic")
     assert (info["dx_epilogue"], info["dw_epilogue"]) == (want_dx, want_dw)
     # which operators actually get a specialised epilogue
     special = {"mean": True, "logmeanexp": lv.activation in ("relu", "identity"),
@@ -166,6 +169,7 @@ def test_explicit_indexed_fallback_is_reported():
     assert "dw_staging_fallback" not in lay.last_info
 
 
+@rtx3090_policy
 @requires_cuda_backend
 @pytest.mark.parametrize("H,want", [(1000 * 8, 16), (2048 * 8, 32), (1792 * 8, 16), (1984 * 8, 32)])  # packed: blocks rounded up to 4
 def test_dx_warps_follow_work_units(H, want):

@@ -21,7 +21,7 @@ import warnings
 import pytest
 import torch
 
-from conftest import rel_err, requires_cuda_backend
+from conftest import active_profile_name, rel_err, requires_cuda_backend
 from sparse_pooling import PhysicalPlan, SparsePoolingLayer
 from sparse_pooling.kernels import cuda_ops
 from sparse_pooling.supergroups import chunk_table
@@ -145,7 +145,9 @@ def test_workspace_cap_and_poison(cap):
     ws = r1[4]["grouped_dx"]["reduction"]
     assert ws["workspace_bytes"] <= cap
     if cap < (1 << 24):
-        assert ws["windows"] > 1 and r1[4]["grouped_fwd"]["reduction"]["windows"] > 1
+        assert ws["windows"] > 1
+        if active_profile_name() == "rtx3090":  # forward windows depend on the profile's tiles
+            assert r1[4]["grouped_fwd"]["reduction"]["windows"] > 1
 
 
 @requires_cuda_backend
@@ -257,7 +259,10 @@ def test_api_resolution():
         torch.use_deterministic_algorithms(True)
         info = run(lay, x, dy)[4]
         assert info["reduction"]["mode"] == "deterministic" and "torch" in info["reduction"]["reason"]
-        assert info["grouped_dx"]["plan"] == "private_t32"
+        # never the unordered shared-CAS plan; private_t32 is the RTX 3090 profile's deterministic choice
+        assert not info["grouped_dx"]["plan"].startswith("shared")
+        if active_profile_name() == "rtx3090":
+            assert info["grouped_dx"]["plan"] == "private_t32"
         lay.plan = PhysicalPlan(reduction="fast")
         with pytest.raises(RuntimeError, match="use_deterministic_algorithms"):
             run(lay, x, dy)

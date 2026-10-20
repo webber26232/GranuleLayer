@@ -44,7 +44,8 @@ def test_compact_bitwise(D, H, G, S, R, B, precision, cfg):
     lay.plan = plan("compact", precision, cuda_grouped_dw_cfg=cfg, reduction="deterministic")
     y1, dx1, dw1, db1, i1 = run(lay, x, dy)
     assert i0["grouped_dw"]["projection"] == "padded" and i1["grouped_dw"]["projection"] == "compact"
-    assert i1["grouped_dw"]["kernel"].endswith(", 1, 1>") and i0["grouped_dw"]["kernel"].endswith(", 1, 0>")
+    # last template argument: projection (compact implies the fast epilogue; padded follows the profile)
+    assert i1["grouped_dw"]["kernel"].endswith(", 1, 1>") and i0["grouped_dw"]["kernel"].endswith(", 0>")
     assert torch.equal(ibits(dw1), ibits(dw0)) and torch.equal(ibits(db1), ibits(db0))
     assert torch.equal(ibits(y1), ibits(y0)) and torch.equal(ibits(dx1), ibits(dx0))  # deterministic mode: all bits
 

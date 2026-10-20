@@ -4,7 +4,7 @@ explicit fields, profile / precision scoping, last_info, and numerical equivalen
 import pytest
 import torch
 
-from conftest import rel_err, requires_cuda_backend
+from conftest import active_profile_name, rel_err, requires_cuda_backend, rtx3090_policy
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.config import DX_PLANS
 from sparse_pooling.backends.profiles import rtx3090
@@ -67,6 +67,7 @@ def test_plans_agree_and_dw_is_unchanged():
     assert rel_err(dxa, dxb) < 1e-6 and rel_err(ya, yb) < 1e-6  # grouped forward: FP32 atomics
 
 
+@rtx3090_policy
 @requires_cuda_backend
 def test_auto_rule_selects_and_reports(monkeypatch):
     monkeypatch.setattr(rtx3090, "SG_AUTO_DX_PLAN", rule())
@@ -105,7 +106,8 @@ def test_explicit_fields_take_precedence(monkeypatch, field, value):
     _, _, _, _, info = run(lay, x, dy)
     plan, cfg, why = ran_plan(info)
     assert plan == "tiles" and "explicit grouped dX fields" in why
-    assert cfg[0] == 64 and cfg[2] == 8  # SG_AUTO tiles (+ the explicit field), never private_t32
+    if active_profile_name() == "rtx3090":
+        assert cfg[0] == 64 and cfg[2] == 8  # SG_AUTO tiles (+ the explicit field), never private_t32
 
 
 @requires_cuda_backend
@@ -143,6 +145,7 @@ def test_rule_descriptor_is_cached_host_side():
 @requires_cuda_backend
 @pytest.mark.parametrize("precision,H,want", [("split", 200_000, "tiles"), ("split", 3_000_000, "private_t32"),
                                               ("bf16", 200_000, "shared_t64"), ("bf16", 2_000_000, "private_t32")])
+@rtx3090_policy
 def test_measured_rule(precision, H, want):
     """The shipped rule: units per bucket of a G = 64, S = 64, R = 16 graph (Q = 256): H / 32 / (64 * 256)."""
     lay = s64_layer(PhysicalPlan(cuda_input_supergroup_backend="grouped", grad_precision=precision), H=H)

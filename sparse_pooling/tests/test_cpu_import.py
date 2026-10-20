@@ -32,6 +32,7 @@ print("ok", st["generation_seconds"] >= 0)
 def test_cpu_only_import_without_nvcc(tmp_path):
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="", NVCC=str(tmp_path / "no-nvcc"), PATH="/usr/bin:/bin",
                SPARSE_POOL_CACHE_DIR=str(tmp_path / "cache"), PYTHONPATH=str(ROOT))
+    env.pop("SPARSE_POOL_PROFILE", None)  # the script checks automatic matching
     r = subprocess.run([sys.executable, "-c", SCRIPT], capture_output=True, text=True, env=env, cwd=tmp_path)
     assert r.returncode == 0 and "ok" in r.stdout, r.stdout + r.stderr
     assert not (tmp_path / "cache").exists()  # nothing was built

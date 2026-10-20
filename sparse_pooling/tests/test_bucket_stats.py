@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from conftest import requires_cuda_backend
+from conftest import requires_cuda_backend, rtx3090_policy
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.layout import SparseLayout, init_parameters
 from sparse_pooling.supergroups import (ConnectivityPlan, SgExec, bucket_statistics, bucket_table, chunk_statistics,
@@ -147,6 +147,7 @@ def fake_rt(buckets, Q=8, G=4, precision="split", B=8192):
                            level=SimpleNamespace(activation="relu"), idx=torch.zeros(1, device="cuda"), det=False), B
 
 
+@rtx3090_policy
 @requires_cuda_backend
 def test_dispatch_reads_the_nonempty_mean():
     """Two buckets of 5 units per output over Q = 8: nonempty mean 5.0 (>= 4: private_t32)

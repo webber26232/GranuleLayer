@@ -13,7 +13,7 @@ import math
 import pytest
 import torch
 
-from conftest import rel_err, requires_cuda_backend
+from conftest import rel_err, requires_cuda_backend, rtx3090_policy
 from sparse_pooling import PhysicalPlan, SparsePoolingLayer
 from sparse_pooling.layout import SparseLayout
 from sparse_pooling.optim import FusedAdamW
@@ -339,6 +339,7 @@ def test_per_phase_selection(phases, C):
     assert rel_err(dxs, dxg) < 1e-6
 
 
+@rtx3090_policy
 @requires_cuda_backend
 @pytest.mark.parametrize("C", [8, 64])
 def test_auto_selection_reports_kernels(C):

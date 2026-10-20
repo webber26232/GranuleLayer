@@ -28,6 +28,11 @@ TURING = synthetic("synthetic sm_75", (7, 5), sm_count=40, smem_per_block_optin=
 SMALL_SMEM = synthetic("synthetic sm_80, 48 KiB opt-in", (8, 0), smem_per_block_optin=48 * 1024)
 
 
+@pytest.fixture(autouse=True)
+def _no_profile_env(monkeypatch):
+    monkeypatch.delenv("SPARSE_POOL_PROFILE", raising=False)  # synthetic tests choose profiles explicitly
+
+
 def _rows():
     return json.load(gzip.open(FIXTURE, "rt"))["rows"]
 
@@ -183,3 +188,48 @@ def test_resolved_plan_is_immutable_and_cached():
         rp.batch = 1
     assert isinstance(rp.dx, types.MappingProxyType) and rp.as_dict()["dx"]["scatter"]
 
+
+def test_documented_profile_template_is_usable_and_unregistered():
+    """docs/adding_a_gpu.md's example profile runs through the resolver as written (not registered,
+    so it can never be selected automatically)."""
+    import re
+
+    from sparse_pooling.backends.profiles import ProfileSelection, registered
+
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "adding_a_gpu.md").read_text()
+    code = re.search(r"## 4\..*?```python\n(.*?)```", doc, re.S).group(1)
+    ns: dict = {}
+    exec(code, ns)
+    prof = ns["ExampleProfile"]()
+    assert prof.name not in registered()
+    caps = synthetic("NVIDIA Example Board", (8, 9), sm_count=128)
+    assert prof.matches(caps)[0] and not prof.matches(RTX3090)[0]
+    sel = ProfileSelection(prof, prof.name, True, "test", False, False)
+    rp = Resolver(caps, sel).resolve(plan_matrix.make_rt(_case(), None), 8192, "bwd")
+    assert rp.profile == "example_board" and rp.dx["kernel"] == "grouped"
+    assert select(caps).profile.name == "generic_cuda"  # the template does not change auto selection
+
+
+def test_explicit_legal_requests_beat_the_profile():
+    """Precedence 3 > 4: a legal explicit request is honoured under any profile, and an explicit
+    option that needs a particular (bitwise-equivalent) epilogue fixes the automatic epilogue."""
+    # indexed k_dw staging at C = 64: generic prefers full, but an explicit request is legal there
+    case = _case(C=64, S=0, pool="mean", plan=dict(cuda_dw_staging="indexed"))
+    rt = plan_matrix.make_rt(case, None)
+    for prof in ("generic_cuda", "rtx3090"):
+        r = Resolver(RTX3090, select(RTX3090, prof))
+        assert r.dw_staging(rt.plan, rt.layout, 1) == ("indexed", "")
+    r = Resolver(RTX3090, select(RTX3090, "generic_cuda"))
+    rt = plan_matrix.make_rt(_case(C=64, S=0, pool="mean"), None)
+    assert r.dw_staging(rt.plan, rt.layout, 1) == ("full", "")  # auto: the profile's choice
+    # compact dW projection / fused backward under the generic profile (auto epilogues = generic)
+    rp = _rp(RTX3090, _case(plan=dict(cuda_grouped_dw_projection="compact", cuda_input_supergroup_backend="grouped")),
+             profile="generic_cuda")
+    assert rp.dw["projection"] == "compact" and rp.dw["epilogue"] == "fast"
+    rp = _rp(RTX3090, _case(S=16, plan=dict(cuda_grouped_backward="fused", cuda_input_supergroup_backend="grouped")),
+             profile="generic_cuda")
+    assert rp.bwd["organization"] == "fused" and (rp.dx["epilogue"], rp.dw["epilogue"]) == ("mask", "fast")
+    # an explicit generic epilogue still conflicts with compact (raises, never silently changed)
+    with pytest.raises(UnsupportedError):
+        _rp(RTX3090, _case(plan=dict(cuda_grouped_dw_projection="compact", cuda_dw_epilogue="generic",
+                                     cuda_input_supergroup_backend="grouped")))

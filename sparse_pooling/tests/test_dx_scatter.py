@@ -17,7 +17,7 @@ import itertools
 import pytest
 import torch
 
-from conftest import rel_err, requires_cuda_backend
+from conftest import active_profile_name, rel_err, requires_cuda_backend
 from sparse_pooling import PhysicalPlan
 from sparse_pooling.kernels import cuda_ops
 from test_input_supergroups import inputs, reference, run, sg_layer
@@ -320,7 +320,8 @@ def test_auto_scatter(C, S, R, precision, act):
     if info["dx_kernel"] != "grouped":
         return
     gd = info["grouped_dx"]
-    want = AUTO_EXPECTED.get((C, S, precision, act), "baseline")
+    measured = AUTO_EXPECTED if active_profile_name() == "rtx3090" else {}  # other profiles: baseline
+    want = measured.get((C, S, precision, act), "baseline")
     assert gd["scatter"] == want and gd["scatter_fallback"] == ""
     assert gd["kernel"].startswith("sg_dx_kernel" if want == "baseline" else "sgx_dx_kernel")
     lay.plan = PhysicalPlan(cuda_input_supergroup_backend="auto", grad_precision=precision,

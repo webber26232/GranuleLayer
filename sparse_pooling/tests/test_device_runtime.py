@@ -5,7 +5,7 @@ import ctypes
 import pytest
 import torch
 
-from conftest import rel_err, requires_cuda_backend
+from conftest import rel_err, requires_cuda_backend, rtx3090_policy
 from sparse_pooling import PhysicalPlan, SparsePoolingLayer
 from sparse_pooling.supergroups import ConnectivityPlan
 from test_input_supergroups import inputs, reference, run, sg_layer
@@ -80,6 +80,7 @@ def test_explain_and_execution_metadata():
     assert info["execution"]["build"]["abi"] == 3
 
 
+@rtx3090_policy
 @requires_cuda_backend
 def test_rtx3090_profile_reported_only_on_the_measured_board():
     from sparse_pooling.backends.capabilities import query
