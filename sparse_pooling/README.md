@@ -1,10 +1,14 @@
-# 100M-neuron sparse projection with fused (hierarchical) pooling and recompute backward — RTX 3090
+# 100M-neuron sparse projection with fused (hierarchical) pooling and recompute backward
 
 A PyTorch layer that maps `x [B, 1024]` through **H = 100,000,000** logical neurons
 (fan-in 8, every neuron evaluated every step) and pools them to `y [B, 1024]`, without
 ever materialising the `[B, H]` hidden tensor (1.6 TB in BF16 at B = 8192) — neither in
 forward nor in backward.  Neuron activations live only in registers of the kernel that
 consumes them; backward recomputes them.
+
+GPU support: the native CUDA kernels need an NVIDIA GPU with sm_80 or newer. They are tuned and
+hardware-validated on an **RTX 3090**; every other GPU runs a conservative capability-based policy whose
+performance is unmeasured (support matrix: [docs/gpu_portability.md](../docs/gpu_portability.md)).
 
 Everything in this document was measured on the machine it was developed on:
 **RTX 3090 (GA102, sm_86, 82 SMs, 5 MB L2, 24 GiB, 370 W limit)** — results were re-measured
@@ -44,20 +48,46 @@ print(layer.last_info)                      # backends, policy actually used, wo
 Single level: `pooling="max"` (or `"topk_mean"`, `"mean"`, `"logmeanexp"`, `"power_mean"`,
 `"softmax_weighted"`, or a dict with parameters).  Input `[batch, seq, 1024]` is flattened.
 
-Requirements: CUDA GPU (sm_80+; tuned for sm_86), PyTorch ≥ 2.3, Triton ≥ 3.0, and `nvcc`
-for the native kernels (compiled on first use, ~2 min, cached in
-`kernels/cuda/build/`; set `NVCC=` if not on `PATH`).  Without `nvcc` everything runs on the
-Triton path (`backend="triton"`), which is functionally complete but slower.
+Requirements: an NVIDIA GPU with compute capability ≥ 8.0, PyTorch ≥ 2.3, Triton ≥ 3.0, and a CUDA
+toolkit whose `nvcc` can target the GPU (12.1 covers sm_80 – sm_90) and whose CUDA version the driver
+supports. The native library is compiled for the GPU's own target on first use (~3–4 min with 6 CPU
+cores) and cached under `~/.cache/granulelayer/cuda` (`SPARSE_POOL_CACHE_DIR`; `NVCC=` selects the
+compiler). It is loaded through ctypes, so no PyTorch extension build is needed. Importing the package
+never compiles or touches the GPU. Without `nvcc`, or on a GPU older than sm_80, `backend="auto"` runs
+the Triton path (functionally complete but slower) and records why in `last_info["backend_fallback"]`.
+Tested combination: driver 550.67, nvcc 12.1.66, PyTorch 2.7.0+cu128, Triton 3.3.0.
+
+### Execution policy: inspecting, forcing, deterministic
+
+```python
+info = layer.explain(8192)        # what would run: device, build target, profile, per-phase kernels
+info["profile"]                   # {'name': 'rtx3090', 'status': 'hardware-validated', ...}
+layer.last_info["execution"]      # the same record for the last call that actually ran
+
+# debugging / other GPUs: the conservative capability-based policy (legality is always checked)
+layer.plan = PhysicalPlan(tuning_profile="generic_cuda")      # or SPARSE_POOL_PROFILE=generic_cuda
+# bitwise-repeatable training (input-supergroup layers; see "Deterministic execution" below)
+layer.plan = PhysicalPlan(reduction="deterministic")          # or torch.use_deterministic_algorithms(True)
+```
+
+Adding a profile for a new GPU: [docs/adding_a_gpu.md](../docs/adding_a_gpu.md). Module responsibilities:
+[docs/architecture.md](../docs/architecture.md). Migration from the experiment branches:
+[docs/migration.md](../docs/migration.md).
 
 ### Running the full 100M configuration
 
 ```bash
-# tests (≈ 1 min, 377 tests)
+# tests (≈ 7 min on the RTX 3090 after the first build; CPU-only host tests run without a GPU)
 cd sparse_pooling/tests && python -m pytest -q
 # one full-scale training-step benchmark (≈ 1–2 min per case)
 python sparse_pooling/benchmarks/bench_end_to_end.py --hidden 100000000 --batch 8192 --C 8 --suite final --optimizer
 # everything that produced results/ (≈ 3 h)
 bash sparse_pooling/benchmarks/run_all.sh python && python sparse_pooling/benchmarks/make_report.py
+# deterministic-training repeatability (independent processes; exits nonzero on any failure)
+bash sparse_pooling/benchmarks/run_det_training.sh python /scratch/rec small /scratch/out
+# Compute Sanitizer over the native kernels (parallel runs: --jobs N, default CPUs - 1; per-run logs and
+# summary.tsv in --out DIR; exits nonzero if any run fails, see the header of the script)
+bash sparse_pooling/benchmarks/run_sanitizer.sh --out /scratch/sanitizer python
 ```
 
 Memory at H = 100M, B = 8192 (C = 8): BF16 weights 1.6 GB + bias/indices 0.4 GB, FP32
@@ -75,20 +105,28 @@ exceed 2 GiB (`autograd.CHECKPOINT_BUDGET`) the layer recomputes winners in toke
 sparse_pooling/
   config.py            LevelSpec / PoolingConfig (semantic hierarchy) / PhysicalPlan (execution only)
   layout.py            group partition, padding, global neuron ids, init, fragment-packed storage
-  layer.py             SparsePoolingLayer (nn.Module)
+  layer.py             SparsePoolingLayer (nn.Module), explain()
   autograd.py          Level1Runtime + SparsePoolFunction / SemanticPoolFunction, checkpoint policies
+  supergroups.py       input-supergroup connectivity: generator, validator, bucket statistics, work lists
   optim.py             FusedAdamW (reads/zeroes FP32 main_grad, BF16|FP32 moments, master weights or SR)
   memory.py            analytic memory model
+  backends/
+    capabilities.py    device / toolchain facts, ISA feature table (no tuning)
+    profiles/          rtx3090.py (measured defaults + provenance), generic_cuda.py (conservative)
+    dispatch.py        requested PhysicalPlan -> ResolvedPlan (legality, precedence, reasons)
+    cuda/              variants.py (kernel family), build.py (bundles, cache), runtime.py (ctypes, launches)
   kernels/
     triton_fused.py    Triton: fused forward (all operators, Mode A SIMT + Mode B tl.dot),
                        generic recompute backward, sparse winner-event backward
     ops.py             launches, state merge/finalize, backward coefficients, workspace budget
-    cuda_ops.py        ctypes bridge + incremental nvcc build of the native kernels
-    cuda/              native sm_86 kernels (m16n8k8 forward, Top-K, dX and dW recompute backward)
+    cuda_ops.py        compatibility facade of the native backend
+    cuda/              native kernels (sm_80+): forward, Top-K, dX / dW recompute backward,
+                       input-supergroup kernels, deterministic reduction; experimental/, diagnostics/
   reference/pytorch_reference.py   materialising reference (small H), tie rules identical
-  tests/               projection, operators, hierarchy, backward, recomputation, precision, optimizer
-  benchmarks/          end-to-end, sweep, trade-off, memory, SASS inspection, sanitizer, ncu script
-  results/             JSON + logs + TABLES.md
+  tests/               semantics, kernels, dispatch / profiles / build (CPU), harness, codegen
+  benchmarks/          maintained tools: timing, repeatability, sanitizer, SASS, decision matrix
+  results/             JSON + logs + TABLES.md of the first implementation's tables (re-measured)
+docs/                  architecture, GPU portability, adding a GPU, migration, evidence index, validation
 ```
 
 ## Design
@@ -177,13 +215,13 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
     per-warp `cp.async` ring instead of all 1024 features (192 vs 768 GiB of logical staging
     at H = 100M), with warp-level instead of CTA-level synchronisation; results are bitwise
     identical to `k_dw` and 1.4× faster (`PhysicalPlan.cuda_dw_staging = "full"` restores
-    the original kernel).  Details: `results/MEMORY_TRAFFIC_OPTIMIZATION.md`.
+    the original kernel).  Details: [MEMORY_TRAFFIC_OPTIMIZATION.md](https://github.com/webber26232/GranuleLayer/blob/2b9a84d66c239934fd58ec45d7736804c78ccba2/sparse_pooling/results/MEMORY_TRAFFIC_OPTIMIZATION.md).
   * dZ epilogues (`PhysicalPlan.cuda_{dx,dw}_epilogue`, default `"auto"`): for Mean, LME and
     integer-p power mean the token-validity select and the multiply by act'(z) are dropped; for
     Mean, dZ is one of two values per token, so its BF16 hi/lo split is computed per token and
     each element needs only a bit mask.  Gradients are bitwise identical to the generic path
     (FTZ and non-finite coefficients included, via a device-side fallback flag).  Details:
-    `results/BACKWARD_COMPUTE_OPTIMIZATION.md`.
+    [BACKWARD_COMPUTE_OPTIMIZATION.md](https://github.com/webber26232/GranuleLayer/blob/2b9a84d66c239934fd58ec45d7736804c78ccba2/sparse_pooling/results/BACKWARD_COMPUTE_OPTIMIZATION.md).
 * dZ enters the tensor-core products as hi + lo BF16 pair (`grad_precision="split"`,
   ~16-bit mantissa, gradients within ~3e-6 of FP32 autograd) or a single BF16
   (`"bf16"`, the usual mixed-precision semantics, ~1.5e-3).  Accumulation is FP32 always.
@@ -207,7 +245,7 @@ LogMeanExp recovers its normaliser from the saved output; power mean needs only 
 
 ## Verification
 
-* `tests/` — 377 tests: layout/partition (exactly `range(H)`), pack/unpack, raw projection,
+* `tests/` — 2,800+ tests: layout/partition (exactly `range(H)`), pack/unpack, raw projection,
   every operator × both modes × C × batch sizes × splits × backends vs the reference, winner and
   Top-K index agreement, deterministic ties, state merges, the hierarchy matrix (physical ≡ flat,
   semantic ≡ explicit reference and ≠ flat), gradients of x / W / b / transform parameters vs
@@ -235,13 +273,13 @@ restricts every index record to one of Q = R·D/S seeded input sets (`supergroup
 validator, compact metadata saved in the state dict).  The default stays unrestricted.  With
 `PhysicalPlan(cuda_input_supergroup_backend="auto")` the measured grouped Mean kernels run where they
 are faster (H = 100M, M = 8192, C = 8, S = 16: step 4.85 s → 2.72 s; C = 64: 1.76 s → 1.70 s); see
-`results/INPUT_SUPERGROUP_OPTIMIZATION.md`.
+[INPUT_SUPERGROUP_OPTIMIZATION.md](https://github.com/webber26232/GranuleLayer/blob/2b9a84d66c239934fd58ec45d7736804c78ccba2/sparse_pooling/results/INPUT_SUPERGROUP_OPTIMIZATION.md).
 
 The grouped C = 8 dX local accumulation has conflict-reduced slab layouts
 (`PhysicalPlan.cuda_grouped_dx_scatter`; `auto` selects the measured variant, the baseline elsewhere):
 at H = 100M, M = 8192 the C = 8 step drops another 10–11 % (S = 16: 2.80 s → 2.51 s, S = 32:
 3.10 s → 2.76 s, same-session A/B) with bitwise-identical per-CTA arithmetic; see
-`results/C8_DX_SCATTER_OPTIMIZATION.md`.  Benchmarks restore the complete training state
+[C8_DX_SCATTER_OPTIMIZATION.md](https://github.com/webber26232/GranuleLayer/blob/2b9a84d66c239934fd58ec45d7736804c78ccba2/sparse_pooling/results/C8_DX_SCATTER_OPTIMIZATION.md).  Benchmarks restore the complete training state
 (`benchmarks/train_state.py`).
 
 ## Deterministic execution (`PhysicalPlan.reduction`)
@@ -302,5 +340,5 @@ ReLU mask with `movmatrix`.  It is bitwise equal to the padded projection but 3-
 (8 % with BF16 gradients) on the RTX 3090, so it is explicit / experimental;
 `last_info["grouped_dw"]["projection"]` records the choice.
 
-See `results/DETERMINISM_METRICS_DW_PROJECTION.md` for the ownership map, overheads and the
+See [DETERMINISM_METRICS_DW_PROJECTION.md](https://github.com/webber26232/GranuleLayer/blob/2b9a84d66c239934fd58ec45d7736804c78ccba2/sparse_pooling/results/DETERMINISM_METRICS_DW_PROJECTION.md) for the ownership map, overheads and the
 production H = 100M repeatability evidence.

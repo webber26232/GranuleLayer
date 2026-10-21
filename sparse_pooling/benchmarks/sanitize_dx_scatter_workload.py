@@ -42,3 +42,5 @@ for S, R, H, T, NW, WG, prec, act, B, nonfinite in CASES:
         (y.float() * g).sum().backward()
         torch.cuda.synchronize()
         print("ok", S, R, T, NW, wg, sc, prec, act, B, nonfinite, lay.last_info["grouped_dx"]["kernel"], flush=True)
+torch.cuda.synchronize()
+print("WORKLOAD COMPLETE dx_scatter", flush=True)  # run_sanitizer.sh requires this line

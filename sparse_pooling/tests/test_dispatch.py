@@ -233,3 +233,23 @@ def test_explicit_legal_requests_beat_the_profile():
     with pytest.raises(UnsupportedError):
         _rp(RTX3090, _case(plan=dict(cuda_grouped_dw_projection="compact", cuda_dw_epilogue="generic",
                                      cuda_input_supergroup_backend="grouped")))
+
+
+def test_documented_unknown_device_snippet_runs_as_written(capsys):
+    """docs/adding_a_gpu.md §5 (synthetic resource-constrained device) runs and prints what it says."""
+    import re
+
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "adding_a_gpu.md").read_text()
+    code = re.search(r"## 5\..*?```python\n(.*?)```", doc, re.S).group(1)
+    root = Path(__file__).resolve().parents[2]
+    cwd = Path.cwd()
+    try:
+        import os
+
+        os.chdir(root)  # the snippet's sys.path entry is relative to the repository root
+        exec(code, {})
+    finally:
+        os.chdir(cwd)
+    out = capsys.readouterr().out
+    assert "capability-eligible, hardware-unvalidated generic_cuda triton" in out
+    assert "k_dx slab of D = 1024 exceeds the device's shared memory" in out

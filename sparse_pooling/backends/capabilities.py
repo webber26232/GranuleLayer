@@ -147,8 +147,8 @@ class ToolchainInfo:
     nvcc: str
     version: str          # "12.1"
     version_text: str     # full `nvcc --version` output (part of the build identity)
-    real_archs: Tuple[str, ...]     # sm_XX targets the compiler can emit
-    virtual_archs: Tuple[str, ...]  # compute_XX
+    real_archs: Tuple[str, ...]     # sm_* targets the compiler can emit (exact tokens, incl. sm_90a)
+    virtual_archs: Tuple[str, ...]  # compute_* (recorded; no PTX target is ever selected from them)
     host_compiler: str    # `<host compiler> --version` first line (part of the build identity)
 
     def supports(self, arch: str) -> bool:
@@ -157,6 +157,20 @@ class ToolchainInfo:
 
 class ToolchainError(RuntimeError):
     pass
+
+
+# Complete compiler target tokens.  Plain sm_<major><minor> (the major may have several digits:
+# sm_100, sm_120) and the architecture-specific / family forms (sm_90a, sm_100f) are kept exactly as
+# printed; the build decides which of them it may use (backends/cuda/build.py).
+_GPU_CODE_RE = re.compile(r"sm_[1-9]\d*\d[af]?")
+_GPU_ARCH_RE = re.compile(r"compute_[1-9]\d*\d[af]?")
+
+
+def parse_gpu_list(text: str, kind: str = "sm") -> Tuple[str, ...]:
+    """Targets in ``nvcc --list-gpu-code`` (kind "sm") / ``--list-gpu-arch`` (kind "compute") output,
+    in order; whitespace-separated tokens that are not complete target names are ignored."""
+    pat = _GPU_CODE_RE if kind == "sm" else _GPU_ARCH_RE
+    return tuple(t for t in text.split() if pat.fullmatch(t))
 
 
 def find_nvcc() -> Optional[str]:
@@ -178,12 +192,11 @@ def _toolchain(nvcc: str) -> ToolchainInfo:
     m = re.search(r"release (\d+\.\d+)", text)
     version = m.group(1) if m else "unknown"
     try:
-        listed = run(nvcc, "--list-gpu-code").split()
-        real = tuple(a for a in listed if a.startswith("sm_"))
+        real = parse_gpu_list(run(nvcc, "--list-gpu-code"), "sm")
     except ToolchainError:
         real = ()
     try:
-        virt = tuple(run(nvcc, "--list-gpu-arch").split())
+        virt = parse_gpu_list(run(nvcc, "--list-gpu-arch"), "compute")
     except ToolchainError:
         virt = ()
     host = os.environ.get("NVCC_CCBIN") or os.environ.get("CUDAHOSTCXX") or shutil.which("g++") or ""

@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ..capabilities import DeviceCapabilities, ToolchainError, ToolchainInfo, toolchain
+from ..capabilities import NATIVE_FAMILY_FEATURES, DeviceCapabilities, ToolchainError, ToolchainInfo, toolchain
 
 SRC_DIR = Path(__file__).resolve().parents[2] / "kernels" / "cuda"
 BUILD_SCHEMA = "granule.cuda_build/3"
@@ -71,7 +71,13 @@ KIND_ID = {"production": 0, "development": 1, "ablation": 2}
 BASE_FLAGS = ("-O3", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC")
 ARCH_ENV, EXTRA_ENV, CACHE_ENV, JOBS_ENV = ("SPARSE_POOL_ARCH", "SPARSE_POOL_NVCC_EXTRA", "SPARSE_POOL_CACHE_DIR",
                                             "SPARSE_POOL_BUILD_JOBS")
-_ARCH_RE = re.compile(r"^sm_(\d)(\d+)$")
+# Plain SASS targets, matched as a complete token.  CUDA writes compute capability X.Y as "XY": the
+# minor is the LAST digit and the major everything before it (sm_86 = 8.6, sm_100 = 10.0, sm_121 = 12.1).
+_ARCH_RE = re.compile(r"sm_([1-9]\d*)(\d)")
+# Architecture-specific ("a") / family ("f") targets (sm_90a, sm_100a, sm_100f, ...): real compiler
+# targets with their own compatibility rules.  The kernels never use them, so they are refused
+# explicitly instead of being stripped to the plain target.
+_SUFFIXED_ARCH_RE = re.compile(r"sm_([1-9]\d*)(\d)[af]")
 
 
 class BuildError(RuntimeError):
@@ -80,11 +86,20 @@ class BuildError(RuntimeError):
 
 # --------------------------------------------------------------------------- targets
 def parse_arch(arch: str) -> Tuple[int, int]:
-    m = _ARCH_RE.match(arch)
+    """(major, minor) of a plain ``sm_<major><minor>`` target: sm_86 -> (8, 6), sm_100 -> (10, 0),
+    sm_120 -> (12, 0).  The whole string must match; anything else raises BuildError."""
+    m = _ARCH_RE.fullmatch(arch) if isinstance(arch, str) else None
     if not m:
-        raise BuildError(f"invalid CUDA target {arch!r} (expected sm_XY, e.g. sm_86; architecture-specific "
-                         "'a' / family 'f' targets are not used by these kernels)")
+        if isinstance(arch, str) and _SUFFIXED_ARCH_RE.fullmatch(arch):
+            raise BuildError(f"{arch!r} is an architecture-specific ('a') / family ('f') target; these kernels "
+                             f"are built only for plain sm_<major><minor> targets (e.g. {arch[:-1]})")
+        raise BuildError(f"invalid CUDA target {arch!r} (expected sm_<major><minor>, e.g. sm_86, sm_90, sm_120)")
     return int(m.group(1)), int(m.group(2))
+
+
+def arch_name(cc: Tuple[int, int]) -> str:
+    """Plain target of a compute capability: (8, 6) -> sm_86, (12, 0) -> sm_120."""
+    return f"sm_{cc[0]}{cc[1]}"
 
 
 def binary_compatible(target: Tuple[int, int], cc: Tuple[int, int]) -> bool:
@@ -103,27 +118,31 @@ def resolve_target(caps: DeviceCapabilities, tc: Optional[ToolchainInfo] = None,
         raise BuildError(f"no CUDA target for a {caps.backend} device")
     cc = tuple(caps.cc)
     if cc < MIN_ARCH:
-        raise BuildError(f"{caps.name} is sm_{cc[0]}{cc[1]}: the native kernels need sm_80+ (BF16 mma.sync, cp.async); "
+        raise BuildError(f"{caps.name} is {arch_name(cc)}: the native kernels need sm_80+ (BF16 mma.sync, cp.async); "
+                         "use backend='triton'")
+    miss = caps.missing(NATIVE_FAMILY_FEATURES)
+    if miss:  # a capability record without the kernel family's instructions never gets a target
+        raise BuildError(f"{caps.name} ({arch_name(cc)}) lacks {', '.join(miss)} required by the native kernels; "
                          "use backend='triton'")
     tc = tc or toolchain()
     override = override or os.environ.get(ARCH_ENV) or None
     if override:
         t = parse_arch(override)
         if not binary_compatible(t, cc):
-            raise BuildError(f"{ARCH_ENV}={override} cannot run on {caps.name} (sm_{cc[0]}{cc[1]}): a cubin runs only on "
+            raise BuildError(f"{ARCH_ENV}={override} cannot run on {caps.name} ({arch_name(cc)}): a cubin runs only on "
                              "the same major architecture with an equal or newer minor version")
         if t < MIN_ARCH:
             raise BuildError(f"{override}: the native kernels need sm_80+")
         if not tc.supports(override):
             raise BuildError(f"nvcc {tc.version} ({tc.nvcc}) cannot emit {override} (supported: {' '.join(tc.real_archs)})")
         return override, f"explicit {ARCH_ENV}={override}"
-    own = f"sm_{cc[0]}{cc[1]}"
+    own = arch_name(cc)
     if tc.supports(own):
         return own, f"device {caps.name} ({own})"
-    compat = sorted((parse_arch(a) for a in tc.real_archs if _ARCH_RE.match(a)
-                     and binary_compatible(parse_arch(a), cc) and parse_arch(a) >= MIN_ARCH), reverse=True)
+    plain = [parse_arch(a) for a in tc.real_archs if _ARCH_RE.fullmatch(a)]  # 'a' / 'f' targets never qualify
+    compat = sorted((t for t in plain if binary_compatible(t, cc) and t >= MIN_ARCH), reverse=True)
     if compat:
-        t = f"sm_{compat[0][0]}{compat[0][1]}"
+        t = arch_name(compat[0])
         return t, f"nvcc {tc.version} cannot emit {own}; using binary-compatible {t} (same major)"
     raise BuildError(f"nvcc {tc.version} ({tc.nvcc}) cannot target {caps.name} ({own}) and has no binary-compatible "
                      f"target (supported: {' '.join(tc.real_archs) or 'unknown'}); install a CUDA toolkit that "
@@ -202,6 +221,8 @@ class BuildSpec:
 def make_spec(bundle: str, target: str, tc: Optional[ToolchainInfo] = None) -> BuildSpec:
     if bundle not in BUNDLES:
         raise BuildError(f"unknown bundle {bundle!r}")
+    if parse_arch(target) < MIN_ARCH:  # complete-token check: a malformed target never gets a cache entry
+        raise BuildError(f"{target}: the native kernels need sm_80+")
     extra = extra_flags()
     for f in extra:
         if f.startswith(("-arch", "-gencode", "--gpu-architecture", "-code")):
@@ -299,7 +320,7 @@ def clear_cache(target: Optional[str] = None) -> Path:
 def main(argv=None):
     ap = argparse.ArgumentParser(description="GranuleLayer native CUDA build cache")
     ap.add_argument("--clean", action="store_true", help="remove the cache (all targets or --target)")
-    ap.add_argument("--target", help="sm_XY (default: the current device's)")
+    ap.add_argument("--target", help="sm_<major><minor>, e.g. sm_86 (default: the current device's)")
     ap.add_argument("--bundle", default="production", choices=sorted(BUNDLES))
     ap.add_argument("--build", action="store_true", help="build the bundle now")
     ap.add_argument("--verbose", action="store_true")

@@ -80,3 +80,5 @@ for C, dxe in ((8, "mask"), (8, "fast")):  # C = 8: only the dX epilogue applies
     lay(x).float().square().sum().backward()
     torch.cuda.synchronize()
     print("ok bwd C=8", dxe, lay.last_info.get("dx_epilogue"), flush=True)
+torch.cuda.synchronize()
+print("WORKLOAD COMPLETE generic", flush=True)  # run_sanitizer.sh requires this line

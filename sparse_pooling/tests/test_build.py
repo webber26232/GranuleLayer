@@ -161,3 +161,163 @@ def test_cli_info_runs_without_building(tmp_path):
                        capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[2])
     assert r.returncode == 0, r.stderr
     assert "absent" in r.stdout and not list(tmp_path.rglob("*.so"))
+
+
+# ------------------------------------------------------------------------------------------------
+# Target grammar with multi-digit majors (sm_100, sm_120, ...).  Resolver / parser tests on synthetic
+# devices and synthetic or fake toolkits: control flow only, never evidence that such hardware works.
+TC_BW = C.ToolchainInfo(nvcc="/opt/cuda-13/bin/nvcc", version="12.9", version_text="nvcc release 12.9, V12.9.86",
+                        real_archs=("sm_80", "sm_86", "sm_89", "sm_90", "sm_90a", "sm_100", "sm_100a", "sm_100f",
+                                    "sm_103", "sm_120", "sm_120a"),
+                        virtual_archs=("compute_80", "compute_90", "compute_100", "compute_120"),
+                        host_compiler="gcc 13.3")
+SM100 = C.synthetic("synthetic sm_100", (10, 0), sm_count=148, smem_per_block_optin=227 * 1024)
+SM103 = C.synthetic("synthetic sm_103", (10, 3), sm_count=148, smem_per_block_optin=227 * 1024)
+SM120 = C.synthetic("synthetic sm_120", (12, 0), sm_count=84, smem_per_block_optin=99 * 1024)
+SM121 = C.synthetic("synthetic sm_121", (12, 1), sm_count=48, smem_per_block_optin=99 * 1024)
+
+
+@pytest.mark.parametrize("arch,cc", [
+    ("sm_80", (8, 0)), ("sm_86", (8, 6)), ("sm_89", (8, 9)), ("sm_90", (9, 0)),
+    ("sm_100", (10, 0)), ("sm_103", (10, 3)), ("sm_120", (12, 0)), ("sm_121", (12, 1)),
+])
+def test_parse_arch_splits_major_and_last_digit_minor(arch, cc):
+    assert B.parse_arch(arch) == cc and B.arch_name(cc) == arch
+    assert C.synthetic("x", cc).arch == arch
+
+
+def test_parsed_targets_order_numerically_not_lexicographically():
+    archs = ["sm_120", "sm_90", "sm_100", "sm_86", "sm_121", "sm_80"]
+    assert sorted(archs, key=B.parse_arch) == ["sm_80", "sm_86", "sm_90", "sm_100", "sm_120", "sm_121"]
+    assert B.parse_arch("sm_100") > B.parse_arch("sm_90")  # lexicographic order of the strings says otherwise
+
+
+@pytest.mark.parametrize("bad", ["sm_", "sm_8", "sm_100junk", "sm_86 ", " sm_86", "sm_86\n", "sm86", "SM_86",
+                                 "sm_086", "sm_8x", "compute_86", "10.0", "8.6", "sm_100a1", ""])
+def test_parse_arch_rejects_incomplete_or_trailing_tokens(bad):
+    with pytest.raises(B.BuildError, match="invalid CUDA target"):
+        B.parse_arch(bad)
+
+
+@pytest.mark.parametrize("suffixed", ["sm_90a", "sm_100a", "sm_100f", "sm_120a"])
+def test_parse_arch_refuses_feature_suffixes_explicitly(suffixed):
+    """'a' / 'f' targets are real but outside the kernels' grammar: refused by name, never stripped."""
+    with pytest.raises(B.BuildError, match="architecture-specific"):
+        B.parse_arch(suffixed)
+
+
+def test_compiler_target_lists_keep_exact_tokens():
+    out = "sm_80 sm_86\nsm_90 sm_90a sm_100 sm_100a sm_100f sm_103 sm_120 sm_120a junk sm_12x sm_ sm_1000junk\n"
+    assert C.parse_gpu_list(out, "sm") == ("sm_80", "sm_86", "sm_90", "sm_90a", "sm_100", "sm_100a", "sm_100f",
+                                           "sm_103", "sm_120", "sm_120a")
+    assert C.parse_gpu_list("compute_90 compute_90a compute_100 compute_120f sm_90 compute_x\n", "compute") == \
+        ("compute_90", "compute_90a", "compute_100", "compute_120f")
+
+
+def test_toolchain_query_parses_a_multi_digit_major_compiler(monkeypatch, tmp_path):
+    """The public toolchain() query on a fake nvcc that lists Blackwell targets, then target
+    resolution with the toolchain it returns."""
+    fake = tmp_path / "nvcc"
+    fake.write_text(f"""#!{sys.executable}
+import sys
+a = sys.argv[1]
+if a == "--version":
+    print("Cuda compilation tools, release 12.9, V12.9.86")
+elif a == "--list-gpu-code":
+    print("sm_75 sm_80 sm_86 sm_90 sm_90a sm_100 sm_100a sm_100f sm_120 sm_120a")
+elif a == "--list-gpu-arch":
+    print("compute_75 compute_80 compute_86 compute_90 compute_100 compute_120")
+else:
+    sys.exit(2)
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("NVCC", str(fake))
+    tc = C.toolchain()
+    assert tc.nvcc == str(fake.resolve()) and tc.version == "12.9"
+    assert tc.real_archs == ("sm_75", "sm_80", "sm_86", "sm_90", "sm_90a", "sm_100", "sm_100a", "sm_100f", "sm_120",
+                             "sm_120a")
+    assert tc.virtual_archs[-2:] == ("compute_100", "compute_120")
+    assert B.resolve_target(SM100, tc)[0] == "sm_100"
+    assert B.resolve_target(SM120, tc)[0] == "sm_120"
+    t, why = B.resolve_target(SM121, tc)  # no sm_121 in this toolkit: same-major 12.0 cubin
+    assert t == "sm_120" and "binary-compatible" in why
+    assert B.resolve_target(SM120, tc, "sm_120")[0] == "sm_120"
+
+
+@pytest.mark.parametrize("caps,override,want", [
+    (SM100, None, "sm_100"),            # native target present
+    (SM120, None, "sm_120"),
+    (SM103, None, "sm_103"),
+    (SM100, "sm_100", "sm_100"),        # explicit overrides on compatible devices
+    (SM120, "sm_120", "sm_120"),
+    (SM103, "sm_100", "sm_100"),        # same major, older minor
+    (SM121, "sm_120", "sm_120"),
+    (SM121, None, "sm_120"),            # toolkit lacks sm_121: newest same-major plain target
+    (RTX, None, "sm_86"),               # one-digit majors unchanged under the Blackwell-capable toolkit
+    (RTX, "sm_80", "sm_80"),
+    (C.synthetic("c", (9, 0)), None, "sm_90"),  # sm_90a is listed too, but the plain target is chosen
+])
+def test_multi_digit_major_target_resolution(caps, override, want):
+    assert B.resolve_target(caps, TC_BW, override)[0] == want
+
+
+def test_multi_digit_major_override_through_the_environment(monkeypatch):
+    monkeypatch.setenv(B.ARCH_ENV, "sm_120")
+    t, why = B.resolve_target(SM121, TC_BW)
+    assert t == "sm_120" and why == f"explicit {B.ARCH_ENV}=sm_120"
+    monkeypatch.setenv(B.ARCH_ENV, "sm_120junk")
+    with pytest.raises(B.BuildError, match="invalid CUDA target"):
+        B.resolve_target(SM120, TC_BW)
+
+
+@pytest.mark.parametrize("caps,override,tc,match", [
+    (SM100, "sm_120", TC_BW, "cannot run"),         # other major
+    (SM120, "sm_100", TC_BW, "cannot run"),         # older major: no cross-major cubin
+    (SM120, "sm_121", TC_BW, "cannot run"),         # newer minor than the device
+    (SM100, "sm_90", TC_BW, "cannot run"),
+    (SM103, "sm_103", TC, "cannot emit"),           # compatible, but the toolkit cannot emit it
+    (SM120, "sm_120", TC, "cannot emit"),
+    (SM100, "sm_100a", TC_BW, "architecture-specific"),  # listed by the toolkit, still refused
+    (SM120, "sm_120a", TC_BW, "architecture-specific"),
+    (SM100, "sm_100junk", TC_BW, "invalid CUDA target"),
+    (SM100, "sm_10", TC_BW, "cannot run"),           # a well-formed token: compute capability 1.0, not 10.0
+    (SM120, None, TC, "cannot target"),             # pre-Blackwell toolkit, no same-major target
+    (C.synthetic("sm_110", (11, 0)), None, TC_BW, "cannot target"),  # never falls back across majors
+    (C.synthetic("no-mma sm_120", (12, 0), features=C.features_for((12, 0)) - {"mma.sync.m16n8k16.bf16"}),
+     "sm_120", TC_BW, "lacks mma.sync.m16n8k16.bf16"),
+    (C.synthetic("turing", (7, 5)), "sm_75", TC_BW, "sm_80"),
+])
+def test_multi_digit_major_target_diagnostics(caps, override, tc, match):
+    with pytest.raises(B.BuildError, match=match):
+        B.resolve_target(caps, tc, override)
+
+
+def test_ptx_is_never_selected_for_a_newer_device():
+    """The toolkit's compute_* list is recorded but never used as a fallback: a device newer than
+    every cubin target the toolkit can emit gets an error, not a PTX JIT target."""
+    tc = C.ToolchainInfo(**{**TC_BW.__dict__, "real_archs": ("sm_80", "sm_90", "sm_100"),
+                            "virtual_archs": ("compute_80", "compute_90", "compute_100", "compute_120")})
+    with pytest.raises(B.BuildError, match="cannot target"):
+        B.resolve_target(SM120, tc)
+
+
+def test_build_identity_is_exact_per_target(monkeypatch, tmp_path):
+    monkeypatch.setenv(B.CACHE_ENV, str(tmp_path))
+    targets = ("sm_86", "sm_90", "sm_100", "sm_103", "sm_120", "sm_121")
+    ids = {t: _ident(monkeypatch, target=t, tc=TC_BW) for t in targets}
+    assert len({i["library_hash"] for i in ids.values()}) == len(ids)
+    for t, i in ids.items():
+        assert i["target"] == t and f"-arch={t}" in i["flags"]
+        assert B.library_path(B.make_spec("production", t, TC_BW), i).relative_to(tmp_path).parts[0] == t
+    for bad, match in (("sm_100a", "architecture-specific"), ("sm_100junk", "invalid"), ("sm_120 ", "invalid"),
+                       ("sm_75", "sm_80")):
+        with pytest.raises(B.BuildError, match=match):
+            B.make_spec("production", bad, TC_BW)
+
+
+def test_cli_rejects_malformed_targets(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv(B.CACHE_ENV, str(tmp_path))
+    assert B.main(["--target", "sm_100junk"]) == 1
+    assert "invalid CUDA target" in capsys.readouterr().err
+    assert B.main(["--target", "sm_100a"]) == 1
+    assert "architecture-specific" in capsys.readouterr().err

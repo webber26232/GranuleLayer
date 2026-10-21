@@ -40,3 +40,5 @@ for C in (8, 64):
             torch.cuda.synchronize()
             print("ok", C, S, ft, dx, dwc, prec, act, B, nonfinite, lay.last_info["forward_kernel"],
                   lay.last_info["dx_kernel"], lay.last_info["dw_kernel"], flush=True)
+torch.cuda.synchronize()
+print("WORKLOAD COMPLETE sg", flush=True)  # run_sanitizer.sh requires this line

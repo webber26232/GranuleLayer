@@ -48,3 +48,5 @@ for cfg in (0, 1, 2, 3):                              # compact dW tilings, fast
 step(16, 4, 30011, 136, DET, C=64)                    # C = 64 deterministic control
 step(64, 16, 30011, 136, DET, C=64)
 print("ok all", flush=True)
+torch.cuda.synchronize()
+print("WORKLOAD COMPLETE det", flush=True)  # run_sanitizer.sh requires this line
