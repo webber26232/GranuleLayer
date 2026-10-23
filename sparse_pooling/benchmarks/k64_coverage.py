@@ -391,6 +391,18 @@ def analyze(case: dict, graph_seed: int, mask_spec: dict = None, quad_n: int = N
     res["graph_summary"] = kcsr_graph.summary(tab)
     res["graph_seconds"] = time.perf_counter() - t0
     Q = feat.shape[0]
+    from types import SimpleNamespace
+
+    from sparse_pooling.supergroups import bucket_statistics
+
+    # canonical bucket statistics (work unit = one logical record of C neurons: quantum 1); singleton fraction
+    lay_ns = SimpleNamespace(groups=KC.G, block=C, unit_blocks=1, input_dim=KC.D, hidden_dim=H,
+                             blocks_per_group=L.blocks_per_group)
+    res["bucket_stats"] = bucket_statistics(lay_ns, ubk, Q, S, plan)
+    lens = ubk[:, 3].to("cpu", torch.int64)
+    res["bucket_stats"]["singleton_fraction_of_nonempty"] = float((lens == 1).double().mean()) if len(lens) else None
+    res["bucket_stats"]["logical_records_vs_physical_units"] = ("logical records = units (quantum 1); physical "
+                                                                "execution units: neuron tiles of the variant")
     occ = torch.zeros(Q, dtype=torch.bool, device=dev)
     occ[bk[:, 0].long()] = True
     res["sets"] = dict(Q=Q, occupied=int(occ.sum()), empty=int((~occ).sum()))
@@ -495,11 +507,21 @@ def load_mask(spec: dict, L, idx, feat, bk):
     elif src == "threshold":
         thr = float(spec["threshold"])
         mask = ((w.float().abs() > thr) & valid[..., None]).to(torch.uint8)
+    elif src == "magnitude":  # the masks of k64_factory:sparse, rebuilt deterministically (sha checked by the report)
+        mask = SP.magnitude_mask(w, valid, float(spec["density"]))
+    elif src == "random":
+        mask = SP.random_mask(valid, float(spec["density"]), int(spec.get("mask_seed", 0)))
+    elif src == "tile":
+        mask = SP.tiles_to_elements(SP.tile_mask(w, valid, float(spec["density"])), valid)
+    elif src == "random_tile":
+        mask = SP.tiles_to_elements(SP.random_tile_mask(valid, float(spec["density"]), int(spec.get("mask_seed", 0))),
+                                    valid)
     else:
         raise SystemExit(f"mask source {src!r}")
     W0 = int(valid.sum()) * 64
     nnz = int(mask.sum(dtype=torch.int64))
     out = dict(checkpoint=spec["checkpoint"], checkpoint_rec=rec, source=src, threshold=spec.get("threshold"),
+               density_target=spec.get("density"),
                kind=spec.get("kind", src), density=nnz / W0, nnz=nnz, mask_sha256=SP.mask_fingerprint(mask))
     del w, b
     return mask, out
@@ -512,8 +534,11 @@ def main():
     ap.add_argument("--case", required=True)
     ap.add_argument("--graph-seed", type=int, default=KC.GRAPH_SEED)
     ap.add_argument("--checkpoint", default="")
-    ap.add_argument("--mask-source", default="mask", choices=["mask", "nonzero", "threshold"])
+    ap.add_argument("--mask-source", default="mask", choices=["mask", "nonzero", "threshold", "magnitude", "random",
+                                                              "tile", "random_tile"])
     ap.add_argument("--threshold", type=float, default=0.0)
+    ap.add_argument("--density", type=float, default=None)
+    ap.add_argument("--mask-seed", type=int, default=0)
     ap.add_argument("--kind", default="")
     ap.add_argument("--sparse", action="store_true", help="predeclared 50M quadruple sample (target sparsity >= 90 %)")
     ap.add_argument("--timing-json", default="", help="assert the graph fingerprint of this timing record")
@@ -522,7 +547,8 @@ def main():
     case = KC.case(a.case)
     spec = None
     if a.checkpoint:
-        spec = dict(checkpoint=a.checkpoint, source=a.mask_source, threshold=a.threshold, kind=a.kind or a.mask_source)
+        spec = dict(checkpoint=a.checkpoint, source=a.mask_source, threshold=a.threshold, kind=a.kind or a.mask_source,
+                    density=a.density, mask_seed=a.mask_seed)
     res = analyze(case, a.graph_seed, spec, quad_n=N_QUAD_SPARSE if a.sparse else N_QUAD)
     from provenance import provenance
 

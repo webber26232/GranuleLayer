@@ -18,7 +18,10 @@ sparse_pooling/
       runtime.py                  ctypes ABI, library registry, launches (CudaBackend)
   benchmarks/                     maintained tools (timing, repeatability, sanitizer, SASS, matrices)
   experimental/                   EXPERIMENTAL (explicit import only): generalized fan-in KgenLayer, generalized
-                                  generator, logical C = 128 / 256 physical lowering, float64 reference
+                                  generator, logical C = 128 / 256 physical lowering, float64 reference;
+                                  K = 64 KgxLayer (large C <= 2048, S = K index-free, kgen / C256-lowered
+                                  reference routes), frozen-mask tile / CSR formats, L1AdamW (coupled /
+                                  proximal L1, frozen masks)
   tests/
 docs/                             this documentation, evidence index, validation summaries
 ```
@@ -65,6 +68,7 @@ reasons. The legacy `last_info` keys (`grouped_dx`, `dx_epilogue`, …) are unch
 | experimental | `experimental/`: other scatter layouts, owner variant, fused backward, compact dW projection, mask dW control | first explicit request |
 | diagnostics | `diagnostics/`: slab layout dumps, projection / ReLU-decision diagnostic | tests / tools only |
 | kgen (EXPERIMENTAL) | `experimental/kgen/`: generalized fan-in K = 8 / 16 / 32 / 64, logical C <= 256 input-supergroup kernels of `sparse_pooling/experimental` (random K/C/S/R sweep) | first `KgenLayer` call; never selected by `SparsePoolingLayer` |
+| kgx (EXPERIMENTAL) | `experimental/kgx/`: K = 64 direct large-C (neuron-tiled items, C <= 2048), S = K index-free (register-accumulated dX), tile-sparse 16 x 16 and CSR fixed-mask kernels (K64 large-C / index-free / L1 study) | first `KgxLayer` call; never selected by `SparsePoolingLayer` |
 
 Headers: `common.cuh` (activations, power, BF16 helpers) includes `isa_sm80.cuh` (mma, ldmatrix,
 movmatrix, cp.async; `#error` below sm_80) and `numerics.cuh` (FTZ compare / multiply, ex2). Kernel

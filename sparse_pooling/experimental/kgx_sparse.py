@@ -9,7 +9,8 @@ Masks (uint8 / bool over the dense [G, NB, C, 64] slots; padded slots always ina
 * ``random_mask``      density-matched control: each valid slot kept independently with probability rho
                        (seeded; actual density recorded);
 * ``tile_mask``        structured: complete 16-neuron x 16-input tiles ranked by their L1 magnitude (exact
-                       kept tile count); an all-zero 16-neuron group keeps its neurons, biases and db.
+                       kept tile count); an all-zero 16-neuron group keeps its neurons, biases and db;
+* ``random_tile_mask`` density-matched random tiles (control of the tile geometry).
 
 Formats (all keep every valid neuron, its bias, its activation and the pooling denominator n_g):
 
@@ -103,6 +104,20 @@ def tile_mask(w: torch.Tensor, valid: torch.Tensor, density: float) -> torch.Ten
     m = torch.zeros(sc.numel(), dtype=torch.bool, device=w.device)
     m[order] = True
     return m.view_as(sc) & has_valid[:, None]
+
+
+@torch.no_grad()
+def random_tile_mask(valid: torch.Tensor, density: float, seed: int) -> torch.Tensor:
+    """Density-matched random control of ``tile_mask``: round(density * T) tiles drawn uniformly (seeded) among
+    the tiles that hold a valid neuron."""
+    has_valid = valid.reshape(-1, 16).any(1)
+    cand = torch.nonzero(has_valid[:, None].expand(-1, 4).reshape(-1)).squeeze(1)
+    keep = int(round(density * cand.numel()))
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    pick = cand[torch.randperm(cand.numel(), generator=g)[:keep].to(cand.device)]
+    m = torch.zeros(has_valid.numel() * 4, dtype=torch.bool, device=valid.device)
+    m[pick] = True
+    return m.view(-1, 4)
 
 
 def tiles_to_elements(tm: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -458,6 +473,10 @@ def build_from_checkpoint(args, conn, plan):
     kind = f.get("mask", "checkpoint")
     t0 = time.perf_counter()
     tm = None
+    if kind == "checkpoint_dense":  # the checkpoint's values, dense (no mask): dense / dense + L1 controls
+        lay.mask = None
+        lay.graph_stats.update(checkpoint=rec, mask_kind=kind, format="dense", mask_density=None)
+        return lay
     if kind == "checkpoint":
         if mask is None:
             mask = learned_mask(lay.weight.detach(), valid)
@@ -469,6 +488,9 @@ def build_from_checkpoint(args, conn, plan):
         mask = random_mask(valid, float(f["density"]), int(f.get("mask_seed", 0)))
     elif kind == "tile":
         tm = tile_mask(lay.weight.detach(), valid, float(f["density"]))
+        mask = tiles_to_elements(tm, valid)
+    elif kind == "random_tile":
+        tm = random_tile_mask(valid, float(f["density"]), int(f.get("mask_seed", 0)))
         mask = tiles_to_elements(tm, valid)
     else:
         raise SystemExit(f"mask {kind!r}")

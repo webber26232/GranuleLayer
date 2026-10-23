@@ -472,3 +472,100 @@ def test_composed_training_dynamic_regrowth_vs_frozen_mask():
         loss.backward()
         opt.step()
     assert bool((lay.weight.detach()[mask == 0] == 0).all())
+
+
+def test_mask_refresh_matches_a_fresh_dense_masked_reference():
+    """Train a tile layer, densify, reselect a new tile mask, recompress: the new compact layer computes exactly
+    what a dense masked layer with the new mask and the same values computes."""
+    KX, _, SP, L1, _, _ = _m()
+    base = layer(256, 9001, 8, 128, 64, 2, variant="idf", tile=64)
+    valid = SP.valid_slots(base)
+    tm = SP.tile_mask(base.weight.detach(), valid, 0.4)
+    with torch.no_grad():
+        base.weight.mul_(SP.tiles_to_elements(tm, valid).bfloat16())
+    sp = SP.KgxTileLayer(base, tm)
+    sp.enable_main_grad()
+    opt = L1.L1AdamW([sp.weight, sp.bias], lr=1e-3)
+    x, dy = inputs(40, 256, 8)
+    for _ in range(3):
+        sp(x).backward(dy)
+        opt.step()
+    w, b = sp.dense_params()
+    dense = KX.KgxLayer(256, 9001, 8, 128, ConnectivityPlan(64, 2, seed=1), variant="idf", device="cuda",
+                        weights=(w.clone(), b.clone()), keep_indices=True)
+    tm2 = SP.tile_mask(dense.weight.detach(), valid, 0.2)  # refresh: reselect among the trained values
+    em2 = SP.tiles_to_elements(tm2, valid)
+    with torch.no_grad():
+        dense.weight.mul_(em2.bfloat16())
+    sp2 = SP.KgxTileLayer(dense, tm2)
+    ref = reference(dense, x, dy)
+    o = run(sp2, x, dy)
+    assert maxrel(o[0], ref[0]) < 1e-6 and maxrel(o[1], ref[1]) < 2e-5 and maxrel(o[3], ref[3]) < 1e-6
+    assert bool((tm2 <= tm).all())  # a refresh from compact values can only drop tiles (no regrowth without dense grads)
+
+
+def test_complete_snapshot_restore_of_a_compact_layer():
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+    from train_state import TrainState
+
+    KX, _, SP, L1, _, _ = _m()
+    base = layer(256, 5000, 8, 64, 64, 2, variant="idf")
+    valid = SP.valid_slots(base)
+    em = SP.random_mask(valid, 0.3, 2)
+    with torch.no_grad():
+        base.weight.mul_(em.bfloat16())
+    sp = SP.KgxCsrLayer(base, em)
+    sp.enable_main_grad()
+    opt = L1.L1AdamW([sp.weight, sp.bias], lr=1e-3)
+    x, dy = inputs(32, 256, 8)
+    sp(x).backward(dy)
+    opt.step()
+    st = TrainState(list(sp.parameters()), opt).capture()
+    fp0 = st.fingerprint()
+    meta0 = sp.immutable_fingerprints()
+    for _ in range(2):
+        sp(x).backward(dy)
+        opt.step()
+    assert st.fingerprint() != fp0
+    st.restore()
+    assert st.fingerprint() == fp0 and sp.immutable_fingerprints() == meta0
+
+
+def test_proximal_support_is_dynamic():
+    """With dense gradients, a weight zeroed by the proximal step can become nonzero again (regrowth): the dynamic
+    treatment is not a frozen mask."""
+    _, _, SP, L1, _, _ = _m()
+    torch.manual_seed(3)
+    lay = layer(256, 5000, 8, 64, 64, 2, variant="idf", bias_std=0.0)
+    lay.enable_main_grad()
+    opt = L1.L1AdamW([{"params": [lay.weight], "l1": "prox", "mu": 2e-3}, {"params": [lay.bias]}], lr=1e-2)
+    x, dy = inputs(64, 256, 8)
+    for _ in range(4):
+        lay(x).backward(dy)
+        opt.step()
+    zero = (lay.weight.detach() == 0) & SP.valid_slots(lay)[..., None]
+    assert int(zero.sum()) > 0
+    opt.param_groups[0]["mu"] = 0.0
+    for _ in range(3):
+        lay(x).backward(-dy)
+        opt.step()
+    regrown = zero & (lay.weight.detach() != 0)
+    assert int(regrown.sum()) > 0
+
+
+def test_two_four_masks_both_orientations():
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
+    import k64_semi24 as S24
+
+    w = torch.randn(256, 64, device="cuda")
+    m = S24.two_four_mask(w)
+    assert S24.is_24(m, -1) and int(m.sum()) == m.numel() // 2
+    b = S24.bidirectional_mask(w)
+    assert S24.is_24(b, -1) and S24.is_24(b, 0) and int(b.sum()) == b.numel() // 2
+    assert S24.patterns_2of4_rows_cols().shape[0] == 90

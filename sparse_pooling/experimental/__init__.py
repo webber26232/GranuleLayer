@@ -11,5 +11,11 @@ layer still accepts only fan-in 8 and C in {8, 16, 32, 64}.  Explicit use only:
   generalized-fan-in CUDA kernels (bundle "kgen", kernels/cuda/experimental/kgen);
 * ``lowering``: a logical C = 128 / 256, K = 8 graph as a native C = 64 SparsePoolingLayer (each
   logical block = C / 64 physical blocks with the same record and independent weights);
-* ``reference``: float64 materialising reference of the logical model (tests).
+* ``reference``: float64 materialising reference of the logical model (tests);
+* ``kgx_layer`` / ``kgx_graph`` / ``kgx_lowering``: the K = 64 study's ``KgxLayer`` (bundle "kgx"): logical C
+  up to 2048 executed directly with physical neuron tiles, S = K = 64 index-free execution (records = sets,
+  register-accumulated dX), and the existing kgen kernels as reference routes on the same tensors (C <= 256;
+  C > 256 as physical C = 256 subblocks);
+* ``kgx_sparse``: frozen-mask formats (tile 16 x 16, unstructured CSR), masks (learned / magnitude / tile /
+  random), checkpoints; ``l1``: ``L1AdamW`` (coupled / proximal L1, frozen masks) and sparsity statistics.
 """

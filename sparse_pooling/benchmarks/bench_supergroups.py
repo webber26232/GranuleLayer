@@ -146,6 +146,8 @@ def main():
     ap.add_argument("--opt-factory", default="", help="module:function(args, layer) -> optimizer for the layer's "
                     "parameters (default: FusedAdamW lr 1e-4, BF16 moments)")
     ap.add_argument("--opt-args", default="{}", help="JSON passed to the optimizer factory as args.opt")
+    ap.add_argument("--inference", action="store_true", help="time the forward pass only (no_grad, fixed parameters: "
+                    "a compressed-checkpoint inference measurement; it cannot establish training speed)")
     ap.add_argument("--kcsr", action="store_true", help="also record the logical graph fingerprint, the full "
                     "execution record, per-round GPU state, cold-step and host-enqueue times (kcsr sweep)")
     ap.add_argument("--out", required=True)
@@ -249,6 +251,12 @@ def main():
                 opt2.step()
                 opt2.zero_grad(set_to_none=True)
                 opt.step()
+                mark("opt.end")
+            elif args.inference:
+                with torch.no_grad():
+                    lay(x)
+                mark("fwd.end")
+                mark("bwd.end")
                 mark("opt.end")
             else:
                 y = lay(x)
@@ -379,10 +387,11 @@ def main():
             info = lay.last_info
             want = expected_kernels(plans[name], conn is not None)
             got = {"fwd": info.get("forward_kernel"), "dx": info.get("dx_kernel"), "dw": info.get("dw_kernel")}
-            if name in layer_variants:  # the layer's own variants: every phase ran the selected kernels
+            if name in layer_variants or args.inference or hasattr(lay, "kvariant"):  # the layer's own variants
                 want = {ph: None for ph in want}
-                lv = layer_variants[name][0]
-                bad = {ph: k for ph, k in got.items() if not str(k).endswith("_" + lv)}
+                lv = layer_variants[name][0] if name in layer_variants else getattr(lay, "kvariant", None)
+                bad = {ph: k for ph, k in got.items() if lv is not None and not str(k).endswith("_" + lv)
+                       and not (args.inference and ph != "fwd")}
                 if bad:
                     raise SystemExit(f"variant {name}: requested {lv}, ran {bad}")
             for ph in ("fwd", "dx", "dw"):
