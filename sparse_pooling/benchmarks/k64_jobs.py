@@ -49,7 +49,7 @@ def _timing(tag, C, factory, opt=None, inference=False, rounds=SCREEN_ROUNDS):
                 rounds=list(rounds))
 
 
-def sparse_plan(ckdir, C, densities=DENSITIES, learned_alphas=(0.1, 1.0, 10.0), with_random=True, formats_el=("dense_masked", "csr"),
+def sparse_plan(ckdir, C, densities=DENSITIES, learned_alphas=(10.0, 30.0, 100.0), with_random=True, formats_el=("dense_masked", "csr"),
                 tile_formats=("dense_masked", "tile", "csr"), inference=True, rounds=SCREEN_ROUNDS):
     """Frozen-mask sparse timing of one anchor C (M = 8192, full H): every mask on the dense masked reference and
     on the sparse formats that represent it, plus inference of the compact formats and the dense+L1 controls."""
@@ -88,7 +88,7 @@ def refresh_plan(ckdir, C, densities=DENSITIES):
     return dict(stage="refresh", C=C, jobs=jobs)
 
 
-def maskcov_plan(ckdir, densities=DENSITIES, learned_alphas=(0.1, 1.0, 10.0), extra_alphas=()):
+def maskcov_plan(ckdir, densities=DENSITIES, learned_alphas=(1.0, 10.0, 30.0, 100.0), extra_alphas=()):
     """Retained-support coverage (exact pairs / triples, fixed-size sampled quadruples; 50M at >= 90 % sparsity),
     layer-wide and per output, of the masks that were timed (rebuilt deterministically)."""
     jobs = []
