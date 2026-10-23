@@ -134,8 +134,17 @@ def main():
     ap.add_argument("--composed", default="", help="D0,G2: time the composed model x0 -> Linear(D0, D) -> BF16 -> "
                     "layer -> Linear(G, G2) -> tanh -> MSE (torch AdamW for the two Linear layers) instead of the "
                     "isolated layer step (y^2 loss)")
+    ap.add_argument("--layer-factory", default="", help="module:function(args, conn) -> layer: build the layer "
+                    "with another constructor (kcsr sweep: physical lowering, experimental generalized fan-in); the "
+                    "timing protocol is unchanged")
+    ap.add_argument("--factory-args", default="{}", help="JSON passed to the layer factory as args.factory")
+    ap.add_argument("--kcsr", action="store_true", help="also record the logical graph fingerprint, the full "
+                    "execution record, per-round GPU state, cold-step and host-enqueue times (kcsr sweep)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    import json as _json
+
+    args.factory = _json.loads(args.factory_args)
     variants = [parse_variant(v) for v in args.variant] or [("default", {})]
     library = str(cuda_ops.build_library())  # the library this process loads (recorded before any timing)
     build = cuda_ops.build_info() if hasattr(cuda_ops, "build_info") else {"library": library,
@@ -144,16 +153,37 @@ def main():
     torch.manual_seed(args.input_seed)
     conn = None if args.S == 0 else ConnectivityPlan(args.S, args.R, args.gen, args.graph_seed)
     t0 = time.perf_counter()
-    lay = SparsePoolingLayer(args.input_dim, args.hidden, args.groups, shared_neurons=args.C,
-                             pooling=POOLINGS[args.pooling], checkpoint_policy="auto", backend="auto",
-                             device="cuda", plan=PhysicalPlan(grad_precision=args.grad_precision),
-                             seed=args.init_seed, connectivity=conn)
+    if args.layer_factory:
+        import importlib
+
+        mod, _, fn = args.layer_factory.partition(":")
+        lay = getattr(importlib.import_module(mod), fn)(args, conn)
+        conn = getattr(lay, "connectivity", conn)
+    else:
+        lay = SparsePoolingLayer(args.input_dim, args.hidden, args.groups, shared_neurons=args.C,
+                                 pooling=POOLINGS[args.pooling], checkpoint_policy="auto", backend="auto",
+                                 device="cuda", plan=PhysicalPlan(grad_precision=args.grad_precision),
+                                 seed=args.init_seed, connectivity=conn)
     if args.matched_c8:
         from bench_matched import convert_to_matched_c8
 
         lay = convert_to_matched_c8(lay)
     torch.cuda.synchronize()
     build_s = time.perf_counter() - t0
+    kcsr = {}
+    if args.kcsr:  # identity of the exact graph / parameters that are timed (outside every timed region)
+        import kcsr_graph
+        from train_state import tensor_fingerprint
+
+        t1 = time.perf_counter()
+        tab = (lay.kcsr_table() if hasattr(lay, "kcsr_table") else
+               kcsr_graph.native_table(lay, logical_C=getattr(lay, "kcsr_logical_C", None)))
+        kcsr.update(graph_fingerprint=kcsr_graph.fingerprint(tab), graph_summary=kcsr_graph.summary(tab),
+                    param_fingerprint={"weight": tensor_fingerprint(lay.weight), "bias": tensor_fingerprint(lay.bias)},
+                    logical_params_sha=kcsr_graph.params_sha(lay),
+                    layer_description=lay.kcsr_describe() if hasattr(lay, "kcsr_describe") else None)
+        del tab
+        kcsr["fingerprint_seconds"] = time.perf_counter() - t1
     val = None
     if args.validate:
         L = lay.layout
@@ -221,18 +251,25 @@ def main():
                 print(f"[{name}] infeasible: {why}", flush=True)
         variants = [v for v in variants if v[0] not in infeasible]
     det_phases = [f"det_{k}_{s}" for k in ("fwd", "dx") for s in ("stage1", "reduce")]
-    results = {name: {"rounds": [], "samples": {p: [] for p in [q[0] for q in PHASES] + det_phases},
+    results = {name: {"rounds": [], "samples": {p: [] for p in [q[0] for q in PHASES] + det_phases + ["host_enqueue",
+                                                                                                  "step_wall"]},
                       "peak_alloc": 0, "peak_res": 0,
                       "scratch_peak": 0, "warm_peak_alloc": 0, "warm_peak_res": 0, "restore_checks": 0}
                for name, _ in variants}
     # warm-up every variant (compilation, allocator, lazy Adam state, work lists).  The peaks of
     # these steps are taken before any snapshot exists: production-style memory per variant.
+    cold = {}
     for name, _ in variants:
         lay.plan = plans[name]
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+        walls = []
         for _ in range(2):
+            tw = time.perf_counter()
             step(None)
+            torch.cuda.synchronize()
+            walls.append(time.perf_counter() - tw)
+        cold[name] = {"first_step_wall_s": walls[0], "second_step_wall_s": walls[1]}
         torch.cuda.synchronize()
         results[name]["warm_peak_alloc"] = torch.cuda.max_memory_allocated()
         results[name]["warm_peak_res"] = torch.cuda.max_memory_reserved()
@@ -279,8 +316,11 @@ def main():
                     base = torch.cuda.memory_allocated()
                     torch.cuda.reset_peak_memory_stats()
                     ev, iv = [], []
+                    tw = time.perf_counter()
                     step(ev, iv)
+                    t_enq = time.perf_counter()
                     torch.cuda.synchronize()
+                    t_end = time.perf_counter()
                     pk = torch.cuda.max_memory_allocated()
                     res["peak_alloc"] = max(res["peak_alloc"], pk)
                     res["peak_res"] = max(res["peak_res"], torch.cuda.max_memory_reserved())
@@ -296,11 +336,16 @@ def main():
                         tot[nm] = tot.get(nm, 0.0) + e0.elapsed_time(e1)
                     for nm, v in tot.items():
                         rep.setdefault(nm, []).append(v)
+                    if args.kcsr:  # host wall clock: enqueue (Python + launches) and step-to-sync
+                        rep.setdefault("host_enqueue", []).append((t_enq - tw) * 1e3)
+                        rep.setdefault("step_wall", []).append((t_end - tw) * 1e3)
                 for ph, v in rep.items():
                     if v:
                         res["samples"][ph] += v
                         rep_meds.setdefault(ph, []).append(statistics.median(v))
             res["rounds"].append({ph: statistics.median(v) for ph, v in rep_meds.items()})
+            if args.kcsr:
+                res.setdefault("gpu_rounds", []).append(gpu_state())
             info = lay.last_info
             want = expected_kernels(plans[name], conn is not None)
             got = {"fwd": info.get("forward_kernel"), "dx": info.get("dx_kernel"), "dw": info.get("dw_kernel")}
@@ -337,6 +382,9 @@ def main():
             got_org = info.get("backward_organization", "separate")
             if want_org in ("fused", "fused_recompute") and got_org != want_org:
                 raise SystemExit(f"variant {name}: backward {want_org} requested, ran {got_org}")
+            if args.kcsr:
+                res["execution"] = info.get("execution")
+                res["last_info_keys"] = {k: v for k, v in info.items() if k != "execution"}
             res["info"] = {k: info.get(k) for k in ("reduction", "backward_organization", "grouped_fused",
                                                     "grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
                                                     "dx_epilogue", "dw_epilogue", "dw_staging", "dw_cfg", "dx_warps",
@@ -368,7 +416,8 @@ def main():
                       "pooling": args.pooling, "precision": args.grad_precision,
                       "graph": "unrestricted" if conn is None else conn.to_json(),
                       "matched_c8": args.matched_c8, "layout_block": L.block},
-           "build_seconds": build_s, "graph_stats": lay.graph_stats, "validation": val,
+           "build_seconds": build_s, "graph_stats": lay.graph_stats, "validation": val, "kcsr": kcsr,
+           "cold_steps": cold,
            "persistent_bytes": persistent, "infeasible": infeasible, "protocol": args.protocol,
            "snapshot": ({"device": "cuda", "bytes": 2 * (lay.weight.numel() + lay.bias.numel()), "contents": "weight, bias"}
                         if state is None else {"device": args.snapshot_device, "bytes": state.nbytes(),
@@ -392,7 +441,10 @@ def main():
                                  "step_scratch_peak_bytes": res["scratch_peak"],
                                  "work_list_bytes": res.get("work_list_bytes", 0),
                                  "descriptors": res.get("descriptors"),
-                                 "restore_checks": res["restore_checks"]}
+                                 "restore_checks": res["restore_checks"],
+                                 "samples_ms": {ph: v for ph, v in res["samples"].items() if v},
+                                 "round_values_ms": res["rounds"], "gpu_rounds": res.get("gpu_rounds"),
+                                 "execution": res.get("execution"), "last_info": res.get("last_info_keys")}
         ph = out["variants"][name]["phases"]
         fk = "fwd_kernel" if "fwd_kernel" in ph else "fwd_kernel_generic"
         line = "  ".join(f"{k} {ph[k]['median_ms']:.2f}" for k in (fk, "fwd_total", "dx_kernel", "dw_kernel", "bwd_kernels",

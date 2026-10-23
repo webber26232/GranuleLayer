@@ -547,6 +547,48 @@ class ResolvedPlan:
                     dx=dict(self.dx), dw=dict(self.dw), fallbacks=dict(self.fallbacks))
 
 
+# ------------------------------------------- EXPERIMENTAL generalized fan-in (kgen)
+def kgen_reason(caps: DeviceCapabilities, K: int, C: int, S: int, D: int, B: int, level, plan: PhysicalPlan,
+                det: bool, cfg=None) -> str:
+    """Why the experimental generalized-fan-in kernels (variants.KGEN_*; sparse_pooling.experimental)
+    cannot run a call ("" if they can).  Legality only: these kernels have one compiled tiling per K and
+    no tuning profile."""
+    fam = native_family_reason(caps)
+    if fam:
+        return fam
+    if K not in V.KGEN_K:
+        return f"fan-in K = {K} is not compiled (kgen: K in {V.KGEN_K})"
+    if C % 8 or not 8 <= C <= V.KGEN_C_MAX:
+        return f"C = {C}: kgen needs C % 8 == 0 and 8 <= C <= {V.KGEN_C_MAX}"
+    if not (V.KGEN_S_RANGE[0] <= S <= V.KGEN_S_RANGE[1]) or S % 8 or K > S:
+        return f"S = {S}: kgen needs S % 8 == 0, {V.KGEN_S_RANGE[0]} <= S <= {V.KGEN_S_RANGE[1]} and K <= S"
+    if level.type != "mean" or level.activation not in ("relu", "identity"):
+        return f"kgen implements Mean(ReLU / identity) only (pooling {level.describe()})"
+    if plan.grad_precision not in ("split", "bf16"):
+        return f"grad_precision {plan.grad_precision!r}"
+    if det:
+        return "kgen reduces with FP32 atomics: reduction='deterministic' is not implemented"
+    if plan.input_layout != "feature_major" or B % 8:
+        return "kgen needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
+    if D % 8 or D > V.SG_MAX_INPUT_DIM:
+        return f"needs D % 8 == 0 and D <= {V.SG_MAX_INPUT_DIM} (shared-memory feature map)"
+    if cfg is not None:
+        lim = smem_limit(caps)
+        for kind, gw in (("fwd", 1), ("dx", cfg[3]), ("dw", 1)):
+            if V.kgen_smem(kind, D, S, cfg, gw) > lim:
+                return f"kgen {kind} needs {V.kgen_smem(kind, D, S, cfg, gw) / 1024:.1f} KiB of shared memory > {lim / 1024:.1f} KiB"
+    return ""
+
+
+def kgen_dx_group_warps(caps: DeviceCapabilities, D: int, S: int, cfg) -> int:
+    """Warps per FP32 dX slab copy of kgen: warp-private copies where they fit the device, else shared
+    (64-bit CAS) copies, doubling the group until the launch fits."""
+    wg, nw, lim = 1, cfg[3], smem_limit(caps)
+    while wg < nw and V.kgen_smem("dx", D, S, cfg, wg) > lim:
+        wg *= 2
+    return wg
+
+
 # ------------------------------------------------------------------- matrix adapter
 def _call(fn, *a):
     try:

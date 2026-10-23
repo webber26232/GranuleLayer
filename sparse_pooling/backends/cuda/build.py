@@ -10,7 +10,8 @@ Bundles (explicit manifests; no directory globbing):
   production    every unit the dispatch can select automatically, plus ABI identity;
   experimental  correct variants reachable only through explicit PhysicalPlan options (built on
                 first explicit request);
-  diagnostics   tests / tools kernels (layout dumps, projection diagnostics); never used by a layer.
+  diagnostics   tests / tools kernels (layout dumps, projection diagnostics); never used by a layer;
+  kgen          EXPERIMENTAL generalized-fan-in kernels of sparse_pooling.experimental (explicit use only).
 Build kinds: "production" (no extra flags), "development" (SPARSE_POOL_NVCC_EXTRA without
 ablations), "ablation" (SP_ABLATE_* in SPARSE_POOL_NVCC_EXTRA: deliberately WRONG results for
 attribution).  The kind is compiled into the library (sp_build_kind), named in its path and recorded
@@ -65,8 +66,12 @@ BUNDLES: Dict[str, Tuple[str, ...]] = {
         "experimental/sg_dw_c8_exp.cu",
     ),
     "diagnostics": ("abi.cu", "diagnostics/sgx_layout.cu", "diagnostics/diag_proj_c8.cu"),
+    # EXPERIMENTAL generalized fan-in (K = 8 / 16 / 32 / 64) input-supergroup kernels of
+    # sparse_pooling.experimental (random K/C/S/R sweep); never selected by SparsePoolingLayer
+    "kgen": ("abi.cu", "experimental/kgen/kgen_abi.cu", "experimental/kgen/kgen_k8.cu", "experimental/kgen/kgen_k16.cu",
+             "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu"),
 }
-BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2}
+BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3}
 KIND_ID = {"production": 0, "development": 1, "ablation": 2}
 BASE_FLAGS = ("-O3", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC")
 ARCH_ENV, EXTRA_ENV, CACHE_ENV, JOBS_ENV = ("SPARSE_POOL_ARCH", "SPARSE_POOL_NVCC_EXTRA", "SPARSE_POOL_CACHE_DIR",
