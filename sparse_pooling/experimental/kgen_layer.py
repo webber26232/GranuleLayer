@@ -137,6 +137,11 @@ class KgenLayer(nn.Module):
             raise ValueError("kgen: BF16 parameters only")
         self.level = LevelSpec(type=pooling) if isinstance(pooling, str) else LevelSpec(**pooling)
         self.layout = L = KLayout(input_dim, hidden_dim, output_dim, fan_in, shared_neurons)
+        from ..backends.cuda import variants as V
+
+        if L.block > V.KGEN_C_MAX:
+            raise ValueError(f"kgen kernels: C <= {V.KGEN_C_MAX} (got {L.block}); larger logical C: "
+                             "experimental.kgx_layer (direct) or experimental.kgx_lowering (C = 256 subblocks)")
         self.plan = plan or PhysicalPlan()
         self.connectivity = connectivity
         device = torch.device(device or "cuda")

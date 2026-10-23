@@ -11,7 +11,9 @@ Bundles (explicit manifests; no directory globbing):
   experimental  correct variants reachable only through explicit PhysicalPlan options (built on
                 first explicit request);
   diagnostics   tests / tools kernels (layout dumps, projection diagnostics); never used by a layer;
-  kgen          EXPERIMENTAL generalized-fan-in kernels of sparse_pooling.experimental (explicit use only).
+  kgen          EXPERIMENTAL generalized-fan-in kernels of sparse_pooling.experimental (explicit use only);
+  kgx           EXPERIMENTAL K = 64 large-C / index-free / tile-sparse / CSR kernels of
+                sparse_pooling.experimental (explicit use only).
 Build kinds: "production" (no extra flags), "development" (SPARSE_POOL_NVCC_EXTRA without
 ablations), "ablation" (SP_ABLATE_* in SPARSE_POOL_NVCC_EXTRA: deliberately WRONG results for
 attribution).  The kind is compiled into the library (sp_build_kind), named in its path and recorded
@@ -70,8 +72,12 @@ BUNDLES: Dict[str, Tuple[str, ...]] = {
     # sparse_pooling.experimental (random K/C/S/R sweep); never selected by SparsePoolingLayer
     "kgen": ("abi.cu", "experimental/kgen/kgen_abi.cu", "experimental/kgen/kgen_k8.cu", "experimental/kgen/kgen_k16.cu",
              "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu"),
+    # EXPERIMENTAL K = 64 kernels of the large-C / index-free / L1-sparsity study (direct large-C, S = K
+    # index-free, tile-sparse, CSR fixed mask); never selected by SparsePoolingLayer
+    "kgx": ("abi.cu", "experimental/kgx/kgx_abi.cu", "experimental/kgx/kgx_fwd.cu", "experimental/kgx/kgx_dx.cu",
+            "experimental/kgx/kgx_dw.cu", "experimental/kgx/kgx_csr.cu"),
 }
-BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3}
+BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3, "kgx": 4}
 KIND_ID = {"production": 0, "development": 1, "ablation": 2}
 BASE_FLAGS = ("-O3", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC")
 ARCH_ENV, EXTRA_ENV, CACHE_ENV, JOBS_ENV = ("SPARSE_POOL_ARCH", "SPARSE_POOL_NVCC_EXTRA", "SPARSE_POOL_CACHE_DIR",

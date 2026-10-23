@@ -50,7 +50,8 @@ PHASES = [
     ("fwd_zero", "fwd.layout", "fwd.zero"),             # grouped: ysum [G, B] zeroing
     ("fwd_kernel", "fwd.zero", "fwd.kernel"),           # projection + streaming pooling (+ merge atomics)
     ("fwd_kernel_generic", "fwd.layout", "fwd.kernel"),  # generic: no zeroing mark
-    ("fwd_finalize", "fwd.kernel", "fwd.finalize"),     # merge / divide / transpose
+    ("fwd_bias_only", "fwd.kernel", "fwd.bias_only"),   # kgx sparse: constant of all-zero weight rows
+    ("fwd_finalize", "fwd.kernel", "fwd.finalize"),     # merge / divide / transpose (incl. fwd_bias_only)
     ("fwd_total", "step.begin", "fwd.end"),
     ("bwd_coef", "bwd.begin", "bwd.coef"),              # c1 (+ grouped: c1T transpose)
     ("bwd_layout", "bwd.coef", "bwd.layout"),
@@ -58,6 +59,7 @@ PHASES = [
     ("dx_kernel", "bwd.dx_init", "bwd.dx"),             # local dX + global merge (atomics)
     ("dw_kernel", "bwd.dx", "bwd.dw"),                  # dW / db (+ non-finite fallback launch)
     ("bwd_kernels", "bwd.dx_init", "bwd.dw"),           # dX + dW kernels, or the fused kernel + its fallbacks
+    ("bwd_bias_only", "bwd.dw", "bwd.bias_only"),       # kgx sparse: db of all-zero weight rows (in bwd_post)
     ("fused_kernel", "bwd.dx_init", "bwd.fused"),       # fused shared-projection kernel alone
     ("fused_fallbacks", "bwd.fused", "bwd.dx"),         # its guarded generic fallback launches (exit at once)
     ("bwd_post", "bwd.dw", "bwd.end"),                  # dX transpose + FP32 -> BF16, autograd
@@ -138,6 +140,12 @@ def main():
                     "with another constructor (kcsr sweep: physical lowering, experimental generalized fan-in); the "
                     "timing protocol is unchanged")
     ap.add_argument("--factory-args", default="{}", help="JSON passed to the layer factory as args.factory")
+    ap.add_argument("--layer-variants", default="", help="comma-separated [name=]variant[@tile] of the layer's own "
+                    "execution variants (layer.select_variant; K64 study: kgen, lowered, direct, idf_rmw, idf), "
+                    "interleaved like --variant on ONE layer (same graph, parameters, inputs)")
+    ap.add_argument("--opt-factory", default="", help="module:function(args, layer) -> optimizer for the layer's "
+                    "parameters (default: FusedAdamW lr 1e-4, BF16 moments)")
+    ap.add_argument("--opt-args", default="{}", help="JSON passed to the optimizer factory as args.opt")
     ap.add_argument("--kcsr", action="store_true", help="also record the logical graph fingerprint, the full "
                     "execution record, per-round GPU state, cold-step and host-enqueue times (kcsr sweep)")
     ap.add_argument("--out", required=True)
@@ -145,7 +153,17 @@ def main():
     import json as _json
 
     args.factory = _json.loads(args.factory_args)
+    args.opt = _json.loads(args.opt_args)
+    layer_variants = {}
+    for item in filter(None, args.layer_variants.split(",")):
+        nm, _, spec = item.rpartition("=")
+        v, _, t = spec.partition("@")
+        layer_variants[nm or spec] = (v, int(t) if t else None)
     variants = [parse_variant(v) for v in args.variant] or [("default", {})]
+    if layer_variants:
+        if args.variant:
+            raise SystemExit("--layer-variants and --variant are exclusive")
+        variants = [(nm, {}) for nm in layer_variants]
     library = str(cuda_ops.build_library())  # the library this process loads (recorded before any timing)
     build = cuda_ops.build_info() if hasattr(cuda_ops, "build_info") else {"library": library,
                                                                           "flags": cuda_ops.NVCC_FLAGS}
@@ -193,7 +211,14 @@ def main():
         val = validate(L, idx_c, g)
         del idx_c  # (kept alive by the runs reported in INPUT_SUPERGROUP_OPTIMIZATION.md: +0.19 GiB peak at C = 8)
     lay.enable_main_grad()
-    opt = FusedAdamW([lay.weight, lay.bias], lr=1e-4, moments="bf16")
+    if args.opt_factory:
+        import importlib
+
+        mod, _, fn = args.opt_factory.partition(":")
+        opt = getattr(importlib.import_module(mod), fn)(args, lay)
+    else:
+        opt = FusedAdamW([lay.weight, lay.bias], lr=1e-4, moments="bf16")
+    immutable_fp0 = lay.immutable_fingerprints() if hasattr(lay, "immutable_fingerprints") else None
     gx = torch.Generator(device="cuda")
     gx.manual_seed(args.input_seed)
     x = torch.randn(args.batch, args.input_dim, device="cuda", generator=gx).to(torch.bfloat16).requires_grad_(True)
@@ -259,8 +284,13 @@ def main():
     # warm-up every variant (compilation, allocator, lazy Adam state, work lists).  The peaks of
     # these steps are taken before any snapshot exists: production-style memory per variant.
     cold = {}
-    for name, _ in variants:
+    def use(name):
         lay.plan = plans[name]
+        if name in layer_variants:
+            lay.select_variant(*layer_variants[name])
+
+    for name, _ in variants:
+        use(name)
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         walls = []
@@ -298,7 +328,7 @@ def main():
     for r in range(args.rounds):
         order = variants if r % 2 == 0 else variants[::-1]
         for name, _ in order:
-            lay.plan = plans[name]
+            use(name)
             res = results[name]
             if args.protocol == "historical":
                 with torch.no_grad():
@@ -349,6 +379,12 @@ def main():
             info = lay.last_info
             want = expected_kernels(plans[name], conn is not None)
             got = {"fwd": info.get("forward_kernel"), "dx": info.get("dx_kernel"), "dw": info.get("dw_kernel")}
+            if name in layer_variants:  # the layer's own variants: every phase ran the selected kernels
+                want = {ph: None for ph in want}
+                lv = layer_variants[name][0]
+                bad = {ph: k for ph, k in got.items() if not str(k).endswith("_" + lv)}
+                if bad:
+                    raise SystemExit(f"variant {name}: requested {lv}, ran {bad}")
             for ph in ("fwd", "dx", "dw"):
                 if want[ph] in ("generic", "grouped") and got[ph] != want[ph]:
                     raise SystemExit(f"variant {name}: {ph} requested {want[ph]}, ran {got[ph]} "
@@ -385,6 +421,7 @@ def main():
             if args.kcsr:
                 res["execution"] = info.get("execution")
                 res["last_info_keys"] = {k: v for k, v in info.items() if k != "execution"}
+                res["layer_variant"] = layer_variants.get(name)
             res["info"] = {k: info.get(k) for k in ("reduction", "backward_organization", "grouped_fused",
                                                     "grouped_fwd", "grouped_dx", "grouped_dw", "grouped_fallback",
                                                     "dx_epilogue", "dw_epilogue", "dw_staging", "dw_cfg", "dx_warps",
@@ -400,15 +437,27 @@ def main():
     gpu_after = gpu_state()
 
     persistent = {
-        "weights": lay.weight.numel() * 2, "bias": lay.bias.numel() * 2, "indices": lay.indices.numel() * 2,
+        "weights": lay.weight.numel() * 2, "bias": lay.bias.numel() * 2,
+        "indices": 0 if getattr(lay, "indices", None) is None else lay.indices.numel() * 2,
         "main_grad": (lay.weight.numel() + lay.bias.numel()) * 4,
         "adam_moments": opt.state_bytes(),
         "graph_metadata": 0 if conn is None else lay.sg_feat.numel() * 2 + lay.sg_buckets.numel() * 4,
         "work_lists_cached_last_runtime": 0 if conn is None or lay._rt is None or lay._rt.sg is None
         else lay._rt.sg.runtime_bytes(),  # all work lists cached by the LAST runtime (see per-variant entries)
     }
+    if hasattr(lay, "extra_persistent_bytes"):
+        persistent.update(lay.extra_persistent_bytes())
+    immutable_ok = None
+    if immutable_fp0 is not None:  # frozen metadata (masks, row pointers, tile maps) unchanged by the steps
+        immutable_ok = lay.immutable_fingerprints() == immutable_fp0
+        if not immutable_ok:
+            raise SystemExit("immutable layer metadata changed during the timed steps")
+    from provenance import hardware_state, provenance
+
     L = lay.layout
-    out = {"commit": git_sha(), "dirty": git_dirty(), "nvcc_flags": build.get("flags"), "build": build,
+    out = {"commit": git_sha(), "dirty": git_dirty(), "provenance": provenance(_impl_dir()),
+           "hardware_state": hardware_state(), "immutable_metadata": immutable_fp0,
+           "immutable_metadata_unchanged": immutable_ok, "nvcc_flags": build.get("flags"), "build": build,
            "implementation": str(Path(sparse_pooling.__file__).resolve().parent),
            "library": library, "args": vars(args),
            "config": {"C": args.C, "S": args.S, "R": args.R, "Q": (conn.num_supergroups(args.input_dim) if conn else 0),

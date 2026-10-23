@@ -589,6 +589,57 @@ def kgen_dx_group_warps(caps: DeviceCapabilities, D: int, S: int, cfg) -> int:
     return wg
 
 
+# ------------------------------------------- EXPERIMENTAL K = 64 kgx kernels
+def kgx_reason(caps: DeviceCapabilities, variant: str, K: int, C: int, S: int, D: int, B: int, level,
+               plan: PhysicalPlan, det: bool, cfg=None, tile: int = 0) -> str:
+    """Why the experimental kgx kernels (variants.KGX_*; sparse_pooling.experimental.kgx_layer) cannot run
+    a call ("" if they can).  Legality only: one compiled tiling, no tuning profile, never auto-selected."""
+    fam = native_family_reason(caps)
+    if fam:
+        return fam
+    if variant not in V.KGX_VARIANTS:
+        return f"unknown kgx variant {variant!r} (kgx: {V.KGX_VARIANTS})"
+    if K != V.KGX_K:
+        return f"fan-in K = {K}: kgx is compiled for K = {V.KGX_K} only"
+    if C % 16 or not 16 <= C <= V.KGX_C_MAX:
+        return f"C = {C}: kgx needs C % 16 == 0 and 16 <= C <= {V.KGX_C_MAX}"
+    if tile and (tile % 16 or tile < 16):
+        return f"physical neuron tile {tile}: needs a positive multiple of 16"
+    if variant == "direct":
+        if not 64 <= S <= 256 or S % 8:
+            return f"S = {S}: kgx direct needs S % 8 == 0 and 64 <= S <= 256"
+    elif S != K:
+        return f"S = {S}: the index-free / sparse kgx variants need S = K = {K} (every record is the whole set)"
+    if level.type != "mean" or level.activation != "relu":
+        return f"kgx implements Mean(ReLU) only (pooling {level.describe()})"
+    if plan.grad_precision not in ("split", "bf16"):
+        return f"grad_precision {plan.grad_precision!r}"
+    if det:
+        return "kgx reduces with FP32 atomics: reduction='deterministic' is not implemented"
+    if plan.input_layout != "feature_major" or B % 8:
+        return "kgx needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
+    if D % 8 or D > V.SG_MAX_INPUT_DIM:
+        return f"needs D % 8 == 0 and D <= {V.SG_MAX_INPUT_DIM} (shared-memory feature map)"
+    if cfg is not None:
+        lim = smem_limit(caps)
+        for kind in ("fwd", "dx", "dw"):
+            need = V.kgx_smem(kind, variant, D, S, cfg, kgx_dx_group_warps(caps, variant, D, S, cfg))
+            if need > lim:
+                return f"kgx {variant} {kind} needs {need / 1024:.1f} KiB of shared memory > {lim / 1024:.1f} KiB"
+    return ""
+
+
+def kgx_dx_group_warps(caps: DeviceCapabilities, variant: str, D: int, S: int, cfg) -> int:
+    """Warps per FP32 dX slab copy of the per-record-slab kgx variants (direct, idf_rmw): warp-private copies
+    where they fit, else shared (64-bit CAS) copies.  The register-accumulating variants use one copy."""
+    if variant not in ("direct", "idf_rmw"):
+        return cfg["dx_warps"]
+    wg, nw, lim = 1, cfg["dx_warps"], smem_limit(caps)
+    while wg < nw and V.kgx_smem("dx", variant, D, S, cfg, wg) > lim:
+        wg *= 2
+    return wg
+
+
 # ------------------------------------------------------------------- matrix adapter
 def _call(fn, *a):
     try:

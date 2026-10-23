@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.abspath(os.environ.get("GRANULE_IMPL_ROOT")
 
 import torch  # noqa: E402
 
-RESULTS = Path(__file__).resolve().parent.parent / "results"
+# GRANULE_RESULTS_ROOT: write results outside the checkout (frozen measurement worktrees stay clean)
+RESULTS = Path(os.environ.get("GRANULE_RESULTS_ROOT") or Path(__file__).resolve().parent.parent / "results")
 
 
 def gpu_info() -> Dict:

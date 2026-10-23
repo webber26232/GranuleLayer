@@ -1,4 +1,7 @@
-"""EXPERIMENTAL logical layout for fan-in K in {8, 16, 32, 64} and logical C (multiple of 8, <= 256).
+"""EXPERIMENTAL logical layout for fan-in K in {8, 16, 32, 64} and logical C (multiple of 8, <= 2048).
+
+C <= 256 runs on the kgen kernels (kgen_layer.KgenLayer); 256 < C <= 2048 is the logical layout of the
+K = 64 large-C study (kgx_layer.KgxLayer, kgx_lowering: physical C = 256 subblocks).
 
 Partition and neuron identity are those of ``layout.SparseLayout``: output g owns
 n_g = H // G + (g < H % G) valid neurons; slot s = j * C + c of output g (logical block j) is valid
@@ -20,6 +23,7 @@ from dataclasses import dataclass
 import torch
 
 KGEN_LAYOUT_VERSION = 1
+KGEN_LAYOUT_C_MAX = 2048
 
 
 @dataclass(frozen=True)
@@ -33,8 +37,9 @@ class KLayout:
     def __post_init__(self):
         if self.fan_in not in (8, 16, 32, 64):
             raise ValueError(f"experimental kgen layout: fan_in must be 8, 16, 32 or 64 (got {self.fan_in})")
-        if self.block % 8 or not 8 <= self.block <= 256:
-            raise ValueError(f"experimental kgen layout: C must be a multiple of 8 in [8, 256] (got {self.block})")
+        if self.block % 8 or not 8 <= self.block <= KGEN_LAYOUT_C_MAX:
+            raise ValueError(f"experimental kgen layout: C must be a multiple of 8 in [8, {KGEN_LAYOUT_C_MAX}] "
+                             f"(got {self.block})")
         if self.input_dim > 32767:
             raise ValueError("int16 indices require input_dim <= 32767")
         if self.fan_in > self.input_dim:
@@ -125,3 +130,40 @@ def zero_padding_(layout: KLayout, weights=None, bias=None):
         weights.masked_fill_(invalid[..., None], 0)
     if bias is not None:
         bias.masked_fill_(invalid, 0)
+
+
+INIT_BY_NEURON = "granule.init_by_neuron/1"
+
+
+@torch.no_grad()
+def init_parameters_by_neuron(layout: KLayout, device, dtype=torch.bfloat16, seed: int = 0, weight_std=None,
+                              chunk_neurons: int = 1 << 19):
+    """(weights, bias) with weights iid N(0, weight_std^2) (default 1 / sqrt(K)) drawn per VALID neuron in
+    global neuron order (output g, slot s < n_g), independent of C and of padding: neuron i always receives
+    the K values i K .. i K + K - 1 of one seeded stream (``INIT_BY_NEURON``), so layouts with different C
+    hold identical valid-neuron draws.  Bias zero, padded neurons zero."""
+    if weight_std is None:
+        weight_std = 1.0 / math.sqrt(layout.fan_in)
+    G, K = layout.groups, layout.fan_in
+    w = torch.zeros(layout.weight_shape, dtype=dtype, device=device)
+    wv = w.view(G, layout.slots_per_group, K)
+    counts = layout.counts_tensor("cpu").to(torch.int64)
+    off = torch.cumsum(counts, 0) - counts
+    gen = torch.Generator(device=device)
+    # chunk the neuron stream; each chunk gets its own deterministic sub-seed (seed, chunk index)
+    H = int(counts.sum())
+    g = 0
+    for c0 in range(0, H, chunk_neurons):
+        c1 = min(H, c0 + chunk_neurons)
+        gen.manual_seed((seed * 1_000_003 + c0 // chunk_neurons) & 0x7FFFFFFFFFFFFFFF)
+        vals = (torch.randn((c1 - c0, K), generator=gen, device=device) * weight_std).to(dtype)
+        while g < G and int(off[g]) < c1:  # scatter the outputs overlapping [c0, c1)
+            a, b = max(c0, int(off[g])), min(c1, int(off[g] + counts[g]))
+            if a < b:
+                wv[g, a - int(off[g]):b - int(off[g])] = vals[a - c0:b - c0]
+            if int(off[g] + counts[g]) <= c1:
+                g += 1
+            else:
+                break
+    b = torch.zeros(layout.bias_shape, dtype=dtype, device=device)
+    return w, b

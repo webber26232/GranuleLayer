@@ -153,3 +153,39 @@ def kgen_smem(kind: str, D: int, S: int, cfg, group_warps: int = 1) -> int:
         bm = 16 * dx_mt
         return m + S * bm * 2 + (dx_nw // group_warps) * S * bm * 4
     return m + dw_st * dw_ts * S * 16 * 2
+
+
+# ------------------------------------------------- EXPERIMENTAL K = 64 kgx kernels (sparse_pooling.experimental)
+# K = 64 only, logical C % 16 == 0 and 16 <= C <= 2048 (work items carry a neuron range: physical neuron
+# tile KGX_TILES), Mean(ReLU), BF16 parameters / inputs, split or BF16 dZ operands, FP32 atomics (fast
+# reduction only), feature-major input with B % 8 == 0.  Variants: "direct" (record gather, S in
+# [64, 256]), "idf_rmw" / "idf" (index-free S = K = 64; per-record slab adds / register-accumulated dX),
+# "tile" (index-free tile-sparse 16 x 16 weight tiles), "csr" (index-free unstructured fixed mask,
+# CUDA cores).  Tilings are compile-time (KxCfg in kgx.cuh, reported by sp_kx_config).  Status
+# "experimental": correct (tests/test_kgx.py), never auto-selected.
+KGX_K = 64
+KGX_C_MAX = 2048
+KGX_TILES = (64, 128, 256)
+KGX_VARIANTS = ("direct", "idf_rmw", "idf", "tile", "csr")
+KGX_STATUS = "experimental"
+KGX_CSR_WINDOW = 256  # entries per CSR neuron-window buffer (kgx_csr.cuh KC_WE)
+
+
+def kgx_smem(kind: str, variant: str, D: int, S: int, cfg: dict, group_warps: int = 1) -> int:
+    """Dynamic shared memory of a kgx launch (kgx_dispatch.cuh kx_smem); cfg = the sp_kx_config dict."""
+    if variant == "csr":
+        bt = 32 * cfg["csr_tokens_per_lane"]
+        if kind == "fwd":
+            return 64 * bt * 2 + cfg["csr_warps"] * KGX_CSR_WINDOW * 4
+        if kind == "dx":
+            return 64 * 32 * cfg["csr_dx_warps"] * 6 + 2 * KGX_CSR_WINDOW * 4 + 2 * 32 * 8
+        return cfg["csr_dw_stages"] * 64 * cfg["csr_dw_tokens_per_stage"] * 2
+    m = _map_bytes(D)
+    if kind == "fwd":
+        mt = cfg["fwd_mt_direct"] if variant == "direct" else cfg["fwd_mt_index_free"]
+        return m + S * 16 * mt * 2
+    if kind == "dx":
+        bm = 16 * cfg["dx_mt"]
+        copies = cfg["dx_warps"] if variant in ("idf", "tile") else cfg["dx_warps"] // group_warps
+        return m + S * bm * 2 + copies * S * bm * 4
+    return m + cfg["dw_stages"] * cfg["dw_tiles_per_stage"] * S * 16 * 2
