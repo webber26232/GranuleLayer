@@ -103,10 +103,14 @@ def main():
         def remap():
             return [m_dense.view(n16, 16, 4, 16).permute(0, 2, 1, 3)[tm].contiguous() for _ in range(2)]
     else:
-        mb = mask.bool()
+        mv, dv = mask.view(-1, 64), m_dense.view(-1, 64)
 
-        def remap():
-            return [m_dense[mb] for _ in range(2)]
+        def remap():  # chunked over neuron slots (a whole-tensor boolean gather materialises 8 B per element)
+            out = []
+            for _ in range(2):
+                out.append(torch.cat([dv[s:s + (1 << 21)][mv[s:s + (1 << 21)].bool()]
+                                      for s in range(0, dv.shape[0], 1 << 21)]))
+            return out
     _, res["state_remap"] = timed(remap, a.reps)
     _, res["densify"] = timed(lambda: sp.dense_params(), a.reps)
     res["bytes"] = dict(sp.metadata_bytes(), work_lists=int(rt.sg.stats["bytes"]), dense_values=lay.weight.numel() * 2,

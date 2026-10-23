@@ -59,11 +59,11 @@ def batch(seed: int, device, M=M_TRAIN):
     return torch.randn(M, D0, generator=g).to(device)
 
 
-def build(C: int, R: int, device):
+def build(C: int, R: int, device, graph_seed: int = KC.GRAPH_SEED):
     from sparse_pooling.experimental.kgx_layer import KgxLayer
     from sparse_pooling.supergroups import ConnectivityPlan
 
-    lay = KgxLayer(KC.D, KC.H, KC.G, C, ConnectivityPlan(64, R, seed=KC.GRAPH_SEED), variant="idf", tile=128,
+    lay = KgxLayer(KC.D, KC.H, KC.G, C, ConnectivityPlan(64, R, seed=graph_seed), variant="idf", tile=128,
                    device=device, seed=KC.INIT_SEED, keep_indices=False)
     lay.enable_main_grad()
     torch.manual_seed(SMALL_SEED)
@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--treatment", choices=["prox", "coupled"], default="prox")
     ap.add_argument("--alpha", type=float, required=True)
     ap.add_argument("--reg-steps", type=int, default=REG)
+    ap.add_argument("--graph-seed", type=int, default=KC.GRAPH_SEED)
     ap.add_argument("--ckpt-dir", required=True, help="checkpoints (outside git)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -107,7 +108,7 @@ def main():
 
     dev = torch.device("cuda")
     t_start = time.perf_counter()
-    lay, proj, head = build(a.C, a.R, dev)
+    lay, proj, head = build(a.C, a.R, dev, a.graph_seed)
     teacher = Teacher(dev)
     valid = SP.valid_slots(lay)
     W0 = int(valid.sum()) * 64
@@ -120,7 +121,7 @@ def main():
                            alpha=a.alpha, warmup=WARMUP, reg_steps=a.reg_steps, ramp=RAMP, finetune=FINETUNE,
                            lr_layer=LR_LAYER, lr_small=LR_SMALL, weight_decay=0.0, moments="bf16",
                            stochastic_rounding=True, init="granule.init_by_neuron/1 seed 17, bias 0",
-                           teacher_seed=TEACHER_SEED, small_seed=SMALL_SEED, graph_seed=KC.GRAPH_SEED,
+                           teacher_seed=TEACHER_SEED, small_seed=SMALL_SEED, graph_seed=a.graph_seed,
                            variant="idf", tile=128),
                steps=[], evals=[], provenance=provenance(Path(common.__file__).resolve().parent.parent),
                hardware_state=hardware_state())
@@ -199,7 +200,8 @@ def main():
     st = L1.weight_stats(lay.weight.detach(), valid)
     log["checkpoint_stats"] = st
     mask = SP.learned_mask(lay.weight.detach(), valid)
-    tag = f"C{a.C}_R{a.R}_{a.treatment}_a{a.alpha:g}" + ("" if a.reg_steps == REG else f"_reg{a.reg_steps}")
+    tag = f"C{a.C}_R{a.R}_{a.treatment}_a{a.alpha:g}" + ("" if a.reg_steps == REG else f"_reg{a.reg_steps}") + \
+        ("" if a.graph_seed == KC.GRAPH_SEED else f"_g{a.graph_seed}")
     ck = Path(a.ckpt_dir) / f"{tag}_step{step}.pt"
     log["checkpoint"] = SP.save_checkpoint(ck, lay, mask, dict(tag=tag, step=step, phase="after regularized updates",
                                                                config=log["config"], calibration=log["calibration"]))

@@ -27,8 +27,8 @@ DENSITIES = (0.5, 0.25, 0.1, 0.05)  # target sparsity 50 / 75 / 90 / 95 %
 SCREEN_ROUNDS = (2, 2, 2)
 
 
-def ckpt(ckdir, C, treatment, alpha, step=128, R=256):
-    return str(Path(ckdir) / f"C{C}_R{R}_{treatment}_a{alpha:g}_step{step}.pt")
+def ckpt(ckdir, C, treatment, alpha, step=128, R=256, seed=0):
+    return str(Path(ckdir) / (f"C{C}_R{R}_{treatment}_a{alpha:g}" + (f"_g{seed}" if seed else "") + f"_step{step}.pt"))
 
 
 def learn_plan(ckdir, escalate=False):
@@ -44,9 +44,31 @@ def learn_plan(ckdir, escalate=False):
                 note="M_train = 512 labelled diagnostic; checkpoints after the regularized phase (step 128)")
 
 
-def _timing(tag, C, factory, opt=None, inference=False, rounds=SCREEN_ROUNDS):
+def _timing(tag, C, factory, opt=None, inference=False, rounds=SCREEN_ROUNDS, graph_seed=0):
     return dict(kind="timing", tag=tag, C=C, factory=factory, opt=opt or dict(l1="none"), inference=inference,
-                rounds=list(rounds))
+                rounds=list(rounds), graph_seed=graph_seed)
+
+
+CONFIRM_ROUNDS = (4, 2, 3)
+
+
+def confirm_sparse_plan(ckdir, combos, seeds=(0, 1, 2)):
+    """Confirmation of selected sparse combinations: for each graph seed, an alpha = 0 learning run on that graph
+    (checkpoint), then each combination and its identical-mask dense masked control (4 rounds x 2 reps x 3)."""
+    jobs = []
+    for s in seeds:
+        for C in sorted({c["C"] for c in combos}):
+            if s:
+                jobs.append(dict(kind="learn", tag=f"learn_C{C}_prox_a0_g{s}", C=C, treatment="prox", alpha=0.0,
+                                 graph_seed=s))
+    for s in seeds:
+        for c in combos:
+            base = ckpt(ckdir, c["C"], "prox", 0.0, seed=s)
+            for fmt in ("dense_masked", c["format"]):
+                f = dict(checkpoint=base, format=fmt, mask=c["mask"], density=c["density"], mask_seed=0)
+                jobs.append(_timing(f"C{c['C']}_{c['mask']}_d{c['density']:g}_{fmt}_g{s}", c["C"], f,
+                                    rounds=CONFIRM_ROUNDS, graph_seed=s))
+    return dict(stage="confirm_sparse", combos=combos, seeds=list(seeds), jobs=jobs)
 
 
 def sparse_plan(ckdir, C, densities=DENSITIES, learned_alphas=(10.0, 30.0, 100.0), with_random=True, formats_el=("dense_masked", "csr"),
@@ -115,6 +137,8 @@ def cmd_of(job, ckdir):
              "--alpha", str(job["alpha"]), "--ckpt-dir", str(ckdir), "--out", str(job["_out"])]
         if job.get("reg_steps"):
             a += ["--reg-steps", str(job["reg_steps"])]
+        if job.get("graph_seed"):
+            a += ["--graph-seed", str(job["graph_seed"])]
         return a
     if job["kind"] == "timing":
         case = KC.case(KC.case_id(job["C"], 64, 256))
@@ -123,7 +147,8 @@ def cmd_of(job, ckdir):
         if f.get("mask") == "none":  # dense layer from the checkpoint, no mask
             f = dict(f, mask="checkpoint_dense")
         a = [sys.executable, str(HERE / "bench_supergroups.py"), "--hidden", str(case["H"]), "--C", str(case["C"]),
-             "--S", "64", "--R", "256", "--graph-seed", "0", "--init-seed", str(KC.INIT_SEED), "--input-seed",
+             "--S", "64", "--R", "256", "--graph-seed", str(job.get("graph_seed", 0)), "--init-seed", str(KC.INIT_SEED),
+             "--input-seed",
              str(KC.INPUT_SEED), "--rounds", str(r), "--reps", str(p), "--iters", str(i), "--kcsr",
              "--layer-factory", "k64_factory:sparse", "--factory-args", json.dumps(f),
              "--opt-factory", "k64_opt:l1", "--opt-args", json.dumps(job["opt"]), "--out", job["_rel"]]

@@ -98,6 +98,9 @@ def main():
         from torch.sparse import SparseSemiStructuredTensor, to_sparse_semi_structured
 
         res["semi_structured_api"] = "torch.sparse.to_sparse_semi_structured"
+        res["force_cutlass"] = bool(getattr(SparseSemiStructuredTensor, "_FORCE_CUTLASS", None))
+        res["backend_note"] = ("default backend of this PyTorch build: cuSPARSELt when available and _FORCE_CUTLASS is "
+                               "False, else CUTLASS")
     except Exception as e:  # noqa: BLE001
         res["semi_structured_api"] = f"unavailable: {e!r}"
         Path(a.out).write_text(json.dumps(res, indent=1))
