@@ -98,34 +98,43 @@ hypothetical [B,H] fp32 hidden (never allocated)           0 B
 total                                                 12.4 GiB
 (reference) [B,H] fp32 hidden would need               3.0 TiB
 measured peak 12.5 GiB, steady 8.6 GiB, checkpoint 1.7 GiB
-Traceback (most recent call last):
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/benchmarks/bench_memory.py", line 77, in <module>
-    main()
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/benchmarks/bench_memory.py", line 52, in main
-    y = lay(x)
-        ^^^^^^
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/layer.py", line 135, in forward
-    y = SemanticPoolFunction.apply(x2, self.weight, self.bias, rt, self.cfg, policy,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/.conda/envs/env_isaaclab/lib/python3.11/site-packages/torch/autograd/function.py", line 575, in apply
-    return super().apply(*args, **kwargs)  # type: ignore[misc]
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/autograd.py", line 217, in forward
-    out = rt.forward(xc, wc, bc, track_ids=(policy == "save_winners"))
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/autograd.py", line 73, in forward
-    out = self.backend.forward(self, x, w, b, track_ids)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/cuda_ops.py", line 246, in forward
-    return self._topk_forward(rt, xop, xop.stride(0), xop.stride(1), w, b, track_ids, B)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/evga/Projects/pamachine/GranuleLayer/sparse_pooling/kernels/cuda_ops.py", line 214, in _topk_forward
-    st_slot = torch.empty((B, U, KP), device=dev, dtype=torch.int32)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 19.71 GiB of which 11.51 GiB is free. Including non-PyTorch memory, this process has 8.19 GiB memory in use. Of the allocated memory 6.75 GiB is allocated by PyTorch, and 1.15 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+== topk_mean(k=8) -> logmeanexp(tau=0.5)  policy=minimal_stats  l1ckpt=save
+weights                                                1.5 GiB
+bias                                                 190.8 MiB
+indices                                              190.8 MiB
+input x (bf16)                                        16.0 MiB
+input x^T copy (bf16)                                 16.0 MiB
+output y (fp32)                                       32.0 MiB
+grad main_grad W (fp32)                                3.0 GiB
+grad main_grad b (fp32)                              381.5 MiB
+grad dX (fp32 + cast)                                 48.0 MiB
+pooling workspace (splits)                                 0 B
+activation checkpoint                                  1.5 GiB
+backward coefficients c1,c2,c3 (fp32)                  4.5 GiB
+optimizer moments m,v                                  3.4 GiB
+optimizer master weights                                   0 B
+hypothetical [B,H] fp32 hidden (never allocated)           0 B
+total                                                 14.7 GiB
+(reference) [B,H] fp32 hidden would need               3.0 TiB
+measured peak 16.2 GiB, steady 8.6 GiB, checkpoint 1.5 GiB
+
+== topk_mean(k=8) -> logmeanexp(tau=0.5)  policy=minimal_stats  l1ckpt=recompute
+weights                                                1.5 GiB
+bias                                                 190.8 MiB
+indices                                              190.8 MiB
+input x (bf16)                                        16.0 MiB
+input x^T copy (bf16)                                 16.0 MiB
+output y (fp32)                                       32.0 MiB
+grad main_grad W (fp32)                                3.0 GiB
+grad main_grad b (fp32)                              381.5 MiB
+grad dX (fp32 + cast)                                 48.0 MiB
+pooling workspace (splits)                                 0 B
+activation checkpoint                                      0 B
+backward coefficients c1,c2,c3 (fp32)                  4.5 GiB
+optimizer moments m,v                                  3.4 GiB
+optimizer master weights                                   0 B
+hypothetical [B,H] fp32 hidden (never allocated)           0 B
+total                                                 13.2 GiB
+(reference) [B,H] fp32 hidden would need               3.0 TiB
+measured peak 16.2 GiB, steady 8.6 GiB, checkpoint 0 B

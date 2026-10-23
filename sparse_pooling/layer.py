@@ -10,6 +10,7 @@ from torch import nn
 from .autograd import Level1Runtime, SemanticPoolFunction, SparsePoolFunction, resolve_policy
 from .config import DEFAULT_WORKSPACE_BUDGET, PhysicalPlan, PoolingConfig
 from .layout import SparseLayout, init_parameters
+from .supergroups import ConnectivityPlan, SgExec, generate_indices
 
 
 class SparsePoolingLayer(nn.Module):
@@ -27,6 +28,13 @@ class SparsePoolingLayer(nn.Module):
         weight_layout: "canonical" (K-contiguous [G,NB,C,8]) | "packed"
             (mma-fragment-packed, see layout.py) | "auto" (packed for Mode B
             unless backend="triton").  Gradients (main_grad) use the same layout.
+        connectivity: optional ``ConnectivityPlan`` (supergroups.py): every index
+            record draws its 8 inputs from one of Q = R * D / S input supergroups.
+            This changes the model (an explicit architecture choice; the default is
+            unrestricted connectivity).  Weights / bias are drawn exactly as for the
+            unrestricted layer with the same seed; only the indices differ.  The compact
+            graph metadata (``sg_feat`` [Q, S], ``sg_buckets`` [n, 4], ``sg_plan``) is
+            saved in the state dict.  How it runs is ``plan.cuda_input_supergroup_backend``.
     """
 
     def __init__(
@@ -46,6 +54,7 @@ class SparsePoolingLayer(nn.Module):
         bias_std: float = 0.0,
         backend: str = "auto",
         weight_layout: str = "auto",
+        connectivity: Optional[ConnectivityPlan] = None,
     ):
         super().__init__()
         self.cfg = PoolingConfig.parse(pooling, checkpoint_policy)
@@ -65,6 +74,15 @@ class SparsePoolingLayer(nn.Module):
         self.backend_name = backend
         self.workspace_budget = workspace_budget
         idx, w, b = init_parameters(self.layout, device or "cpu", dtype=dtype, seed=seed, bias_std=bias_std)
+        self.connectivity = connectivity
+        self.graph_stats = None
+        if connectivity is not None:
+            idx_c, graph, self.graph_stats = generate_indices(self.layout.canonical, connectivity, device or "cpu")
+            idx = self.layout.pack_indices(idx_c) if self.layout.packed else idx_c
+            self.register_buffer("sg_feat", graph.feat)
+            self.register_buffer("sg_buckets", graph.buckets)
+            self.register_buffer("sg_plan", torch.frombuffer(bytearray(connectivity.to_json().encode()),
+                                                             dtype=torch.uint8).clone())
         self.register_buffer("indices", idx)
         self.weight = nn.Parameter(w)
         self.bias = nn.Parameter(b)
@@ -86,28 +104,68 @@ class SparsePoolingLayer(nn.Module):
 
     # ------------------------------------------------------------------
     def _runtime(self) -> Level1Runtime:
-        key = (self.indices.device, self.indices.data_ptr(), id(self.plan))
+        key = (self.indices.device, self.indices.data_ptr(), id(self.plan),
+               self.sg_buckets.data_ptr() if self.connectivity is not None else 0)  # graph rebuilds -> new metadata
         if self._rt is None or self._rt_key != key:
-            backend = None
+            backend, why = None, ""
             if self.backend_name in ("cuda", "auto") and self.indices.is_cuda:
-                try:
-                    from .kernels.cuda_ops import CudaBackend
+                try:  # the native library of THIS device's build target (built on first use)
+                    from .backends.cuda.runtime import backend_for
 
-                    backend = CudaBackend.get(strict=(self.backend_name == "cuda"))
-                except Exception:
+                    backend = backend_for(self.indices.device)
+                except Exception as e:  # noqa: BLE001
                     if self.backend_name == "cuda":
                         raise
-                    backend = None
+                    why = f"native CUDA backend unavailable ({type(e).__name__}: {e}); using Triton"
+            elif self.backend_name in ("cuda", "auto"):
+                why = f"parameters on {self.indices.device}: no CUDA backend"
             l1 = self.cfg.levels[0]
             self._rt = Level1Runtime(self.layout, self.indices, l1, self.plan,
                                      l1.neurons_per_shard if self.cfg.is_semantic_hierarchy else None,
                                      self.workspace_budget, backend)
+            if why:
+                self._rt.last_info["backend_fallback"] = why
+            if self.connectivity is not None:
+                self._rt.sg = SgExec(self.layout, self.sg_feat, self.sg_buckets, self.connectivity)
             self._rt_key = key
         return self._rt
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        plan = state_dict.get(prefix + "sg_plan")
+        if self.connectivity is not None and plan is not None:
+            got = ConnectivityPlan.from_json(bytes(plan.cpu().tolist()).decode())
+            if got != self.connectivity:
+                raise ValueError(f"checkpoint connectivity {got} != layer connectivity {self.connectivity}")
+        if (self.connectivity is None) != (plan is None):
+            raise ValueError("checkpoint and layer disagree on input-supergroup connectivity")
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        self._rt = None  # rebuild the execution metadata from the loaded graph
 
     @property
     def last_info(self):
         return {} if self._rt is None else dict(self._rt.last_info)
+
+    def explain(self, batch: int = 8192) -> dict:
+        """The execution the layer would use for a batch of ``batch`` tokens, without running it:
+        backend, device, build target, tuning profile and validation status, and the resolved
+        forward / backward choices with reasons (the same records as last_info["execution"])."""
+        from .config import resolve_reduction
+
+        rt = self._runtime()
+        out = dict(backend_requested=self.backend_name, backend_fallback=rt.last_info.get("backend_fallback"))
+        if not self.indices.is_cuda or rt.backend is None:
+            out["backend"] = "triton" if self.indices.is_cuda else "none (CPU parameters)"
+            return out
+        mode, why, _ = resolve_reduction(self.plan)
+        prev = rt.det
+        rt.det = mode == "deterministic"
+        try:
+            out.update(rt.describe_execution(), reduction=dict(mode=mode, reason=why),
+                       forward=rt.resolver.resolve(rt, batch, "fwd").as_dict(),
+                       backward=rt.resolver.resolve(rt, batch, "bwd").as_dict())
+        finally:
+            rt.det = prev
+        return out
 
     @property
     def effective_policy(self) -> str:
@@ -141,5 +199,7 @@ class SparsePoolingLayer(nn.Module):
     def extra_repr(self) -> str:
         L = self.layout
         mode = f"B(C={L.block})" if L.shared_indices else "A(independent)"
+        conn = "" if self.connectivity is None else (
+            f", supergroups(S={self.connectivity.input_supergroup_dim}, R={self.connectivity.partition_rounds})")
         return (f"in={L.input_dim}, hidden={L.hidden_dim:,}, out={L.groups}, fan_in={L.fan_in}, "
-                f"mode={mode}, pooling={self.cfg.describe()}, policy={self.effective_policy}")
+                f"mode={mode}, pooling={self.cfg.describe()}, policy={self.effective_policy}{conn}")

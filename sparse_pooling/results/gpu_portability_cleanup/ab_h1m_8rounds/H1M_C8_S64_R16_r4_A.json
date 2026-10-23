@@ -1,0 +1,425 @@
+{
+ "commit": "2b9a84d66c239934fd58ec45d7736804c78ccba2",
+ "dirty": false,
+ "nvcc_flags": [
+  "-O3",
+  "-arch=sm_86",
+  "--use_fast_math",
+  "-lineinfo",
+  "-std=c++17",
+  "-Xcompiler",
+  "-fPIC"
+ ],
+ "build": {
+  "library": "/home/evga/Projects/pamachine/GranuleLayer-det/sparse_pooling/kernels/cuda/build/85ae1204436a25da/libsparse_pool.so",
+  "flags": [
+   "-O3",
+   "-arch=sm_86",
+   "--use_fast_math",
+   "-lineinfo",
+   "-std=c++17",
+   "-Xcompiler",
+   "-fPIC"
+  ]
+ },
+ "implementation": "/home/evga/Projects/pamachine/GranuleLayer-det/sparse_pooling",
+ "library": "/home/evga/Projects/pamachine/GranuleLayer-det/sparse_pooling/kernels/cuda/build/85ae1204436a25da/libsparse_pool.so",
+ "args": {
+  "hidden": 1000000,
+  "C": 8,
+  "batch": 8192,
+  "groups": 1024,
+  "input_dim": 1024,
+  "S": 64,
+  "R": 16,
+  "gen": "balanced_permutation",
+  "graph_seed": 0,
+  "init_seed": 0,
+  "input_seed": 0,
+  "pooling": "mean",
+  "grad_precision": "split",
+  "variant": [
+   "fast:reduction=fast"
+  ],
+  "rounds": 1,
+  "reps": 2,
+  "iters": 3,
+  "validate": false,
+  "matched_c8": false,
+  "skip_infeasible": false,
+  "protocol": "complete",
+  "snapshot_device": "cpu",
+  "composed": "",
+  "out": "/tmp/claude-1000/-home-evga-Projects-pamachine-GranuleLayer/e66ff75c-8fe6-4fe1-b6ed-405b72256ac1/scratchpad/ab_h1m/H1M_C8_S64_R16_r4_A"
+ },
+ "config": {
+  "C": 8,
+  "S": 64,
+  "R": 16,
+  "Q": 256,
+  "H": 1000000,
+  "M": 8192,
+  "G": 1024,
+  "D": 1024,
+  "pooling": "mean",
+  "precision": "split",
+  "graph": "{\"generation\": \"balanced_permutation\", \"input_supergroup_dim\": 64, \"partition_rounds\": 16, \"seed\": 0, \"version\": 1}",
+  "matched_c8": false,
+  "layout_block": 8
+ },
+ "build_seconds": 0.37294385698623955,
+ "graph_stats": {
+  "generation_seconds": 0.1633395050012041,
+  "generation_peak_extra_bytes": 2904064
+ },
+ "validation": null,
+ "persistent_bytes": {
+  "weights": 16252928,
+  "bias": 2031616,
+  "indices": 2031616,
+  "main_grad": 36569088,
+  "adam_moments": 36569088,
+  "graph_metadata": 540672,
+  "work_lists_cached_last_runtime": 919552
+ },
+ "infeasible": {},
+ "protocol": "complete",
+ "snapshot": {
+  "device": "cpu",
+  "bytes": 91422720,
+  "contents": [
+   "p0.data",
+   "p0.main_grad",
+   "p0.opt.m",
+   "p0.opt.v",
+   "p1.data",
+   "p1.main_grad",
+   "p1.opt.m",
+   "p1.opt.v"
+  ]
+ },
+ "gpu_before": {
+  "temperature.gpu": 35.0,
+  "clocks.sm": 1785.0,
+  "clocks.mem": 9501.0,
+  "power.draw": 127.58,
+  "power.limit": 370.0
+ },
+ "gpu_after": {
+  "temperature.gpu": 40.0,
+  "clocks.sm": 1800.0,
+  "clocks.mem": 9501.0,
+  "power.draw": 194.3,
+  "power.limit": 370.0
+ },
+ "variants": {
+  "fast": {
+   "plan": {
+    "reduction": "fast"
+   },
+   "kernels": {
+    "fwd": "grouped",
+    "dx": "grouped",
+    "dw": "grouped"
+   },
+   "info": {
+    "reduction": {
+     "mode": "fast",
+     "reason": "explicit reduction='fast'"
+    },
+    "backward_organization": "separate",
+    "grouped_fused": null,
+    "grouped_fwd": {
+     "tokens": 128,
+     "warps": 8,
+     "chunk_units": 2048,
+     "ctas": 16384,
+     "chunks": 256,
+     "items": 31744,
+     "work_list_bytes": 384000,
+     "reduction": "fp32_atomics"
+    },
+    "grouped_dx": {
+     "plan": "tiles",
+     "plan_reason": "scale rule: mean units per nonempty bucket 1.00 < 4.0 (possible-bucket mean 0.12, occupancy 0.121; M = 8192)",
+     "mean_units_per_nonempty_bucket": 1.0,
+     "mean_units_per_possible_bucket": 0.12109375,
+     "bucket_occupancy": 0.12109375,
+     "tokens": 64,
+     "warps": 8,
+     "reduction_group_warps": 8,
+     "chunk_units": 4096,
+     "units_per_chunk_mean": 124.0,
+     "token_tiles": 128,
+     "tail_utilization": 1.0,
+     "ctas": 32768,
+     "chunks": 256,
+     "smem": 26624,
+     "scatter": "swizzle4_capped",
+     "scatter_layout": "float2 pairs, 4 bank groups; <= 80 registers (3 CTAs / SM at 8 warps)",
+     "scatter_order": "same",
+     "scatter_fallback": "",
+     "kernel": "sgx_dx_kernel<1, 8, 4, 8, 1, 2, 10, 1>",
+     "epilogue": "mask",
+     "work_list_bytes": 384000,
+     "reduction": "shared_cas+fp32_atomics"
+    },
+    "grouped_dw": {
+     "cfg": 2,
+     "ctas": 2048,
+     "smem": 18432,
+     "projection": "padded",
+     "projection_reason": "auto (SG_AUTO_DW_PROJECTION)",
+     "kernel": "sg_dw_kernel<1, 8, 8, 2, 4, 2, true, 2, 1, 0>",
+     "fallback": "sg_dw_kernel generic epilogue (BWD_FALLBACK, padded projection)",
+     "work_list_bytes": 151552
+    },
+    "grouped_fallback": {},
+    "dx_epilogue": "mask",
+    "dw_epilogue": "fast",
+    "dw_staging": "full",
+    "dw_cfg": 1,
+    "dx_warps": 16,
+    "bwd_dx_grid": [
+     512,
+     8
+    ],
+    "bwd_dw_grid": [
+     1,
+     1024
+    ]
+   },
+   "phases": {
+    "fwd_layout": {
+     "median_ms": 0.15723200142383575,
+     "min_ms": 0.14131200313568115,
+     "max_ms": 0.21379199624061584,
+     "round_medians_ms": [
+      0.15723200142383575
+     ],
+     "n": 6
+    },
+    "fwd_zero": {
+     "median_ms": 0.04044799879193306,
+     "min_ms": 0.03984000161290169,
+     "max_ms": 0.04095999896526337,
+     "round_medians_ms": [
+      0.04044799879193306
+     ],
+     "n": 6
+    },
+    "fwd_kernel": {
+     "median_ms": 4.299776077270508,
+     "min_ms": 4.25164794921875,
+     "max_ms": 4.704256057739258,
+     "round_medians_ms": [
+      4.299776077270508
+     ],
+     "n": 6
+    },
+    "fwd_kernel_generic": {
+     "median_ms": 4.340223789215088,
+     "min_ms": 4.291488170623779,
+     "max_ms": 4.744192123413086,
+     "round_medians_ms": [
+      4.340223789215088
+     ],
+     "n": 6
+    },
+    "fwd_finalize": {
+     "median_ms": 0.21299199759960175,
+     "min_ms": 0.21196800470352173,
+     "max_ms": 0.21503999829292297,
+     "round_medians_ms": [
+      0.21299199759960175
+     ],
+     "n": 6
+    },
+    "fwd_total": {
+     "median_ms": 4.88040018081665,
+     "min_ms": 4.759552001953125,
+     "max_ms": 5.278719902038574,
+     "round_medians_ms": [
+      4.856800079345703
+     ],
+     "n": 6
+    },
+    "bwd_coef": {
+     "median_ms": 0.3041279911994934,
+     "min_ms": 0.3031040132045746,
+     "max_ms": 0.3184640109539032,
+     "round_medians_ms": [
+      0.3041279911994934
+     ],
+     "n": 6
+    },
+    "bwd_layout": {
+     "median_ms": 0.11673600226640701,
+     "min_ms": 0.1157120019197464,
+     "max_ms": 0.16486400365829468,
+     "round_medians_ms": [
+      0.11627200245857239
+     ],
+     "n": 6
+    },
+    "bwd_dx_init": {
+     "median_ms": 0.03993599861860275,
+     "min_ms": 0.03984000161290169,
+     "max_ms": 0.04095999896526337,
+     "round_medians_ms": [
+      0.03993599861860275
+     ],
+     "n": 6
+    },
+    "dx_kernel": {
+     "median_ms": 19.373295783996582,
+     "min_ms": 17.683456420898438,
+     "max_ms": 21.399551391601562,
+     "round_medians_ms": [
+      19.373295783996582
+     ],
+     "n": 6
+    },
+    "dw_kernel": {
+     "median_ms": 15.521103858947754,
+     "min_ms": 13.89568042755127,
+     "max_ms": 17.23072052001953,
+     "round_medians_ms": [
+      15.884799480438232
+     ],
+     "n": 6
+    },
+    "bwd_kernels": {
+     "median_ms": 34.30144119262695,
+     "min_ms": 32.98099136352539,
+     "max_ms": 37.87161636352539,
+     "round_medians_ms": [
+      35.21638488769531
+     ],
+     "n": 6
+    },
+    "bwd_post": {
+     "median_ms": 0.12902399897575378,
+     "min_ms": 0.12595200538635254,
+     "max_ms": 0.130048006772995,
+     "round_medians_ms": [
+      0.12902399897575378
+     ],
+     "n": 6
+    },
+    "bwd_total": {
+     "median_ms": 35.51436805725098,
+     "min_ms": 34.20569610595703,
+     "max_ms": 39.07583999633789,
+     "round_medians_ms": [
+      36.459007263183594
+     ],
+     "n": 6
+    },
+    "optimizer": {
+     "median_ms": 0.22835199534893036,
+     "min_ms": 0.22732800245285034,
+     "max_ms": 0.23449599742889404,
+     "round_medians_ms": [
+      0.22835199534893036
+     ],
+     "n": 6
+    },
+    "step": {
+     "median_ms": 40.78583908081055,
+     "min_ms": 39.19462585449219,
+     "max_ms": 44.589054107666016,
+     "round_medians_ms": [
+      41.75508689880371
+     ],
+     "n": 6
+    }
+   },
+   "peak_allocated_bytes": 366113792,
+   "peak_reserved_bytes": 383778816,
+   "warmup_peak_allocated_bytes": 366113792,
+   "warmup_peak_reserved_bytes": 383778816,
+   "step_scratch_peak_bytes": 251661312,
+   "work_list_bytes": 919552,
+   "descriptors": {
+    "schema": "granule.bucket_stats/2",
+    "D": 1024,
+    "G": 1024,
+    "Q": 256,
+    "S": 64,
+    "R": 16,
+    "C": 8,
+    "unit_blocks": 4,
+    "neurons_per_work_unit": 32,
+    "work_unit_packing": "4 blocks x 8 neurons (fragment-packed parameter quantum)",
+    "valid_neurons": 1000000,
+    "padded_neuron_capacity": 1015808,
+    "graph_seed": 0,
+    "graph_generation": "balanced_permutation",
+    "graph_version": 1,
+    "total_work_units": 31744,
+    "total_possible_buckets": 262144,
+    "nonempty_buckets": 31744,
+    "empty_buckets": 230400,
+    "zero_unit_records": 0,
+    "bucket_occupancy": 0.12109375,
+    "mean_units_per_nonempty_bucket": 1.0,
+    "mean_units_per_possible_bucket": 0.12109375,
+    "bucket_units_min": 1,
+    "bucket_units_max": 1,
+    "bucket_units_quantiles": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ],
+    "quantile_ps": [
+     0.0,
+     0.1,
+     0.5,
+     0.9,
+     0.99,
+     1.0
+    ],
+    "quantile_convention": "nearest rank: q_p = x_(max(1, ceil(p n))) of the n sorted values (p = 0 -> min, 1 -> max)",
+    "zero_work_convention": "Nnz = 0: mean_units_per_nonempty_bucket = None; the dispatch rules read 0.0",
+    "chunk_target_units": 4096,
+    "item_max_units": 0,
+    "chunks": 256,
+    "items": 31744,
+    "units_per_chunk_mean": 124.0,
+    "units_per_chunk_min": 124,
+    "units_per_chunk_max": 124,
+    "units_per_chunk_quantiles": [
+     124.0,
+     124.0,
+     124.0,
+     124.0,
+     124.0,
+     124.0
+    ],
+    "items_per_chunk_mean": 124.0,
+    "chunks_per_supergroup_mean": 1.0,
+    "chunks_per_supergroup_max": 1,
+    "supergroups_without_chunks": 0,
+    "units_per_supergroup_mean": 124.0,
+    "units": 31744,
+    "buckets": 31744,
+    "units_per_bucket_mean": 1.0,
+    "compat_aliases": "units_per_bucket_mean = mean_units_per_nonempty_bucket (schema 1 name); buckets = nonempty_buckets; units = total_work_units"
+   },
+   "restore_checks": 2
+  }
+ },
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 3090",
+  "sm": "8.6",
+  "sms": 82,
+  "memory_GiB": 23.68,
+  "torch": "2.7.0+cu128",
+  "cuda_runtime": "12.8"
+ },
+ "timestamp": "2026-10-19 18:31:24"
+}

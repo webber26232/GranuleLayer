@@ -6,11 +6,8 @@ static int launch_topk(const TopkArgs& t, int n_tiles, int PS, cudaStream_t s) {
   size_t smem = (size_t)t.f.D * 16 * MT * 2 + (size_t)16 * MT * NW * 4 * 4;  // slab + pass-1 maxima
   size_t red = (size_t)NW * 16 * MT * KP * 8;
   if (red > smem) smem = red;
-  static size_t configured = 0;
-  if (smem > configured) {
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    configured = smem;
-  }
+  static LaunchSlot slot;  // per instantiation and device
+  if (int e = sp_prepare(k, smem, NW * 32, slot)) return e;
   k<<<dim3(n_tiles, t.f.U, PS), NW * 32, smem, s>>>(t);
   return (int)cudaGetLastError();
 }

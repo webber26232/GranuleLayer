@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from .config import LevelSpec, PhysicalPlan, PoolingConfig
+from .config import LevelSpec, PhysicalPlan, PoolingConfig, resolve_reduction
 from .kernels import ops
 from .layout import SparseLayout
 from .reference.pytorch_reference import level2_forward
@@ -67,7 +67,12 @@ def resolve_policy(level: LevelSpec, requested: str) -> str:
 
 class Level1Runtime:
     """Executes the fused level-1 kernels for one layer.  Holds no tensors of
-    size [B, H]; all per-call state lives in the autograd ctx."""
+    size [B, H]; all per-call state lives in the autograd ctx.
+
+    Static execution facts (device capabilities, tuning-profile selection, build) are resolved once
+    per runtime, which the layer rebuilds when the parameters move to another device; per-call
+    choices come from ``resolve`` (backends/dispatch.py), cached per batch size, reduction mode and
+    plan field values."""
 
     def __init__(self, layout: SparseLayout, idx: torch.Tensor, level: LevelSpec,
                  plan: PhysicalPlan, nps: Optional[int], workspace_budget: int,
@@ -79,23 +84,148 @@ class Level1Runtime:
         self.units = ops.make_units(layout, nps, idx.device)
         self.counts_i32 = layout.counts_tensor(idx.device).contiguous()
         self.workspace_budget = workspace_budget
-        self.backend = backend  # optional CUDA backend (kernels/cuda_ops.py)
+        self.backend = backend  # optional CUDA backend (backends/cuda/runtime.py)
+        self.sg = None  # input-supergroup execution metadata (supergroups.SgExec), if any
         self.last_info: Dict = {}
+        self.det = False  # resolved reduction of the current call (resolve_reduction)
+        self._caps = None
+        self._resolver = None
+        self._resolver_key = None
+        self._resolved: Dict = {}
+        self._recorded: Dict = {}  # ResolvedPlan objects already written to last_info["execution"]
+
+    # ------------------------------------------------------- execution facts
+    @property
+    def caps(self):
+        if self._caps is None:
+            from .backends.capabilities import query
+
+            self._caps = query(self.idx.device)
+        return self._caps
+
+    @property
+    def resolver(self):
+        """Resolver of this runtime's device and tuning profile (re-selected if the plan's
+        ``tuning_profile`` or SPARSE_POOL_PROFILE changes)."""
+        import os
+
+        from .backends.profiles import PROFILE_ENV
+
+        key = (self.plan.tuning_profile, os.environ.get(PROFILE_ENV, ""))
+        if self._resolver is None or self._resolver_key != key:
+            from .backends.dispatch import Resolver
+            from .backends.profiles import select
+
+            self._resolver = Resolver(self.caps, select(self.caps, self.plan.tuning_profile))
+            self._resolver_key = key
+            self._resolved = {}
+        return self._resolver
+
+    def resolve(self, B: int, part: str):
+        """ResolvedPlan of this call's forward / backward (cached; host-only)."""
+        from .backends.dispatch import plan_key
+
+        r = self.resolver
+        key = (part, B, self.det, plan_key(self.plan))
+        rp = self._resolved.get(key)
+        if rp is None:
+            if len(self._resolved) > 64:
+                self._resolved.clear()
+            rp = self._resolved[key] = r.resolve(self, B, part)
+        ex = self.last_info.get("execution")
+        name = "forward" if part == "fwd" else "backward"
+        if ex is None or self._recorded.get(name) is not rp or self._recorded.get("resolver") is not r:
+            ex = dict(ex or {}, **self.describe_execution())  # record only when the choice changes
+            ex[name] = rp.as_dict()
+            self._recorded.update({name: rp, "resolver": r})
+            self.last_info["execution"] = ex
+        return rp
+
+    def det_reason(self, B: int) -> str:
+        """Why the deterministic reduction cannot run for this call ("" if it can); cached per batch,
+        plan field values and profile (static facts of the layer)."""
+        from .backends.dispatch import plan_key
+
+        r = self.resolver
+        key = ("det", B, plan_key(self.plan))
+        if key not in self._resolved:
+            self.det = True  # det_reason resolves the deterministic dX configuration
+            try:
+                self._resolved[key] = r.det_reason(self, B)
+            finally:
+                self.det = False
+        return self._resolved[key]
+
+    def describe_execution(self) -> Dict:
+        """Static part of last_info["execution"]: backend, device, build, profile."""
+        sel = self.resolver.selection
+        c = self.caps
+        out = dict(backend="cuda" if self.backend is not None else "triton",
+                   device=dict(index=c.index, name=c.name, uuid=c.uuid, arch=c.arch, sm_count=c.sm_count,
+                               smem_per_block_optin=c.smem_per_block_optin, source=c.source),
+                   profile=sel.summary())
+        if self.backend is not None:
+            out["build"] = self.backend.build_info()
+        return out
+
+    def note_fallback(self, phase: str, rp):
+        """last_info["grouped_fallback"][phase]: why an automatic grouped phase runs generic."""
+        if self.sg is None or self.plan.grouped_request(phase) == "generic":
+            return
+        fb = self.last_info.setdefault("grouped_fallback", {})
+        fb.pop(phase, None)
+        r = rp.fallbacks.get(phase)
+        if r:
+            fb[phase] = r
+
+    def check_devices(self, *tensors):
+        dev = self.idx.device
+        for t in tensors:
+            if t is not None and t.device != dev:
+                raise ValueError(f"tensor on {t.device} but the layer's parameters are on {dev} "
+                                 "(move the input or the layer)")
+
+    def resolve_reduction(self, B: int) -> bool:
+        """Resolve PhysicalPlan.reduction (and the global PyTorch deterministic setting) for this
+        call; sets self.det.  An unsupported deterministic request raises (warn_only: warns and
+        runs fast); the decision is recorded in last_info["reduction"]."""
+        mode, why, strict = resolve_reduction(self.plan)
+        if mode == "deterministic":
+            if self.backend is None:
+                reason = "needs the CUDA backend (the Triton kernels reduce with FP32 atomics)"
+                if self.last_info.get("backend_fallback"):
+                    reason += f"; {self.last_info['backend_fallback']}"
+            else:
+                reason = self.det_reason(B)
+            if reason:
+                msg = f"reduction='deterministic' ({why}) is unsupported for this layer: {reason}"
+                if strict:
+                    raise ValueError(msg)
+                import warnings
+
+                warnings.warn(msg + "; running reduction='fast'", stacklevel=4)
+                mode, why = "fast", why + f"; unsupported ({reason}) -> fast (warn_only)"
+        self.det = mode == "deterministic"
+        self.last_info["reduction"] = {"mode": mode, "reason": why}
+        return self.det
 
     # ---------------------------------------------------------------- forward
     def forward(self, x: torch.Tensor, w, b, track_ids: bool) -> Dict[str, torch.Tensor]:
         """Return merged statistics: 'pre' [B, U] and operator extras."""
         B = x.shape[0]
         lv = self.level
+        self.check_devices(x, w, b)
+        self.resolve_reduction(B)
         track_ids = track_ids and lv.type in ("max", "topk_mean")
-        if self.backend is not None and self.backend.supports_forward(self, track_ids):
+        if self.backend is not None and self.resolve(B, "fwd").fwd["backend"] == "cuda":
             out = self.backend.forward(self, x, w, b, track_ids)
             self.last_info["forward_backend"] = "cuda"
             return out
-        ps = ops.choose_splits(B, self.units, lv, self.plan, track_ids, self.workspace_budget)
+        ps = ops.choose_splits(B, self.units, lv, self.plan, track_ids, self.workspace_budget, self._sm_count())
         x_op, sxf, sxb = ops.input_operand(x, self.plan)
-        st = ops.fused_forward_states(x_op, sxf, sxb, B, self.idx, w, b, self.counts_i32,
-                                      self.layout, lv, self.units, self.plan, track_ids, ps)
+        with _device_of(x):
+            st = ops.fused_forward_states(x_op, sxf, sxb, B, self.idx, w, b, self.counts_i32,
+                                          self.layout, lv, self.units, self.plan, track_ids, ps)
         self.last_info.update(forward_backend="triton", phys_splits=ps,
                               workspace_bytes=sum(t.numel() * t.element_size() for t in st.values()))
         out = ops.merge_finalize(st, lv, self.units.counts)
@@ -110,6 +240,8 @@ class Level1Runtime:
         B, D = x.shape
         info = self.last_info
         info["policy"] = policy
+        self.check_devices(x, w, b, g_pre, dw_buf, db_buf)
+        self.resolve_reduction(B)
         # recompute statistics that were not saved
         need = {
             "max": "winner",
@@ -130,10 +262,19 @@ class Level1Runtime:
             stats.update(self.forward(x, w, b, track_ids=True))
         info["recomputed_stats"] = recomputed
 
-        if self.backend is not None and self.backend.supports_backward(self):
+        if self.backend is not None and self.resolve(B, "bwd").bwd["backend"] == "cuda":
             info["backward_backend"] = "cuda"
             return self.backend.backward(self, x, w, b, g_pre, stats, dw_buf, db_buf)
         info["backward_backend"] = "triton"
+        with _device_of(x):
+            return self._triton_backward(x, w, b, g_pre, stats, dw_buf, db_buf)
+
+    def _sm_count(self) -> int:
+        return self.caps.sm_count if self.idx.is_cuda else 82
+
+    def _triton_backward(self, x, w, b, g_pre, stats, dw_buf, db_buf):
+        lv = self.level
+        B, D = x.shape
 
         x_op, sxf, sxb = ops.input_operand(x, self.plan)
         if self.plan.input_layout == "feature_major":
@@ -159,12 +300,24 @@ class Level1Runtime:
         return dx.t() if self.plan.input_layout == "feature_major" else dx
 
 
+def _device_of(t: torch.Tensor):
+    """Launch context of the Triton kernels: the tensors' device (not the current device)."""
+    import contextlib
+
+    return torch.cuda.device(t.device) if t.is_cuda else contextlib.nullcontext()
+
+
 def _event_backward_chunk(rt, xs, w, b, g, stats, dx_rows, dw_buf, db_buf):
     """Sparse winner-event backward for a slice of tokens; dx_rows is the FP32
     [b, D] destination view."""
     lv = rt.level
     x_op, sxf, sxb = ops.input_operand(xs, rt.plan)
     sdf, sdb = dx_rows.stride(1), dx_rows.stride(0)
+    with _device_of(xs):
+        _event_launch(rt, lv, x_op, sxf, sxb, w, b, g, stats, dx_rows, sdf, sdb, dw_buf, db_buf)
+
+
+def _event_launch(rt, lv, x_op, sxf, sxb, w, b, g, stats, dx_rows, sdf, sdb, dw_buf, db_buf):
     if lv.type == "max":
         ops.launch_event_backward(x_op, sxf, sxb, rt.idx, w, b, rt.layout, lv, rt.units,
                                   stats["winner"][..., None], g[..., None], dx_rows, sdf, sdb, dw_buf, db_buf)
@@ -257,7 +410,8 @@ class SparsePoolFunction(torch.autograd.Function):
         dx = rt.backward(xc, wc, bc, g_pre.contiguous(), saved, ctx.policy, dw_buf, db_buf, recomputed)
         gw = None if use_main else dw_buf.to(w.dtype)
         gb = None if use_main else db_buf.to(b.dtype)
-        return dx.to(x.dtype), gw, gb, None, None, None
+        # contiguous: the grouped dX is a transposed [D, B] view (one fused transpose + cast)
+        return dx.to(x.dtype, memory_format=torch.contiguous_format), gw, gb, None, None, None
 
 
 class SemanticPoolFunction(torch.autograd.Function):

@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+# the implementation under test: this checkout, or GRANULE_IMPL_ROOT (another checkout of the
+# repository, e.g. the reviewed baseline in an old-versus-new comparison with the same tools)
+sys.path.insert(0, os.path.abspath(os.environ.get("GRANULE_IMPL_ROOT")
+                                   or os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import torch  # noqa: E402
 
@@ -69,6 +72,7 @@ def save(name: str, payload: Dict):
     RESULTS.mkdir(parents=True, exist_ok=True)
     payload = dict(payload, gpu=gpu_info(), timestamp=time.strftime("%Y-%m-%d %H:%M:%S"))
     path = RESULTS / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=1, default=str))
     return path
 

@@ -28,7 +28,7 @@ def e2e_table(name, title):
     if not d:
         return f"\n_{name}: not run_\n"
     rerun = load(name + "_rerun")  # cases re-measured after a fix replace the originals
-    if rerun:
+    if rerun and rerun["timestamp"] > d["timestamp"]:  # a full re-run supersedes older fixes
         newer = {r["name"]: r for r in rerun["records"]}
         d["records"] = [dict(newer[r["name"]], rerun=True) if r["name"] in newer else r for r in d["records"]]
     a = d["args"]

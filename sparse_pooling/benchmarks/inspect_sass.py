@@ -16,7 +16,7 @@ import sys
 import torch
 
 from common import save
-from sparse_pooling.kernels.cuda_ops import SRC_DIR, _unit_hash, build_library
+from sparse_pooling.kernels.cuda_ops import build_library
 
 PATTERNS = ["HMMA.1688.F32.BF16", "HMMA.16816.F32.BF16", "LDSM.16.MT88", "LDSM.16.M88", "MOVM", "ATOMS.CAST.SPIN",
             "ATOMS.CAST.SPIN.64", "RED.E.ADD.F32", "MUFU.EX2", "LDG.E.128", "LDG.E.64", "LDGSTS", "BAR.SYNC"]
@@ -84,11 +84,9 @@ def triton_mma():
 
 
 def main():
-    lib = build_library()
-    # only the objects of the current sources (the cache keeps old versions)
-    objs = [SRC_DIR / "build" / "objs" / f"{u.stem}-{_unit_hash(u)}.o" for u in sorted(SRC_DIR.glob("*.cu"))]
+    lib = build_library()  # the production library of the current device (its own build identity)
     report = {}
-    for obj in objs:
+    for obj in [lib]:
         counts, regs = sass_counts(obj)
         for fn, c in counts.items():
             name = demangle(fn)

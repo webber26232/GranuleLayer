@@ -1,5 +1,6 @@
 #pragma once
 // forward launch templates (instantiated per pooling op in fwd_<op>.cu)
+#include "launch.cuh"
 #include "common.cuh"
 #include "sparse_pool_fwd.cuh"
 
@@ -10,11 +11,8 @@ static int launch_fwd(const FwdArgs& a, int n_tiles, int PS, cudaStream_t s) {
   size_t smem = (size_t)a.D * BM * 2;
   size_t red = (size_t)4 * NW * BM * 4;
   if (red > smem) smem = red;
-  static size_t configured = 0;  // per instantiation: grow the opt-in as needed
-  if (smem > configured) {
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    configured = smem;
-  }
+  static LaunchSlot slot;  // per instantiation and device
+  if (int e = sp_prepare(k, smem, NW * 32, slot)) return e;
   dim3 grid(n_tiles, a.U, PS);
   k<<<grid, NW * 32, smem, s>>>(a);
   return (int)cudaGetLastError();

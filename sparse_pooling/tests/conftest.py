@@ -27,6 +27,29 @@ def cuda_backend_available() -> bool:
 requires_cuda_backend = pytest.mark.skipif(not cuda_backend_available(), reason="native CUDA kernels unavailable")
 
 
+def active_profile():
+    """Tuning profile the current CUDA device resolves to under "auto" (SPARSE_POOL_PROFILE included);
+    None without CUDA."""
+    if not torch.cuda.is_available():
+        return None
+    from sparse_pooling.backends.capabilities import query
+    from sparse_pooling.backends.profiles import select
+
+    return select(query(torch.device("cuda"))).profile
+
+
+def active_profile_name():
+    prof = active_profile()
+    return prof.name if prof is not None else None
+
+
+# Tests asserting the RTX 3090 profile's measured automatic choices (tables, thresholds, warps,
+# staging).  They do not apply when another profile is active (SPARSE_POOL_PROFILE=generic_cuda or
+# another device); the numerical tests still run under every profile.
+rtx3090_policy = pytest.mark.skipif(active_profile_name() not in (None, "rtx3090"),
+                                    reason="asserts the RTX 3090 profile's measured auto policy; another profile is active")
+
+
 def rel_err(a: torch.Tensor, b: torch.Tensor) -> float:
     a, b = a.double(), b.double()
     return ((a - b).norm() / (b.norm() + 1e-30)).item()

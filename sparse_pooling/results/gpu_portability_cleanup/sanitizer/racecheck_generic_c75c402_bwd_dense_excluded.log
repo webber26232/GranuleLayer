@@ -1,0 +1,31 @@
+========= COMPUTE-SANITIZER
+ok 8 relu(max) save_winners cuda triton
+ok 8 relu(max) minimal_stats cuda triton
+ok 16 topk_mean(k=8) save_winners cuda triton
+ok 8 mean[relu] minimal_stats cuda cuda
+ok 64 logmeanexp(tau=0.5) minimal_stats cuda cuda
+ok 32 softmax_weighted(beta=2) minimal_stats cuda cuda
+ok 16 power_mean(p=3)[relu] minimal_stats cuda cuda
+ok 8 logmeanexp(tau=0.5) minimal_stats triton triton
+ok None mean[relu] minimal_stats triton triton
+ok 8 relu(max) -> mean[relu] save_winners cuda triton
+ok k_dw indexed cfg 1 stages 2 split B 40
+ok k_dw indexed cfg 3 stages 2 split B 40
+ok k_dw indexed cfg 1 stages 3 split B 24
+ok k_dw indexed cfg 3 stages 3 bf16 B 40
+ok k_dw indexed cfg 2 stages 2 split B 8
+ok k_dw full cfg 1 stages 2 split B 40
+ok bwd mean[relu] split dx mask 16 dw mask B 40 
+ok bwd mean[relu] bf16 dx fast 16 dw fast B 24 
+ok bwd mean[relu] split dx mask 16 dw fast B 40 nonfinite
+ok bwd mean split dx mask 16 dw mask B 8 
+ok bwd logmeanexp(tau=0.5) split dx fast 16 dw fast B 40 
+ok bwd logmeanexp(tau=0.5) bf16 dx fast 16 dw fast B 40 nonfinite
+ok bwd power_mean(p=2)[relu] split dx fast 16 dw fast B 40 
+ok bwd mean[relu] split dx mask 16 dw fast B 40 
+ok bwd mean[relu] split dx mask 32 dw fast B 40 
+ok bwd logmeanexp(tau=0.5) split dx fast 32 dw fast B 24 nonfinite
+ok bwd mean[relu] bf16 dx mask 32 dw mask B 40 nonfinite
+ok bwd C=8 mask mask
+ok bwd C=8 fast fast
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
