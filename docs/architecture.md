@@ -17,6 +17,8 @@ sparse_pooling/
       build.py                    bundles, target selection, build identity, cache, locking
       runtime.py                  ctypes ABI, library registry, launches (CudaBackend)
   benchmarks/                     maintained tools (timing, repeatability, sanitizer, SASS, matrices)
+  experimental/                   EXPERIMENTAL (explicit import only): generalized fan-in KgenLayer, generalized
+                                  generator, logical C = 128 / 256 physical lowering, float64 reference
   tests/
 docs/                             this documentation, evidence index, validation summaries
 ```
@@ -62,6 +64,7 @@ reasons. The legacy `last_info` keys (`grouped_dx`, `dx_epilogue`, …) are unch
 | production | `abi.cu`, `sparse_pool.cu`, `fwd_*.cu`, `bwd_*.cu`, `sg_fwd_*`, `sg_dx_*`, `sg_dxs_c8_*` (sc 9 / 10), `sg_dw_*`, `sg_det.cu` | first CUDA call per target |
 | experimental | `experimental/`: other scatter layouts, owner variant, fused backward, compact dW projection, mask dW control | first explicit request |
 | diagnostics | `diagnostics/`: slab layout dumps, projection / ReLU-decision diagnostic | tests / tools only |
+| kgen (EXPERIMENTAL) | `experimental/kgen/`: generalized fan-in K = 8 / 16 / 32 / 64, logical C <= 256 input-supergroup kernels of `sparse_pooling/experimental` (random K/C/S/R sweep) | first `KgenLayer` call; never selected by `SparsePoolingLayer` |
 
 Headers: `common.cuh` (activations, power, BF16 helpers) includes `isa_sm80.cuh` (mma, ldmatrix,
 movmatrix, cp.async; `#error` below sm_80) and `numerics.cuh` (FTZ compare / multiply, ex2). Kernel
