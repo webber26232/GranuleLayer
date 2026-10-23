@@ -131,6 +131,16 @@ def maskcov_plan(ckdir, densities=DENSITIES, learned_alphas=(1.0, 10.0, 30.0, 10
     return dict(stage="maskcov", jobs=jobs)
 
 
+def finetune_plan(ckdir, C=256, densities=DENSITIES):
+    """Fixed-mask fine-tuning (synthetic diagnostic) of pruning masks applied to the alpha = 0 checkpoint."""
+    base = ckpt(ckdir, C, "prox", 0.0)
+    jobs = [dict(kind="finetune", tag=f"ft_C{C}_none", C=C, checkpoint=base, mask="none", density=1.0)]
+    for d in densities:
+        for kind in ("magnitude", "tile", "random", "random_tile"):
+            jobs.append(dict(kind="finetune", tag=f"ft_C{C}_{kind}_d{d:g}", C=C, checkpoint=base, mask=kind, density=d))
+    return dict(stage="finetune", C=C, jobs=jobs)
+
+
 def cmd_of(job, ckdir):
     if job["kind"] == "learn":
         a = [sys.executable, str(HERE / "k64_learn.py"), "--C", str(job["C"]), "--treatment", job["treatment"],
@@ -157,6 +167,9 @@ def cmd_of(job, ckdir):
         return [sys.executable, str(HERE / "k64_refresh.py"), "--checkpoint", job["checkpoint"], "--C", str(job["C"]),
                 "--format", job["format"], "--mask", job["mask"], "--density", str(job["density"]), "--out",
                 str(job["_out"])]
+    if job["kind"] == "finetune":
+        return [sys.executable, str(HERE / "k64_finetune.py"), "--checkpoint", job["checkpoint"], "--C", str(job["C"]),
+                "--mask", job["mask"], "--density", str(job["density"]), "--out", str(job["_out"])]
     if job["kind"] == "maskcov":
         a = [sys.executable, str(HERE / "k64_coverage.py"), "--case", KC.case_id(job["C"], 64, 256), "--checkpoint",
              job["checkpoint"], "--mask-source", job["source"], "--kind", job["label"], "--out", str(job["_out"])]
@@ -193,7 +206,7 @@ def run_plan(plan, out, ckdir, timeout, resume):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["learn", "escalate", "sparse", "anchors", "refresh", "maskcov", "plan"])
+    ap.add_argument("stage", choices=["learn", "escalate", "sparse", "anchors", "refresh", "maskcov", "finetune", "plan"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--C", type=int, default=256)
@@ -223,6 +236,8 @@ def main():
         plan = refresh_plan(a.ckpt_dir, a.C, dens)
     elif a.stage == "maskcov":
         plan = maskcov_plan(a.ckpt_dir, dens)
+    elif a.stage == "finetune":
+        plan = finetune_plan(a.ckpt_dir, a.C, dens)
     else:
         raise SystemExit(a.stage)
     run_plan(plan, a.out, a.ckpt_dir, a.timeout, a.resume)

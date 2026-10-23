@@ -98,13 +98,16 @@ def sparse_tables(raw: Path, lines: list):
                   "| run | mask | density | format | fwd | dX | dW | opt | step | vs dense masked (same mask) | peak GiB | "
                   "values + metadata MB | bias-only rows |", "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         dm = {(r.get("mask"), r.get("density_target"), r.get("mask_sha")): r for r in rows
-              if r.get("fmt") == "dense_masked" and not r.get("inference")}
+              if r.get("fmt") == "dense_masked" and not r.get("inference") and r.get("mask") != "none"}
+        l1_none = next((r for r in rows if r.get("mask") == "none" and r.get("l1") == "none"), None)
         for r in rows:
             if r["status"] != "measured":
                 lines.append(f"| {r['tag']} | {r['status']} |||||||||||")
                 continue
             ref = dm.get((r["mask"], r["density_target"], r["mask_sha"]))
             rel = f"×{ref['step'] / r['step']:.2f}" if ref and not r["inference"] and r is not ref else "–"
+            if r["mask"] == "none" and l1_none is not None and r is not l1_none:
+                rel = f"×{l1_none['step'] / r['step']:.3f} vs dense none (opt {r['optimizer'] - l1_none['optimizer']:+.2f} ms)"
             if r["inference"] and ref:
                 rel = f"fwd ×{ref['fwd_total'] / r['fwd_total']:.2f}"
             mb = ((r["compact_values"] or 0) + (r["sparse_metadata"] or 0)) / 2**20 if r["compact_values"] else None
@@ -117,10 +120,10 @@ def sparse_tables(raw: Path, lines: list):
 
 def refresh_tables(raw: Path, lines: list):
     rows = []
-    for s in load_status(raw / "refresh"):
+    for s in load_status(raw / "refresh2"):
         if s["status"] != "measured":
             continue
-        j = json.loads((raw / "refresh" / s["json"]).read_text())
+        j = json.loads((raw / "refresh2" / s["json"]).read_text())
         rows.append(dict(tag=s["tag"], C=j["C"], format=j["format"], mask=j["mask"], density=j["density"],
                          select=j["select"]["median_s"], compress=j["compress"]["median_s"],
                          work_lists=j["work_lists"]["median_s"], state_remap=j["state_remap"]["median_s"],
@@ -194,9 +197,134 @@ def semi24_tables(raw: Path, lines: list):
                      f"{r['fwd_max_rel_err']:.1e} / {r['dx_max_rel_err']:.1e} |")
 
 
+def finetune_tables(raw: Path, lines: list):
+    rows = []
+    for s in load_status(raw / "finetune"):
+        if s["status"] != "measured":
+            continue
+        j = json.loads((raw / "finetune" / s["json"]).read_text())
+        rows.append(dict(tag=s["tag"], C=j["C"], mask=j["mask"], density=j["density"], h0=j["heldout_checkpoint"],
+                         h1=j["heldout_pruned"], h2=j["heldout_finetuned"], all_zero=j["all_zero_neurons"]))
+    if not rows:
+        return
+    write_csv(raw / "csv" / "finetune.csv", rows)
+    lines += ["", "## Fixed-mask fine-tuning of pruned alpha = 0 checkpoints (synthetic diagnostic, M_train = 512, 32 "
+              "updates, fresh optimizer state)", "", "| run | mask | density | held-out: checkpoint → pruned → fine-tuned | "
+              "all-zero neurons |", "|---|---|---:|---|---:|"]
+    for r in rows:
+        lines.append(f"| {r['tag']} | {r['mask']} | {r['density']:.4f} | {r['h0']:.5f} → {r['h1']:.5f} → {r['h2']:.5f} | "
+                     f"{r['all_zero']:,} |")
+
+
 def tables(raw: Path, lines: list):
     learn_tables(raw, lines)
+    finetune_tables(raw, lines)
+    confirm_tables(raw, lines)
     sparse_tables(raw, lines)
     refresh_tables(raw, lines)
+    amortization_tables(raw, lines)
     maskcov_tables(raw, lines)
     semi24_tables(raw, lines)
+
+
+def _t95(n):
+    return {2: 12.706, 3: 4.303, 4: 3.182, 5: 2.776}.get(n, 2.0)
+
+
+def confirm_tables(raw: Path, lines: list):
+    import statistics as stt
+
+    from k64_report import variant_rows
+
+    rows = [r for r in variant_rows(raw, "confirm") if r["status"] == "measured"]
+    write_csv(raw / "csv" / "confirm_dense.csv", rows)
+    by = {}
+    for r in rows:
+        by.setdefault((r["case"], r["variant"]), {})[r["seed"]] = r
+    lines += ["", "## Confirmation: dense (graph seeds 0 / 1 / 2; per seed the median of 24 restored steps)", "",
+              "Paired ratio = reference step / variant step on the SAME graph and parameters, per seed; mean ± t-95 % over "
+              "the 3 graph seeds (within-run samples are not treated as independent graph samples).", "",
+              "| case | variant | step per seed (ms) | mean | seed sd | paired ratio vs ref per seed | mean ratio ± 95 % |",
+              "|---|---|---|---:|---:|---|---|"]
+    cases = sorted({k[0] for k in by}, key=lambda c: (c in KCX.ANCHORS, c))
+    for c in cases:
+        ref = by.get((c, "ref"), {})
+        for (cc, v), seeds in sorted(by.items()):
+            if cc != c:
+                continue
+            if c in KCX.ANCHORS:  # anchors: one entry per run
+                steps = [r["step"] for r in rows if r["case"] == c]
+                lines.append(f"| {c} (anchor) | {v} | {', '.join(f'{x:,.1f}' for x in steps)} | {stt.mean(steps):,.1f} | "
+                             f"{stt.pstdev(steps):.1f} | – | – |")
+                break
+            ss = [seeds[s]["step"] for s in sorted(seeds)]
+            rat = [ref[s]["step"] / seeds[s]["step"] for s in sorted(seeds) if s in ref]
+            m = stt.mean(ss)
+            sd = stt.stdev(ss) if len(ss) > 1 else 0.0
+            rs = ", ".join(f"×{x:.3f}" for x in rat)
+            ci = f"×{stt.mean(rat):.3f} ± {_t95(len(rat)) * stt.stdev(rat) / len(rat) ** 0.5:.3f}" if len(rat) > 1 else "–"
+            lines.append(f"| {c} | {v} | {', '.join(f'{x:,.1f}' for x in ss)} | {m:,.1f} | {sd:.1f} | {rs} | {ci} |")
+    srows = sparse_rows(raw, "confirm_sparse")
+    write_csv(raw / "csv" / "confirm_sparse.csv", [{k: v for k, v in r.items() if k != "work"} for r in srows])
+    if not srows:
+        return
+    lines += ["", "## Confirmation: frozen-mask sparse vs identical-mask dense masked (graph seeds 0 / 1 / 2)", "",
+              "| combination | seed | dense masked step | sparse step | paired speedup | mask sha |", "|---|---:|---:|---:|---:|---|"]
+    combo = {}
+    for r in srows:
+        if r["status"] != "measured":
+            continue
+        tag = r["tag"]
+        seed = int(tag.rsplit("_g", 1)[1])
+        key = (r["C"], r["mask"], r["density_target"])
+        combo.setdefault(key, {}).setdefault(seed, {})[r["fmt"]] = r
+    for key, seeds in sorted(combo.items()):
+        rats = []
+        for s, d in sorted(seeds.items()):
+            dm = d.get("dense_masked")
+            sp = next((v for k, v in d.items() if k != "dense_masked"), None)
+            if dm and sp:
+                rats.append(dm["step"] / sp["step"])
+                lines.append(f"| C{key[0]} {key[1]} {key[2]:g} {sp['fmt']} | {s} | {dm['step']:,.1f} | {sp['step']:,.1f} | "
+                             f"×{rats[-1]:.3f} | {sp['mask_sha']} (= dense: {sp['mask_sha'] == dm['mask_sha']}) |")
+        if len(rats) > 1:
+            lines.append(f"| **C{key[0]} {key[1]} {key[2]:g}** | mean | | | ×{stt.mean(rats):.3f} ± "
+                         f"{_t95(len(rats)) * stt.stdev(rats) / len(rats) ** 0.5:.3f} | |")
+
+
+import k64_cases as KCX  # noqa: E402
+
+
+def amortization_tables(raw: Path, lines: list):
+    """base + U / T from MEASURED components (C256): ordinary frozen-mask step, dense step, refresh U."""
+    sp = {r["tag"]: r for r in sparse_rows(raw, "sparse_c256") if r["status"] == "measured"}
+    dense = sp.get("C256_dense_l1_none")
+    ref = {}
+    for s in load_status(raw / "refresh2"):
+        if s["status"] == "measured":
+            j = json.loads((raw / "refresh2" / s["json"]).read_text())
+            ref[(j["format"], round(j["density_target"], 4))] = j["U_seconds"] * 1e3
+    rows = []
+    lines += ["", "## Mask-refresh amortization (C256; measured components, combined arithmetically)", "",
+              "Periodic reselection (no regrowth: reselects among stored values): step = s + U / T. Dynamic refresh with "
+              "regrowth candidates: one DENSE step (dense gradient) + U every T steps: ((T - 1) s + dense + U) / T. "
+              f"Dense step (dense kernels, no mask) = {dense['step']:.1f} ms." if dense else "", "",
+              "| format | density | ordinary step s | U (ms) | periodic T=1 / 16 / 128 | dynamic T=1 / 16 / 128 | "
+              "dense masked (same mask) | break-even of U vs dense masked |", "|---|---:|---:|---:|---|---|---:|---|"]
+    for (fmt, mask) in (("tile", "tile"), ("csr", "magnitude")):
+        for d in (0.5, 0.25, 0.1, 0.05):
+            r = sp.get(f"C256_{mask}_d{d:g}_{fmt}")
+            dm = sp.get(f"C256_{mask}_d{d:g}_dense_masked")
+            U = ref.get((fmt, d))
+            if not (r and U is not None and dense and dm):
+                continue
+            s_ = r["step"]
+            per = [s_ + U / T for T in (1, 16, 128)]
+            dyn = [((T - 1) * s_ + dense["step"] + U) / T for T in (1, 16, 128)]
+            save = dm["step"] - s_
+            be = f"{U / save:.2f} steps" if save > 0 else "none (no per-step saving)"
+            rows.append(dict(format=fmt, density=d, s=s_, U=U, periodic=per, dynamic=dyn, dense_masked=dm["step"],
+                             break_even=be))
+            lines.append(f"| {fmt} | {d:g} | {s_:,.1f} | {U:,.0f} | {' / '.join(f'{x:,.0f}' for x in per)} | "
+                         f"{' / '.join(f'{x:,.0f}' for x in dyn)} | {dm['step']:,.1f} | {be} |")
+    write_csv(raw / "csv" / "amortization.csv", rows)
