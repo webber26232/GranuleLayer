@@ -161,12 +161,16 @@ def kgen_smem(kind: str, D: int, S: int, cfg, group_warps: int = 1) -> int:
 # reduction only), feature-major input with B % 8 == 0.  Variants: "direct" (record gather, S in
 # [64, 256]), "idf_rmw" / "idf" (index-free S = K = 64; per-record slab adds / register-accumulated dX),
 # "tile" (index-free tile-sparse 16 x 16 weight tiles), "csr" (index-free unstructured fixed mask,
-# CUDA cores).  Tilings are compile-time (KxCfg in kgx.cuh, reported by sp_kx_config).  Status
-# "experimental": correct (tests/test_kgx.py), never auto-selected.
+# CUDA cores).  Width-preserving study (kgx_wide.cuh, experimental/kgx_wide.py): "tilew16" (the new
+# kernels' 16 x 16 tiles: cross-check of the measured "tile" kernels), "tile8" (16 x 8 tiles), "hyb16"
+# (protected two-input backbone per row group + 16 x 16 tiles; mixed scalar / MMA numerics).  Tilings are
+# compile-time (KxCfg in kgx.cuh, reported by sp_kx_config).  Status "experimental": correct
+# (tests/test_kgx.py, tests/test_kgx_wide.py), never auto-selected.
 KGX_K = 64
 KGX_C_MAX = 2048
 KGX_TILES = (64, 128, 256)
-KGX_VARIANTS = ("direct", "idf_rmw", "idf", "tile", "csr")
+KGX_WIDE_VARIANTS = {"tilew16": (16, 0), "tile8": (8, 0), "hyb16": (16, 1)}  # (tile width, backbone)
+KGX_VARIANTS = ("direct", "idf_rmw", "idf", "tile", "csr") + tuple(KGX_WIDE_VARIANTS)
 KGX_STATUS = "experimental"
 KGX_CSR_WINDOW = 256  # entries per CSR neuron-window buffer (kgx_csr.cuh KC_WE)
 
@@ -186,6 +190,7 @@ def kgx_smem(kind: str, variant: str, D: int, S: int, cfg: dict, group_warps: in
         return m + S * 16 * mt * 2
     if kind == "dx":
         bm = 16 * cfg["dx_mt"]
-        copies = cfg["dx_warps"] if variant in ("idf", "tile") else cfg["dx_warps"] // group_warps
+        copies = cfg["dx_warps"] if variant in ("idf", "tile") + tuple(KGX_WIDE_VARIANTS) else \
+            cfg["dx_warps"] // group_warps
         return m + S * bm * 2 + copies * S * bm * 4
     return m + cfg["dw_stages"] * cfg["dw_tiles_per_stage"] * S * 16 * 2

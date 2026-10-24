@@ -79,12 +79,29 @@ def logical_params(layer):
         _, w, b = L.to_canonical(layer.indices, layer.weight.detach(), layer.bias.detach())
         nb = -(-L.max_group // L.block)
         return w[:, :nb], b[:, :nb]
+    if hasattr(layer, "dense_params"):  # compact K64 formats: dense logical values (was: the stored compact tensor)
+        return layer.dense_params()
     return layer.weight.detach(), layer.bias.detach()
+
+
+PARAMS_SHA_SCHEMA = {"canonical": "granule.canonical_k64/1 (experimental/canonical.py: valid neurons in (g, n) "
+                                  "order, 64-input envelope, inactive = +0, -0 -> +0)",
+                     "logical": "sha256 of the logical [G, NB, C, K] weight / bias tensors incl. padding"}
+
+
+def params_sha_schema(layer) -> str:
+    return "canonical" if hasattr(layer, "canon_rows") else "logical"
 
 
 @torch.no_grad()
 def params_sha(layer) -> str:
-    """sha256 of the logical canonical weights and bias (equal for the same model in any representation)."""
+    """sha256 identifying the mathematical parameters.  K64 envelope layers (``canon_rows``): the canonical
+    streamed hash of experimental/canonical.py (equal for the same model in every representation: dense,
+    dense masked, tile16 / tile8 / hybrid, CSR, lowered controls).  Others: the logical canonical tensors."""
+    if hasattr(layer, "canon_rows"):
+        from sparse_pooling.experimental import canonical
+
+        return canonical.digest(layer, "param")["sha"]
     w, b = logical_params(layer)
     h = hashlib.sha256()
     for t in (w, b):

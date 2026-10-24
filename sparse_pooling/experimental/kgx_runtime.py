@@ -28,6 +28,13 @@ class KxArgs(ctypes.Structure):
     ]
 
 
+class KwArgs(ctypes.Structure):
+    """kgx_wide.cuh KwArgs: the KxArgs of the tile kernels + backbone pointers and the (tile width, backbone)
+    selection (checked by the native entry points)."""
+    _fields_ = [("a", KxArgs), ("bbk", ctypes.c_void_p), ("bbw", ctypes.c_void_p), ("dBB", ctypes.c_void_p),
+                ("tb", ctypes.c_int), ("bb", ctypes.c_int)]
+
+
 # kernel variant ids (kgx_dispatch.cuh)
 VARIANTS = {"direct": 0, "idf_rmw": 1, "idf": 2, "tile": 3, "csr": 4}
 KIND = {"fwd": 0, "dx": 1, "dw": 2}
@@ -55,6 +62,15 @@ class KgxBackend:
         self._kc = lib.fn("sp_kc", [ctypes.POINTER(KxArgs)] + [ctypes.c_int] * 3 + [ctypes.c_void_p])
         self._smem = lib.fn("sp_kx_smem", [ctypes.POINTER(KxArgs), ctypes.c_int, ctypes.c_int,
                                             ctypes.POINTER(ctypes.c_longlong)])
+        # width-preserving kernels (kgx_wide.cuh): their own argument struct, checked the same way
+        f = lib.fn("sp_kw_struct_layout", [ctypes.POINTER(ctypes.c_longlong), ctypes.c_int])
+        n = f(buf, 64)
+        want = [ctypes.sizeof(KwArgs)] + [getattr(KwArgs, nm).offset for nm, _ in KwArgs._fields_]
+        if n != len(want) or list(buf[:n]) != want:
+            raise RuntimeError(f"{lib.path}: KwArgs layout mismatch (native {list(buf[:max(n, 0)])}, ctypes {want})")
+        self._wfwd = lib.fn("sp_kw_fwd", [ctypes.POINTER(KwArgs)] + [ctypes.c_int] * 2 + [ctypes.c_void_p])
+        self._wdx = lib.fn("sp_kw_dx", [ctypes.POINTER(KwArgs)] + [ctypes.c_int] * 3 + [ctypes.c_void_p])
+        self._wdw = lib.fn("sp_kw_dw", [ctypes.POINTER(KwArgs)] + [ctypes.c_int] * 2 + [ctypes.c_void_p])
 
     def build_info(self) -> Dict:
         i = self.native.ident
@@ -80,6 +96,17 @@ class KgxBackend:
         else:
             err = self._dw(ctypes.byref(a), v, split, n_chunks, s)
         R_._check(err, f"kgx {variant} {kind}")
+
+
+    def launch_wide(self, kind: str, w: KwArgs, split: int, n_chunks: int, n_tiles: int, device):
+        s = R_._stream(device)
+        if kind == "fwd":
+            err = self._wfwd(ctypes.byref(w), n_chunks, n_tiles, s)
+        elif kind == "dx":
+            err = self._wdx(ctypes.byref(w), split, n_chunks, n_tiles, s)
+        else:
+            err = self._wdw(ctypes.byref(w), split, n_chunks, s)
+        R_._check(err, f"kgx wide (tb {w.tb}, backbone {w.bb}) {kind}")
 
 
 _lock = threading.Lock()

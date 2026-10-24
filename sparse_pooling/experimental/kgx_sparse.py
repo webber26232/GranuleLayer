@@ -237,6 +237,27 @@ class KgxTileLayer(_SparseBase):
     def element_mask(self):
         return tiles_to_elements(self.tile_mask_bool, valid_slots(self))
 
+    def canon_rows(self, src, g, n):
+        from .canonical import dense_slots
+
+        s = dense_slots(self, g, n)
+        u, r = s // 16, s % 16
+        tm = self.tile_mask_bool[u]
+        first = (self.tmeta[u] >> 4).to(torch.int64)
+        rank = torch.cumsum(tm.to(torch.int64), 1) - tm.to(torch.int64)
+        W = src["weight"]
+        rows = torch.zeros((len(s), 64), dtype=W.dtype, device=W.device)
+        for kt in range(4):
+            sel = tm[:, kt]
+            rows[sel, 16 * kt:16 * kt + 16] = W[(first + rank[:, kt])[sel], r[sel]]
+        return rows, src["bias"].reshape(-1)[s]
+
+    def canon_mask_rows(self, g, n):
+        from .canonical import dense_slots
+
+        s = dense_slots(self, g, n)
+        return self.tile_mask_bool[s // 16].repeat_interleave(16, 1)
+
     def metadata_bytes(self):
         return dict(tile_meta=self.tmeta.numel() * 4, compact_values=self.weight.numel() * 2,
                     active_tiles=int(self.weight.shape[0]))
@@ -292,6 +313,25 @@ class KgxCsrLayer(KgxTileLayer):
     def _wptrs(self, w):
         return w.data_ptr(), 0, self.rowptr.data_ptr(), self.kix.data_ptr()
 
+    # The CSR kernels (kgx_csr.cuh) multiply on CUDA cores with dz in FP32: no BF16 / split rounding of dz
+    # exists in them, so plan.grad_precision does not select anything.  A "bf16" request (coarser dz) is
+    # rejected rather than silently exceeded; the default "split" request is accepted and the EXECUTED
+    # scheme ("fp32_scalar") is what records and numerics report (audit correction of the K64 study, whose
+    # inherited description said split BF16).
+    def grad_scheme(self) -> str:
+        return "fp32_scalar"
+
+    def _check_call(self, B: int):
+        if self.plan.grad_precision == "bf16":
+            raise ValueError("kgx csr computes dz in FP32 (CUDA cores): a BF16-dZ request (grad_precision='bf16') "
+                             "cannot be honoured")
+        return super()._check_call(B)
+
+    def numerics(self) -> str:
+        return ("BF16 x / W / bias operands; CUDA-core FP32 products of the stored entries only, FP32 accumulation "
+                "of z before one ReLU (4-way interleaved partial sums); backward recomputes z; dz in FP32 (no BF16 "
+                "or split rounding) in the dX / dW products (FP32 accumulate); FP32 atomics for cross-CTA sums")
+
     def group_keep(self):
         rp = self.rowptr.to(torch.int64)
         return (rp[16::16] - rp[:-1:16]) > 0  # any entry among the group's 16 neuron slots
@@ -333,6 +373,32 @@ class KgxCsrLayer(KgxTileLayer):
             row = torch.repeat_interleave(torch.arange(s0, s1, device=m.device), (rp[s0 + 1:s1 + 1] - rp[s0:s1]))
             m[row, self.kix[e0:e1].long()] = 1
         return m.view(L.weight_shape)
+
+    def _csr_entries(self, s):
+        rp = self.rowptr.to(torch.int64)
+        e0, cnt = rp[s], rp[s + 1] - rp[s]
+        r = torch.repeat_interleave(torch.arange(len(s), device=s.device), cnt)
+        e = torch.arange(len(r), device=s.device) - torch.repeat_interleave(torch.cumsum(cnt, 0) - cnt, cnt) + e0[r]
+        return r, e
+
+    def canon_rows(self, src, g, n):
+        from .canonical import dense_slots
+
+        s = dense_slots(self, g, n)
+        r, e = self._csr_entries(s)
+        W = src["weight"]
+        rows = torch.zeros((len(s), 64), dtype=W.dtype, device=W.device)
+        rows[r, self.kix[e].long()] = W[e]
+        return rows, src["bias"].reshape(-1)[s]
+
+    def canon_mask_rows(self, g, n):
+        from .canonical import dense_slots
+
+        s = dense_slots(self, g, n)
+        r, e = self._csr_entries(s)
+        m = torch.zeros((len(s), 64), dtype=torch.bool, device=s.device)
+        m[r, self.kix[e].long()] = True
+        return m
 
     def metadata_bytes(self):
         return dict(rowptr=self.rowptr.numel() * 4, kix=self.kix.numel(), compact_values=self.weight.numel() * 2,

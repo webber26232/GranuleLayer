@@ -9,6 +9,9 @@ k64_factory:<name>`` (D = --input-dim, H = --hidden, G = --groups, logical C = -
               SAME tensors.
 * ``sparse``  a frozen-mask sparse layer (dense masked / tile / CSR) built from a saved checkpoint and mask
               (experimental/kgx_sparse.py; args.factory: checkpoint, format, ...).
+* ``wide``    a width-preserving policy (U / P / A / H2 / H2A, experimental/width_masks.py) of a saved checkpoint
+              as dense / dense masked / wide (16 x 8, 16 x 16, backbone + tiles) / tile (measured 16 x 16 kernels) /
+              lowered (K16 / K8 C16 kgen control) layer (experimental/kgx_wide.build_policy_layer).
 
 Each factory validates the logical graph structurally (outside every timed region) and stores the report
 in ``layer.graph_stats["kcsr_validation"]``.
@@ -44,5 +47,14 @@ def sparse(args, conn):
 
     t0 = time.perf_counter()
     lay = SP.build_from_checkpoint(args, conn, _plan(args))
+    lay.graph_stats.update(kcsr_validation=lay.kcsr_validate(), layer_build_seconds=time.perf_counter() - t0)
+    return lay
+
+
+def wide(args, conn):
+    from sparse_pooling.experimental import kgx_wide as KW
+
+    t0 = time.perf_counter()
+    lay = KW.build_policy_layer(args, conn, _plan(args))
     lay.graph_stats.update(kcsr_validation=lay.kcsr_validate(), layer_build_seconds=time.perf_counter() - t0)
     return lay

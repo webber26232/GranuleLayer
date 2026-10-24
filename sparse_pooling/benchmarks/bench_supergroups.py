@@ -150,6 +150,13 @@ def main():
                     "a compressed-checkpoint inference measurement; it cannot establish training speed)")
     ap.add_argument("--kcsr", action="store_true", help="also record the logical graph fingerprint, the full "
                     "execution record, per-round GPU state, cold-step and host-enqueue times (kcsr sweep)")
+    ap.add_argument("--canonical-start", action="store_true", help="width-preserving study: after the warm-up "
+                    "steps, restore the PRE-warm-up parameter values and reset the optimizer state (zero moments, "
+                    "step 0, rounding counter 0) and main_grad, so every compared format starts its timed steps from "
+                    "the same canonical state (verified by --identity); the warm-up never leaves formats at "
+                    "different starting checkpoints")
+    ap.add_argument("--identity", action="store_true", help="record the canonical identity (experimental/canonical.py:"
+                    " parameters, mask, main_grad, both moments, storage) of the restored starting state")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     import json as _json
@@ -201,6 +208,7 @@ def main():
         kcsr.update(graph_fingerprint=kcsr_graph.fingerprint(tab), graph_summary=kcsr_graph.summary(tab),
                     param_fingerprint={"weight": tensor_fingerprint(lay.weight), "bias": tensor_fingerprint(lay.bias)},
                     logical_params_sha=kcsr_graph.params_sha(lay),
+                    logical_params_sha_schema=kcsr_graph.params_sha_schema(lay),
                     layer_description=lay.kcsr_describe() if hasattr(lay, "kcsr_describe") else None)
         del tab
         kcsr["fingerprint_seconds"] = time.perf_counter() - t1
@@ -221,6 +229,9 @@ def main():
     else:
         opt = FusedAdamW([lay.weight, lay.bias], lr=1e-4, moments="bf16")
     immutable_fp0 = lay.immutable_fingerprints() if hasattr(lay, "immutable_fingerprints") else None
+    start_vals = None
+    if args.canonical_start:  # host copies of the pre-warm-up parameter values (benchmark overhead, not charged)
+        start_vals = [p.detach().to("cpu", copy=True).pin_memory() for p in lay.parameters()]
     gx = torch.Generator(device="cuda")
     gx.manual_seed(args.input_seed)
     x = torch.randn(args.batch, args.input_dim, device="cuda", generator=gx).to(torch.bfloat16).requires_grad_(True)
@@ -312,6 +323,31 @@ def main():
         results[name]["warm_peak_alloc"] = torch.cuda.max_memory_allocated()
         results[name]["warm_peak_res"] = torch.cuda.max_memory_reserved()
     torch.cuda.synchronize()
+    if start_vals is not None:  # canonical start: undo the warm-up updates (values, main_grad, optimizer state)
+        with torch.no_grad():
+            for p, v in zip(lay.parameters(), start_vals):
+                p.data.copy_(v)
+                if getattr(p, "main_grad", None) is not None:
+                    p.main_grad.zero_()
+                p.grad = None
+            for st in opt.state.values():
+                for k in list(st):
+                    if torch.is_tensor(st[k]):
+                        st[k].zero_()
+                    elif k == "step":
+                        st[k] = 0
+            if hasattr(opt, "_seed"):
+                opt._seed = 0
+        torch.manual_seed(args.input_seed)
+        torch.cuda.synchronize()
+        del start_vals
+    if args.identity and hasattr(lay, "canon_rows"):
+        from sparse_pooling.experimental import canonical
+
+        t1 = time.perf_counter()
+        kcsr["canonical_start"] = canonical.identity(lay, opt)
+        kcsr["canonical_start"]["seconds"] = time.perf_counter() - t1
+        kcsr["canonical_start"]["after_reset"] = bool(args.canonical_start)
     state = None
     ref_fp = None
     if args.protocol == "complete":
@@ -448,7 +484,8 @@ def main():
     persistent = {
         "weights": lay.weight.numel() * 2, "bias": lay.bias.numel() * 2,
         "indices": 0 if getattr(lay, "indices", None) is None else lay.indices.numel() * 2,
-        "main_grad": (lay.weight.numel() + lay.bias.numel()) * 4,
+        "main_grad": sum(p.numel() * 4 for p in lay.parameters() if getattr(p, "main_grad", None) is not None)
+        or (lay.weight.numel() + lay.bias.numel()) * 4,
         "adam_moments": opt.state_bytes(),
         "graph_metadata": 0 if conn is None else lay.sg_feat.numel() * 2 + lay.sg_buckets.numel() * 4,
         "work_lists_cached_last_runtime": 0 if conn is None or lay._rt is None or lay._rt.sg is None
@@ -456,6 +493,16 @@ def main():
     }
     if hasattr(lay, "extra_persistent_bytes"):
         persistent.update(lay.extra_persistent_bytes())
+    executed = None
+    if hasattr(lay, "canon_rows"):  # executed tensor-core / CUDA-core work of one step (width-preserving study)
+        from sparse_pooling.experimental.kgx_wide import executed_work
+
+        executed = executed_work(lay, args.batch, args.grad_precision == "split") if hasattr(lay, "sg_feat") and \
+            hasattr(lay, "index_free_ok") else None
+        if executed is None and hasattr(lay, "env"):
+            from sparse_pooling.experimental.kgx_onetile import executed_work_lowered
+
+            executed = executed_work_lowered(lay, args.batch, args.grad_precision == "split")
     immutable_ok = None
     if immutable_fp0 is not None:  # frozen metadata (masks, row pointers, tile maps) unchanged by the steps
         immutable_ok = lay.immutable_fingerprints() == immutable_fp0
@@ -475,7 +522,7 @@ def main():
                       "graph": "unrestricted" if conn is None else conn.to_json(),
                       "matched_c8": args.matched_c8, "layout_block": L.block},
            "build_seconds": build_s, "graph_stats": lay.graph_stats, "validation": val, "kcsr": kcsr,
-           "cold_steps": cold,
+           "cold_steps": cold, "executed_work": executed, "canonical_start_protocol": bool(args.canonical_start),
            "persistent_bytes": persistent, "infeasible": infeasible, "protocol": args.protocol,
            "snapshot": ({"device": "cuda", "bytes": 2 * (lay.weight.numel() + lay.bias.numel()), "contents": "weight, bias"}
                         if state is None else {"device": args.snapshot_device, "bytes": state.nbytes(),

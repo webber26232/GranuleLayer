@@ -167,7 +167,8 @@ class KgxFunction(torch.autograd.Function):
             db.view(-1).index_add_(0, slot, csum[gg] * (bo > 0).float())
             _mark("bwd.bias_only")
         layer.last_info.update(backward_backend="kgx", dx_kernel=f"kgx_{layer.kvariant}",
-                               dw_kernel=f"kgx_{layer.kvariant}", grad_precision=layer.plan.grad_precision,
+                               dw_kernel=f"kgx_{layer.kvariant}", grad_precision=layer.grad_scheme(),
+                               grad_precision_requested=layer.plan.grad_precision,
                                kgx_dx=dict(ctas=n_dx_chunks * n_tiles, tokens=tok,
                                            group_warps=rt.dx_group_warps,
                                            reduction=layer._dx_reduction(rt), launches=1),
@@ -395,9 +396,10 @@ class KgxLayer(nn.Module):
             raise ValueError(f"experimental kgx layer cannot run this call: {r}")
         self.last_info["reduction"] = {"mode": "fast", "reason": why}
         ex = self.last_info.get("execution")
-        if ex is None or ex.get("batch") != B or ex.get("grad_precision") != self.plan.grad_precision \
+        if ex is None or ex.get("batch") != B or ex.get("grad_precision") != self.grad_scheme() \
                 or ex.get("variant") != self.kvariant:
-            self.last_info["execution"] = dict(self.explain(B), grad_precision=self.plan.grad_precision)
+            self.last_info["execution"] = dict(self.explain(B), grad_precision=self.grad_scheme(),
+                                               grad_precision_requested=self.plan.grad_precision)
 
     def _wptrs(self, w):
         """(W, tmeta, rowptr, kix) pointers of this representation."""
@@ -450,6 +452,10 @@ class KgxLayer(nn.Module):
                     record_indices_resident=0 if self.indices is None else self.indices.numel() * 2,
                     feature_sets=self.sg_feat.numel() * 2, block_buckets=self.kg_buckets.numel() * 4)
 
+    def grad_scheme(self) -> str:
+        """The dZ operand scheme the backward kernels actually execute (recorded instead of the request)."""
+        return self.plan.grad_precision
+
     def numerics(self) -> str:
         p = "dZ as BF16 hi + lo pair" if self.plan.grad_precision == "split" else "dZ as one BF16"
         return ("BF16 x / W / bias operands, FP32 accumulation over all K = 64 products before one ReLU; backward "
@@ -497,6 +503,20 @@ class KgxLayer(nn.Module):
     def dense_params(self):
         """(weights [G, NB, C, 64], bias [G, NB, C]) in logical canonical order (dense values, inactive = 0)."""
         return self.weight.detach(), self.bias.detach()
+
+    # ---- representation-independent identity (experimental/canonical.py)
+    def canon_params(self):
+        return {"weight": self.weight, "bias": self.bias}
+
+    def canon_rows(self, src, g, n):
+        from .canonical import dense_rows
+
+        return dense_rows(self, src, g, n)
+
+    def canon_mask_rows(self, g, n):
+        from .canonical import dense_mask_rows
+
+        return dense_mask_rows(self, g, n)
 
     def kcsr_describe(self):
         L = self.layout
