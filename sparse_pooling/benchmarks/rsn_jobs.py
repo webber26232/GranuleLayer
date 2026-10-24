@@ -100,6 +100,28 @@ def coverage_plan(specs=COVERAGE, graph_seed=0):
                                              args=["--support", s, "--graph-seed", str(graph_seed)]) for s in specs])
 
 
+K8_TIMING = ([(f"BP-row/8#{ls}", "indexed") for ls in RC.SCREEN_LAYOUT_SEEDS] +
+             [("FP-mag/8", "indexed"), ("FP-mag/8", "wide"), ("FP-balanced/8", "indexed"), ("FP-balanced/8", "wide"),
+              ("U8@0.125", "wide")])
+K8_COVERAGE = [f"BP-row/8#{ls}" for ls in RC.SCREEN_LAYOUT_SEEDS] + ["FP-mag/8", "FP-balanced/8", "U8@0.125"]
+
+
+def k8_plan():
+    """CONDITIONAL K8 extension (selection_rules.json): BP-row fan-in 8 (rho 0.125) vs its P8 fixed partitions on
+    the existing K8 (indexed kgen) and index-free 16 x 8 kernels, U8 0.125 same-budget control; coverage first."""
+    jobs = coverage_plan(K8_COVERAGE)["jobs"] + with_anchors([timing_job(s, f) for s, f in K8_TIMING],
+                                                             order_seed=ORDER_SEED + 5)
+    return dict(stage="k8", conditional=True, jobs=jobs)
+
+
+def coverage_sel_plan(sel):
+    """sel: dict(specs=[...], graph_seeds=[...])."""
+    jobs = []
+    for g in sel.get("graph_seeds", [0]):
+        jobs += coverage_plan(sel["specs"], g)["jobs"]
+    return dict(stage="coverage", selection=sel, jobs=jobs)
+
+
 def refresh_plan():
     rows = [("H2A", 0.10, 0, "exact"), ("H2A", 0.10, 16, "exact"), ("H2A", 0.10, 128, "exact"),
             ("A8", 0.1875, 16, "exact"), ("H2A", 0.10, 16, "legacy")]
@@ -205,8 +227,8 @@ def run_plan(plan, out, timeout, resume):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["screen", "confirm", "coverage", "refresh", "norm_first", "norm", "interaction",
-                                      "plan"])
+    ap.add_argument("stage", choices=["screen", "confirm", "coverage", "coverage_sel", "refresh", "norm_first", "norm",
+                                      "interaction", "k8", "plan"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--selection", default="")
     ap.add_argument("--plan-file", default="")
@@ -215,12 +237,13 @@ def main():
     a = ap.parse_args()
     if a.stage == "plan":
         plan = json.loads(Path(a.plan_file).read_text())
-    elif a.stage in ("confirm", "norm", "interaction"):
+    elif a.stage in ("confirm", "norm", "interaction", "coverage_sel"):
         sel = json.loads(Path(a.selection).read_text())
-        plan = dict(confirm=confirm_plan, norm=norm_plan, interaction=interaction_plan)[a.stage](sel)
+        plan = dict(confirm=confirm_plan, norm=norm_plan, interaction=interaction_plan,
+                    coverage_sel=coverage_sel_plan)[a.stage](sel)
     else:
-        plan = dict(screen=screen_plan, coverage=coverage_plan, refresh=refresh_plan,
-                    norm_first=norm_first_plan)[a.stage]()
+        plan = dict(screen=screen_plan, coverage=coverage_plan, refresh=refresh_plan, norm_first=norm_first_plan,
+                    k8=k8_plan)[a.stage]()
     run_plan(plan, a.out, a.timeout, a.resume)
 
 
