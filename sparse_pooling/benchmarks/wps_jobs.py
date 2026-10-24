@@ -122,14 +122,22 @@ def confirm_plan(sel):
 
 
 def winners_plan(sel):
+    """Selected winners at other C (graph seed 0): each policy's feasibility is computed BEFORE running; an
+    infeasible (policy, rho, C) becomes an explicit rejection job instead of a timing job."""
+    from sparse_pooling.experimental import width_masks as WM
+    from sparse_pooling.experimental.kgen_layout import KLayout
+
     jobs = []
     for C in sel.get("C", [64, 2048]):
-        body = []
+        L = KLayout(WC.D, WC.H, WC.G, WC.K, C)
+        body, rej = [], []
         for c in sel["comparisons"]:
-            body += mask_jobs(c["policy"], c["rho"], C=C, fmts=[f for f in c.get("formats", WC.formats(c["policy"],
-                                                                                                        c["rho"]))
-                                                                 if f != "lowered" or C <= 256])
-        jobs += with_anchors(body, C=C, order_seed=ORDER_SEED + 20 + C)
+            if not WM.feasibility(WM.POLICIES[c["policy"]], c["rho"], L)["feasible"]:
+                rej.append(dict(kind="reject", tag=f"{WC.case_id(c['policy'], c['rho'], C)}_reject", policy=c["policy"],
+                                rho=c["rho"], C=C))
+                continue
+            body += mask_jobs(c["policy"], c["rho"], C=C, fmts=c.get("formats", WC.formats(c["policy"], c["rho"])))
+        jobs += rej + with_anchors(body, C=C, order_seed=ORDER_SEED + 20 + C)
     return dict(stage="winners", selection=sel, jobs=jobs)
 
 
@@ -198,6 +206,23 @@ def regen_plan():
                                                 "/home/evga/Projects/pamachine/wps_ckpt/regen"])])
 
 
+def refresh_cost_plan():
+    jobs = [dict(kind="refresh", tag=f"cost_{WC.case_id(p, d)}", script="wps_refresh_cost.py",
+                 args=["--policy", p, "--rho", str(d)]) for p, d in WC.PRIMARY]
+    return dict(stage="refresh_cost", jobs=jobs)
+
+
+def refresh_plan(sel):
+    """sel: dict(policies=[[policy, rho], ...], periods=[0, 16, 128], steps=256, frac=0.1, criteria=...)."""
+    jobs = []
+    for p, d in sel["policies"]:
+        for T in sel.get("periods", [0, 16, 128]):
+            jobs.append(dict(kind="refresh", tag=f"refresh_{WC.case_id(p, d)}_T{T}", script="wps_refresh.py",
+                             args=["--policy", p, "--rho", str(d), "--period", str(T), "--steps",
+                                   str(sel.get("steps", 256)), "--frac", str(sel.get("frac", 0.1))]))
+    return dict(stage="refresh", selection=sel, jobs=jobs)
+
+
 def cmd_of(job):
     if job["kind"] == "timing":
         r, p, i = job["rounds"]
@@ -260,7 +285,8 @@ def run_plan(plan, out, timeout, resume):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["screen", "inference", "c2048", "ablation", "reject", "confirm", "winners", "plan",
-                                      "coverage", "finetune", "coverage_ft", "interaction", "regen"])
+                                      "coverage", "finetune", "coverage_ft", "interaction", "regen", "refresh_cost",
+                                      "refresh"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--selection", default="")
     ap.add_argument("--plan-file", default="")
@@ -269,13 +295,13 @@ def main():
     a = ap.parse_args()
     if a.stage == "plan":
         plan = json.loads(Path(a.plan_file).read_text())
-    elif a.stage in ("confirm", "winners"):
+    elif a.stage in ("confirm", "winners", "refresh"):
         sel = json.loads(Path(a.selection).read_text())
-        plan = confirm_plan(sel) if a.stage == "confirm" else winners_plan(sel)
+        plan = dict(confirm=confirm_plan, winners=winners_plan, refresh=refresh_plan)[a.stage](sel)
     else:
         plan = dict(screen=screen_plan, inference=inference_plan, c2048=c2048_plan, ablation=ablation_plan,
                     reject=reject_plan, coverage=coverage_plan, finetune=learn_plan, coverage_ft=coverage_ft_plan,
-                    interaction=interaction_plan, regen=regen_plan)[a.stage]()
+                    interaction=interaction_plan, regen=regen_plan, refresh_cost=refresh_cost_plan)[a.stage]()
     run_plan(plan, a.out, a.timeout, a.resume)
 
 

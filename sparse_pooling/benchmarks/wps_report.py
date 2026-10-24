@@ -100,6 +100,8 @@ def screen_tables(root, stage="screen", title="Screen"):
         f = by[k]
         w = f.get("wide")
         dm = f.get("dense_masked")
+        if w is None and dm is None:
+            continue
         ms = (w or dm)["rec"]["graph_stats"].get("mask_stats", {})
         sw = med(w["rec"]) if w else None
         sd = med(dm["rec"]) if dm else None
@@ -110,7 +112,7 @@ def screen_tables(root, stage="screen", title="Screen"):
         nm = f"{k[2]} {k[3]:g}" + (" (random)" if k[4] == "random" else "") + ("" if k[0] == 256 else f" C{k[0]}")
         L.append(f"| {nm} | {ms.get('rho_mask', 0):.6f} | {100 * ms.get('structural_bias_only_neurons', 0) / 12.5e6:.1f} % | "
                  f"{fmt(sw)} | {fmt(sd)} | {('×%.2f' % (sd / sw)) if sw and sd else '–'} | {fmt(st)} | {fmt(sl)} | {same} | "
-                 f"{w['rec']['variants']['default']['peak_allocated_bytes'] / 2 ** 30:.2f} |" if w else "")
+                 f"{(w or dm)['rec']['variants']['default']['peak_allocated_bytes'] / 2 ** 30:.2f} |")
     if dense:
         L += ["", "Unpruned dense control (same checkpoint, idf kernels): " +
               ", ".join(f"{d['tag']}: {fmt(med(d['rec']))} ms" for d in dense)]
@@ -155,6 +157,32 @@ def memory_table(by):
                  f"{pb.get('work_lists_cached_last_runtime', 0) / 1e6:.1f} | {fmt(mp / 8e8 if mp else None, 4)} | "
                  f"{fmt(((ew.get('scalar_fma') or {}).get('fwd', 0) + (ew.get('scalar_fma') or {}).get('dx', 0) + (ew.get('scalar_fma') or {}).get('dw', 0)) / 1e9, 1)}G | "
                  f"{fmt(ew.get('fwd_executed_density'), 4)} |")
+    return "\n".join(L)
+
+
+def setup_table(by, dense):
+    """One-time setup of each compact model from the dense checkpoint and the break-even against the unpruned
+    dense step: (select + convert + work lists) / (dense step - compact step); none if the saving <= 0."""
+    ds = statistics.median([med(d["rec"]) for d in dense]) if dense else None
+    L = ["### One-time setup and break-even (wide format; frozen-support training)", "",
+         f"Unpruned dense step (median of the 3 anchors): {fmt(ds)} ms.", "",
+         "| mask | checkpoint load + verify s | select s | compress s | work lists s | first-step (JIT) wall s | "
+         "setup U s | per-step saving vs dense ms | break-even steps |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for k in sorted(by, key=lambda k: (k[3], k[2], k[4])):
+        r = by[k].get("wide")
+        if not r:
+            continue
+        rec = r["rec"]
+        gs = rec["graph_stats"]
+        wl = (rec["variants"]["default"].get("last_info") or {}).get("kgx_work_lists", {}).get("build_seconds", 0.0)
+        U = gs.get("select_seconds", 0) + gs.get("conversion_seconds", 0) + wl
+        sav = ds - med(rec) if ds else None
+        be = (U * 1e3 / sav) if sav and sav > 0 else None
+        nm = f"{k[2]} {k[3]:g}" + (" (rnd)" if k[4] == "random" else "")
+        L.append(f"| {nm} | {gs['checkpoint']['load_seconds']:.1f} | {gs.get('select_seconds', 0):.3f} | "
+                 f"{gs.get('conversion_seconds', 0):.3f} | {wl:.3f} | "
+                 f"{rec['cold_steps']['default']['first_step_wall_s']:.2f} | {U:.3f} | {fmt(sav)} | "
+                 f"{fmt(be, 2) if be is not None else 'none (no saving)'} |")
     return "\n".join(L)
 
 
@@ -299,6 +327,85 @@ def confirm_table(root, stage="confirm"):
     return "\n".join(L)
 
 
+def merged(root):
+    """{(policy, rho, score): row} merging timing (screen), coverage, fine-tune and interaction (C256 seed 0)."""
+    rows = defaultdict(dict)
+    for r in timing_rows(root, "screen"):
+        if r["rec"] is None or r["seed"] != 0:
+            continue
+        k = (r["policy"], r["rho"], r["score"])
+        rows[k][f"step_{r['format']}"] = med(r["rec"])
+        if r["format"] in ("wide", "dense"):
+            gs = r["rec"]["graph_stats"]
+            rows[k]["rho_mask"] = gs.get("rho_mask", 1.0)
+    _, cov = load(root, "coverage")
+    for tag, d in cov.items():
+        if d.get("C") != 256:
+            continue
+        k = ("dense", 1.0, "magnitude") if d.get("policy") == "dense" else (d["policy"], d["rho_target"], d["score"])
+        e = d.get("enabled") or d.get("dense")
+        w = d.get("width") or dict(bias_only_mask_fraction=0.0, bias_only_numeric_fraction=0.0)
+        fixed = [x for x in e["outputs"] if x.get("fixed_selection", True)]
+        rows[k].update(triple=e["triple"]["fraction"], quad=e["quad"]["fraction"],
+                       quad_mult=e["quad"].get("layer_multiplicity", {}).get("covered_quantiles", {}).get("median"),
+                       out_triple=e["per_output_summary"]["triple"]["median"],
+                       out_triple_mult=statistics.median(
+                           [x["triple_multiplicity"]["covered_quantiles"].get("median", 0) for x in fixed]),
+                       bias_only=w["bias_only_mask_fraction"], bias_only_num=w["bias_only_numeric_fraction"],
+                       idep_med=(w.get("input_dependent_per_output") or {}).get("median", 12207))
+    _, ft = load(root, "finetune")
+    for tag, d in ft.items():
+        k = ("dense", 1.0, "magnitude") if d["policy"] == "dense" else (d["policy"], d["rho_target"], d["score"])
+        cl = d["diagnostics_after"]["classes"]
+        rows[k].update(heldout=d["heldout_finetuned"], pruned=d["heldout_pruned"],
+                       switching=cl["switching"] / d["diagnostics_after"]["sample"])
+    _, it = load(root, "interaction")
+    for tag, d in it.items():
+        k = ("dense", 1.0, "magnitude") if d["policy"] == "dense" else (d["policy"], d["rho_target"], d["score"])
+        rows[k].update({f"int{o}": d["final"][f"explained_interaction_order{o}"] for o in (2, 3, 4)})
+    return rows
+
+
+def policy_table(root):
+    rows = merged(root)
+    L = ["### Equal-budget policy comparison (C256 seed 0; same checkpoint, budget, data, optimizer; supports differ)", "",
+         "| rho | policy | step ms (new kernels) | vs unpruned dense | bias-only rows (mask / numeric) | input-dependent neurons "
+         "per output (median) | layer triples | layer quadruples | covered-quad multiplicity (median neurons) | "
+         "per-output triples (median) | per-output covered-triple multiplicity (median) | held-out after fine-tune | "
+         "switching neurons (sample) | interaction explained, order 2 / 3 / 4 |",
+         "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    dense = rows.get(("dense", 1.0, "magnitude"), {})
+    ds = dense.get("step_dense")
+    for k in sorted(rows, key=lambda k: (k[1], k[0], k[2])):
+        r = rows[k]
+        st = r.get("step_wide") or r.get("step_dense")
+        L.append(f"| {k[1]:g} | {k[0]}{' (random)' if k[2] == 'random' else ''} | {fmt(st)} | "
+                 f"{('×%.2f' % (ds / st)) if st and ds else '–'} | "
+                 f"{fmt(r.get('bias_only'), 1, pct=True)} / {fmt(r.get('bias_only_num'), 1, pct=True)} % | "
+                 f"{fmt(r.get('idep_med'), 0)} | {fmt(r.get('triple'), 3, pct=True)} % | {fmt(r.get('quad'), 4, pct=True)} % | "
+                 f"{fmt(r.get('quad_mult'), 0)} | {fmt(r.get('out_triple'), 4, pct=True)} % | {fmt(r.get('out_triple_mult'), 0)} | "
+                 f"{fmt(r.get('heldout'), 5)} | {fmt(r.get('switching'), 3)} | " +
+                 (" / ".join(fmt(r.get(f'int{o}'), 3) for o in (2, 3, 4)) if 'int2' in r else "–") + " |")
+    return "\n".join(L), rows
+
+
+def pareto(rows):
+    """Non-dominated masks over (step time, input-dependent width = 1 - bias-only, layer triple coverage, held-out
+    loss after fine-tuning) among the masks with all four measured."""
+    pts = []
+    for k, r in rows.items():
+        st = r.get("step_wide") or r.get("step_dense")
+        if st is None or r.get("heldout") is None or r.get("triple") is None:
+            continue
+        pts.append((k, (st, -(1 - r.get("bias_only", 0.0)), -r["triple"], r["heldout"])))
+    keep = []
+    for k, v in pts:
+        dom = any(all(b <= a for a, b in zip(v, u)) and any(b < a for a, b in zip(v, u)) for _, u in pts)
+        if not dom:
+            keep.append(k)
+    return sorted(keep, key=lambda k: (k[1], k[0]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
@@ -307,7 +414,8 @@ def main():
     root = Path(a.root)
     parts = ["# Width-preserving sparsity: tables (generated by benchmarks/wps_report.py)", ""]
     t, by, dense = screen_tables(root)
-    parts += [t, "", phase_table(by), "", phase_table(by, "dense_masked"), "", memory_table(by), ""]
+    parts += [t, "", phase_table(by), "", phase_table(by, "dense_masked"), "", memory_table(by), "",
+              setup_table(by, dense), ""]
     for st, title in (("c2048", "C2048 low-density anchor test"), ("ablation", "Backbone attribution (ablated build)"),
                       ("inference", "Inference (forward only)"), ("winners", "Winner checks at C64 / C2048")):
         if (root / st).exists():
@@ -321,6 +429,9 @@ def main():
         parts += [coverage_table(covf, "Coverage of the exact nonzero supports after fine-tuning"), ""]
     ft, _ = finetune_table(root)
     parts += [ft, "", interaction_table(root), "", confirm_table(root), ""]
+    pt, rows = policy_table(root)
+    parts += [pt, "", "Pareto set (step, input-dependent width, layer triples, held-out): " +
+              ", ".join(f"{k[0]} {k[1]:g}{' (random)' if k[2] == 'random' else ''}" for k in pareto(rows)), ""]
     Path(a.out).write_text("\n".join(parts) + "\n")
     print(f"wrote {a.out}")
 
