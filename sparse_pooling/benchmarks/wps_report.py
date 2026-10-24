@@ -92,7 +92,8 @@ def screen_tables(root, stage="screen", title="Screen"):
             dense.append(r)
             continue
         by[key(r)][r["format"]] = r
-    L = [f"### {title}: complete training step per mask (ms, median of the restored samples)", "",
+    what = "forward pass only (no_grad)" if stage == "inference" else "complete training step"
+    L = [f"### {title}: {what} per mask (ms, median of the restored samples)", "",
          "| mask | rho_mask | bias-only (mask) | wide | dense masked | wide vs dense masked | measured tile kernel | "
          "lowered K16/K8 | identical canonical start (params / mask) | peak GiB (wide) |",
          "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|"]
