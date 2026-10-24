@@ -1,0 +1,28 @@
+{
+ "declared_before": "any coverage / timing / learning result of this study was read (2026-10-24 12:15, stage 1 just launched)",
+ "best_randomized_k16": [
+  "candidates: RP-record, RP-row, BP-row (K16, indexed execution)",
+  "primary: highest measured layer-wide exact triple coverage, mean over layout seeds 0/1/2 (graph seed 0)",
+  "tie-break / cost guard: if the primary choice's median complete step (mean over layout seeds) is more than 3 % slower than another candidate whose triple coverage is within 1 percentage point, choose the faster one",
+  "the chosen policy is used for the normalization bounded set and the interaction diagnostic"
+ ],
+ "confirmation": [
+  "at most two randomized layouts (policies): the best randomized K16 policy and, if different in cost or coverage, the runner-up; graph seeds 0/1/2 x layout seeds 0/1, 24 samples each",
+  "controls in every confirmation session: FP-mag (indexed and wide), FP-balanced indexed, U16 0.25 wide, A8 0.25 wide, dense first/middle/last"
+ ],
+ "normalization_extension": [
+  "bounded set (none vs energy): FP-mag, U16 0.25, best randomized K16, A8 0.25, H2 0.05, H2A 0.10, dense (none)",
+  "32 updates (data seed 0) for continuity; 256 updates with data / training seeds 0, 1, 2 for every pair",
+  "a cap-16 sensitivity only if the energy clipping fraction exceeds 1 % of connected rows"
+ ],
+ "conditional_k8_extension": [
+  "run BP-row/8 (rho 0.125) with its P8 fixed-partition (FP-mag/8) and FP-balanced/8 controls on indexed K8 and the index-free 16 x 8 kernels ONLY if the best randomized K16 policy is (a) within 10 % of U16 0.25's complete step and (b) has layer-wide triple coverage at least 5x FP-mag's; otherwise record it as not justified"
+ ],
+ "interaction": [
+  "T = 1 and 16: dense, A8 0.25, U16 0.25, best randomized K16; ordinary (init seed 17) and energy-normalized initialization",
+  "oracle (anchor mode) and perturbed oracle (eps 0.1 x init std on every enabled weight) for dense and A8 0.25; match-mode oracle for U16 0.25 and the best randomized policy (eligibility diagnostic, not an impossibility proof)",
+  "T16 key comparison (dense, A8 0.25 ordinary): init seeds 17 / 18 / 19 (sr seeds 0 / 1 / 2), 4,000 updates (the first 1,000 = the parent protocol)",
+  "learning-rate sensitivity on dense / A8 0.25 T16: lr 1e-3 and 1e-2 (4,000 updates), declared, not a search",
+  "T = 64 for dense and A8 0.25 (ordinary + oracle not applicable above 16 anchors: match oracle only) after the controls work"
+ ]
+}

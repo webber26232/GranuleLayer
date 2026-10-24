@@ -251,14 +251,15 @@ def phase_detail(root: Path, stage, keys):
 
 
 # ------------------------------------------------------------------ learning (normalization)
-def learn_rows(root: Path, stages=("norm_first", "norm")):
+def learn_rows(root: Path, stages=("norm_first", "norm", "cap16")):
     out = []
     for st in stages:
         _, recs = load(root, st)
         for tag, r in recs.items():
             n = r.get("normalization") or {}
             sp, s0, sa = r["signal_pruned"]["probe"], r["signal_start"]["probe"], r["signal_after"]["probe"]
-            out.append(dict(stage=st, tag=tag, support=r["support"], norm=r["norm"] + ("+b" if r["scale_bias"] else ""),
+            cap = "" if r.get("s_max", 8.0) == 8.0 or r["norm"] != "energy" else f"/cap{r['s_max']:g}"
+            out.append(dict(stage=st, tag=tag, support=r["support"], norm=r["norm"] + ("+b" if r["scale_bias"] else "") + cap,
                             steps=r["steps"], seed=r["data_seed"], heldout_ckpt=r["heldout_checkpoint"],
                             heldout_pruned=r["heldout_pruned"], heldout_norm=r.get("heldout_normalized"),
                             heldout=r["heldout_final"], scale_median=n.get("scale", {}).get("median"),
@@ -310,15 +311,17 @@ def learn_seed_summary(rows, steps=256):
            "| support | none: mean ± t95 (n) | energy: mean ± t95 (n) | energy - none, paired mean ± t95 |",
            "|---|---:|---:|---:|"]
     table = []
-    for s in sorted({k[0] for k in by}):
+    variants = sorted({k[1] for k in by if k[1] != "none"})
+    for s, v in sorted({(k[0], k[1]) for k in by if k[1] != "none"} | {(k[0], "energy") for k in by}):
         a = {r["seed"]: r["heldout"] for r in by.get((s, "none"), [])}
-        b = {r["seed"]: r["heldout"] for r in by.get((s, "energy"), [])}
+        b = {r["seed"]: r["heldout"] for r in by.get((s, v), [])}
         ma, ha = ci(list(a.values())) if a else (None, None)
         mb, hb = ci(list(b.values())) if b else (None, None)
         d = [b[k] - a[k] for k in a if k in b]
         md, hd = ci(d) if d else (None, None)
-        table.append(dict(support=s, none=ma, none_ci=ha, energy=mb, energy_ci=hb, diff=md, diff_ci=hd, n=len(d)))
-        out.append(f"| {s} | {fmt(ma, 5)} ± {fmt(ha, 5)} ({len(a)}) | {fmt(mb, 5)} ± {fmt(hb, 5)} ({len(b)}) | "
+        table.append(dict(support=s, treatment=v, none=ma, none_ci=ha, energy=mb, energy_ci=hb, diff=md, diff_ci=hd,
+                          n=len(d)))
+        out.append(f"| {s} ({v if b else 'no treatment'}) | {fmt(ma, 5)} ± {fmt(ha, 5)} ({len(a)}) | {fmt(mb, 5)} ± {fmt(hb, 5)} ({len(b)}) | "
                    f"{fmt(md, 5)} ± {fmt(hd, 5)} |")
     return out, table
 
@@ -416,7 +419,9 @@ def main():
     md += learn_table([r for r in lr if r["stage"] == "norm" and r["steps"] == 32], "Normalization: bounded set, 32 updates")
     md += [""] + learn_table([r for r in lr if r["stage"] == "norm" and r["steps"] > 32 and r["seed"] == 0],
                              "Normalization: bounded set, 256 updates (seed 0 detail)") + [""]
-    t, seeds = learn_seed_summary([r for r in lr if r["stage"] == "norm"])
+    md += learn_table([r for r in lr if r["stage"] == "cap16"], "Energy restoration with s_max 16 (sensitivity: clipping "
+                      "> 1 % at s_max 8)") + [""]
+    t, seeds = learn_seed_summary([r for r in lr if r["stage"] in ("norm", "cap16")])
     md += t + [""]
     ir = interaction_rows(root)
     for T in sorted({r["terms"] for r in ir}):
