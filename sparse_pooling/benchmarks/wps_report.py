@@ -322,6 +322,72 @@ def interaction_table(root, stage="interaction"):
     return "\n".join(L)
 
 
+def capacity_table(root):
+    _, recs = load(root, "interaction_capacity")
+    if not recs:
+        return ""
+    L = ["### Interaction capacity stress (16 independent terms per record; otherwise identical)", "",
+         "| support | explained interaction share: order 2 / 3 / 4 | normalized MSE order 1 |", "|---|---|---:|"]
+    for tag in sorted(recs, key=lambda t: (recs[t].get("rho_target", 1), t)):
+        d = recs[tag]
+        f = d["final"]
+        L.append(f"| {d['policy']} {d['rho_target']:g} | " +
+                 " / ".join(f"{f[f'explained_interaction_order{o}']:.3f}" for o in (2, 3, 4)) + f" | {f['order1']:.4f} |")
+    return "\n".join(L)
+
+
+def repeat_table(root):
+    _, recs = load(root, "finetune_repeat")
+    _, base = load(root, "finetune")
+    if not recs:
+        return ""
+    L = ["### Fine-tuning run-to-run repeat (same inputs and seeds; FP32 atomic order differs)", "",
+         "| support | held-out run 1 | run 2 | difference |", "|---|---:|---:|---:|"]
+    for tag, d in sorted(recs.items()):
+        o = base.get(tag.replace("_rep", ""))
+        if not o:
+            continue
+        L.append(f"| {d['policy']} {d['rho_target']:g} | {o['heldout_finetuned']:.7f} | {d['heldout_finetuned']:.7f} | "
+                 f"{d['heldout_finetuned'] - o['heldout_finetuned']:+.1e} |")
+    return "\n".join(L)
+
+
+def refresh_tables(root, rows):
+    _, recs = load(root, "refresh")
+    _, cost = load(root, "refresh_cost")
+    L = []
+    if recs:
+        L += ["### Periodic support refresh (prune / regrow within the hard constraints; 256 updates; synthetic)", "",
+              "| policy | T | refreshes | held-out after pruning -> final | tiles differing from the start | final enabled slots / budget | "
+              "mandatory support intact | mean refresh s |", "|---|---:|---:|---|---:|---|---|---:|"]
+        for tag in sorted(recs):
+            d = recs[tag]
+            rs = d["refreshes"]
+            L.append(f"| {d['policy']} {d['rho']:g} | {d['period']} | {len(rs)} | {d['heldout_pruned']:.5f} -> "
+                     f"{d['heldout_final']:.5f} | {d['tiles_changed_vs_start']:,} | {d['final_enabled_slots']:,} / "
+                     f"{d['budget_slots']:,} | {all(r['mandatory_intact'] for r in rs)} | "
+                     f"{(sum(r['seconds'] for r in rs) / len(rs)) if rs else 0:.3f} |")
+    if cost:
+        dense = rows.get(("dense", 1.0, "magnitude"), {}).get("step_dense")
+        L += ["", "### Refresh cost U and arithmetic amortization (LABELLED ARITHMETIC: measured components combined, "
+              "not a measured training schedule)", "",
+              "Periodic regrowth with a dense scoring step per refresh: ((T - 1) s + s_dense + U) / T; s = the frozen-support "
+              f"step of the screen, s_dense = {fmt(dense)} ms.", "",
+              "| mask | select s | emask s | compress s | work lists s | state remap s | U s | densify s | step s ms | T=1 | T=16 | T=128 |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for tag in sorted(cost, key=lambda t: (cost[t]["rho"], cost[t]["policy"])):
+            d = cost[tag]
+            r = rows.get((d["policy"], d["rho"], "magnitude"), {})
+            st = r.get("step_wide")
+            am = (lambda T: ((T - 1) * st + dense + d["U_seconds"] * 1e3) / T) if st and dense else None
+            L.append(f"| {d['policy']} {d['rho']:g} | " + " | ".join(f"{d[k]['median_s']:.3f}" for k in
+                                                                     ("select", "emask", "compress", "work_lists",
+                                                                      "state_remap")) +
+                     f" | {d['U_seconds']:.3f} | {d['densify']['median_s']:.3f} | {fmt(st)} | " +
+                     (" | ".join(fmt(am(T)) for T in (1, 16, 128)) if am else "– | – | –") + " |")
+    return "\n".join(L)
+
+
 def paired(root, stage, num_fmt, den_fmt):
     """{mask key without seed: [ratio per seed]} of den step / num step (paired per seed)."""
     rs = [r for r in timing_rows(root, stage) if r["rec"] is not None]
@@ -457,7 +523,9 @@ def policy_table(root):
     return "\n".join(L), rows
 
 
-PARETO_TOL = dict(step_rel=0.01, useful=0.01, triple=0.005, heldout=3e-4)
+# heldout: a MATERIALITY threshold (1e-4 = 0.04 % of the loss), not a noise estimate: repeated fine-tuning runs agree
+# to <= 5e-8 (finetune_repeat), and the seed-to-seed variation of the diagnostic was not measured
+PARETO_TOL = dict(step_rel=0.01, useful=0.01, triple=0.005, heldout=1e-4)
 
 
 def pareto(rows, tol=PARETO_TOL):
@@ -465,7 +533,7 @@ def pareto(rows, tol=PARETO_TOL):
     kernels), USEFUL input-dependent width (fraction of the fixed neuron sample with input-driven variance > 0.01,
     ~5 % of the dense median), layer triple coverage, held-out loss after fine-tuning.  b dominates a when it is
     no worse than a beyond the tolerance in every objective and better beyond it in at least one (tolerances:
-    1 % step time, 1 point width, 0.5 point triples, ``heldout`` = the measured run-to-run noise bound)."""
+    1 % step time, 1 point width, 0.5 point triples, held-out 1e-4: a materiality threshold)."""
     pts = []
     for k, r in rows.items():
         st = r.get("step_wide") or r.get("step_dense")
@@ -534,12 +602,13 @@ def main():
     if covf:
         parts += [coverage_table(covf, "Coverage of the exact nonzero supports after fine-tuning"), ""]
     ft, _ = finetune_table(root)
-    parts += [ft, "", interaction_table(root), "", confirm_table(root), ""]
+    parts += [ft, "", repeat_table(root), "", interaction_table(root), "", capacity_table(root), "", confirm_table(root), ""]
     chk = mask_identity_check(root)
     bad = [c for c in chk if not c["ok"]]
     parts += [f"Mask identity: {len(chk) - len(bad)} / {len(chk)} coverage / fine-tune supports have the element-mask "
               f"sha256 of the timed mask" + ("" if not bad else f"; MISMATCH: {[c['tag'] for c in bad]}"), ""]
     pt, rows = policy_table(root)
+    parts += [refresh_tables(root, rows), ""]
     nm = lambda ks: ", ".join(f"{k[0]} {k[1]:g}" for k in ks)  # noqa: E731
     dense = rows.get(("dense", 1.0, "magnitude"), {})
     full = lambda r: r.get("useful", 0) >= 0.95 and r.get("triple", 0) >= dense.get("triple", 1) - 0.001  # noqa: E731
