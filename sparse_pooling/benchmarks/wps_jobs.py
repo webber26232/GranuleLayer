@@ -30,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 
+import common  # noqa: F401  (implementation under test on sys.path: the manifest uses width_masks)
 import wps_cases as WC
 from k64_campaign import HERE, classify, done_tags, record, results_root
 
