@@ -17,5 +17,9 @@ layer still accepts only fan-in 8 and C in {8, 16, 32, 64}.  Explicit use only:
   register-accumulated dX), and the existing kgen kernels as reference routes on the same tensors (C <= 256;
   C > 256 as physical C = 256 subblocks);
 * ``kgx_sparse``: frozen-mask formats (tile 16 x 16, unstructured CSR), masks (learned / magnitude / tile /
-  random), checkpoints; ``l1``: ``L1AdamW`` (coupled / proximal L1, frozen masks) and sparsity statistics.
+  random), checkpoints; ``l1``: ``L1AdamW`` (coupled / proximal L1, frozen masks) and sparsity statistics;
+* width-preserving sparsity study (results/WIDTH_PRESERVING_SPARSITY.md): ``width_masks`` (U / P / A / H2 /
+  H2A supports with exact valid-slot budgets and feasibility), ``kgx_wide`` (``KgxWideLayer``: 16 x 8 tiles,
+  16 x 16 tiles on new kernels, two-input backbone + 16 x 16 tiles), ``kgx_onetile`` (K16 / K8 C16 lowered
+  control of one-tile supports), ``canonical`` (representation-independent parameter / state / mask identity).
 """

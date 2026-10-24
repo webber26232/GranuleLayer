@@ -64,8 +64,8 @@ def timing_rows(root, stage):
         j = r.get("job", {})
         rec = bench_json(root, stage, r["tag"]) if r["status"] == "measured" else None
         out.append(dict(tag=r["tag"], status=r["status"], policy=j.get("policy"), rho=j.get("rho"), score=j.get("score"),
-                        format=j.get("format"), C=j.get("C"), seed=j.get("graph_seed"), inference=j.get("inference"),
-                        ablated=bool(j.get("env")), rec=rec))
+                        format=(j.get("format") or "") + ("_ablated" if j.get("env") else ""), C=j.get("C"),
+                        seed=j.get("graph_seed"), inference=j.get("inference"), ablated=bool(j.get("env")), rec=rec))
     return out
 
 
@@ -117,6 +117,26 @@ def screen_tables(root, stage="screen", title="Screen"):
         L += ["", "Unpruned dense control (same checkpoint, idf kernels): " +
               ", ".join(f"{d['tag']}: {fmt(med(d['rec']))} ms" for d in dense)]
     return "\n".join(L), by, dense
+
+
+def ablation_table(root):
+    rs = [r for r in timing_rows(root, "ablation") if r["rec"] is not None]
+    if not rs:
+        return ""
+    by = defaultdict(dict)
+    for r in rs:
+        by[(r["policy"], r["rho"])][r["format"]] = r["rec"]
+    L = ["### Backbone attribution: hyb16 vs the same layer with the backbone compiled out (ATTRIBUTION ONLY: the "
+         "ablated build gives deliberately wrong results; every row group still runs)", "",
+         "| mask | phase | hyb16 ms | ablated ms | backbone share ms | share of the phase |", "|---|---|---:|---:|---:|---:|"]
+    for k in sorted(by, key=lambda k: (k[1], k[0])):
+        a, b = by[k].get("wide"), by[k].get("wide_ablated")
+        if not (a and b):
+            continue
+        for ph in ("fwd_kernel", "dx_kernel", "dw_kernel", "step"):
+            x, y = med(a, ph), med(b, ph)
+            L.append(f"| {k[0]} {k[1]:g} | {ph} | {fmt(x)} | {fmt(y)} | {fmt(x - y)} | {100 * (x - y) / x:.1f} % |")
+    return "\n".join(L)
 
 
 def phase_table(by, fmt_name="wide"):
@@ -416,8 +436,9 @@ def main():
     t, by, dense = screen_tables(root)
     parts += [t, "", phase_table(by), "", phase_table(by, "dense_masked"), "", memory_table(by), "",
               setup_table(by, dense), ""]
-    for st, title in (("c2048", "C2048 low-density anchor test"), ("ablation", "Backbone attribution (ablated build)"),
-                      ("inference", "Inference (forward only)"), ("winners", "Winner checks at C64 / C2048")):
+    parts += [ablation_table(root), ""]
+    for st, title in (("c2048", "C2048 low-density anchor test"), ("inference", "Inference (forward only)"),
+                      ("winners", "Winner checks at C64 / C2048")):
         if (root / st).exists():
             t2, by2, d2 = screen_tables(root, st, title)
             parts += [t2, ""]

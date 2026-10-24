@@ -68,7 +68,7 @@ reasons. The legacy `last_info` keys (`grouped_dx`, `dx_epilogue`, …) are unch
 | experimental | `experimental/`: other scatter layouts, owner variant, fused backward, compact dW projection, mask dW control | first explicit request |
 | diagnostics | `diagnostics/`: slab layout dumps, projection / ReLU-decision diagnostic | tests / tools only |
 | kgen (EXPERIMENTAL) | `experimental/kgen/`: generalized fan-in K = 8 / 16 / 32 / 64, logical C <= 256 input-supergroup kernels of `sparse_pooling/experimental` (random K/C/S/R sweep) | first `KgenLayer` call; never selected by `SparsePoolingLayer` |
-| kgx (EXPERIMENTAL) | `experimental/kgx/`: K = 64 direct large-C (neuron-tiled items, C <= 2048), S = K index-free (register-accumulated dX), tile-sparse 16 x 16 and CSR fixed-mask kernels (K64 large-C / index-free / L1 study) | first `KgxLayer` call; never selected by `SparsePoolingLayer` |
+| kgx (EXPERIMENTAL) | `experimental/kgx/`: K = 64 direct large-C (neuron-tiled items, C <= 2048), S = K index-free (register-accumulated dX), tile-sparse 16 x 16 and CSR fixed-mask kernels (K64 large-C / index-free / L1 study); width-preserving 16 x 8 tiles, 16 x 16 tiles on new kernels and a two-input backbone + 16 x 16 tiles (`kgx_wide.cuh`, width-preserving sparsity study) | first `KgxLayer` call; never selected by `SparsePoolingLayer` |
 
 Headers: `common.cuh` (activations, power, BF16 helpers) includes `isa_sm80.cuh` (mma, ldmatrix,
 movmatrix, cp.async; `#error` below sm_80) and `numerics.cuh` (FTZ compare / multiply, ex2). Kernel

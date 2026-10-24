@@ -496,3 +496,20 @@ def test_executed_work_counts():
     hy = m["W"].KgxWideLayer(masked_dense(base, ms.element_mask(L)), ms)
     ew = hy.executed_work(16)
     assert ew["scalar_fma"]["fwd"] == 2 * 3008 * 16
+
+
+@pytest.mark.parametrize("C", [64, 512])
+def test_lowered_one_tile_control_at_other_c(C):
+    m = _m()
+    base = base_layer(H=4100, G=8, C=C, R=1)
+    L = base.layout
+    x, dy = inputs(24, L.input_dim, L.groups)
+    ms = m["WM"].build("P16", 0.25, base.weight.detach(), L)
+    dm = masked_dense(base, ms.element_mask(L))
+    lo = m["OT"].lower_one_tile(dm, ms)
+    lo.kcsr_validate()
+    assert m["C"].digest(lo)["sha"] == m["C"].digest(dm)["sha"]
+    yr, dxr, dwr, dbr = ref_grads(dm, x, dy)
+    y, dx = run(lo, x, dy)
+    dw, db = canon_grads(lo)
+    assert maxrel(y, yr) < 1e-6 and maxrel(dx, dxr) < 2e-5 and maxrel(dw, dwr) < 2e-5 and maxrel(db, dbr) < 1e-6
