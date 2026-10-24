@@ -74,9 +74,9 @@ def refresh_table(root: Path, parent: Path):
 
 
 # ------------------------------------------------------------------ coverage
-def coverage_table(root: Path):
-    rows, recs = load(root, "coverage")
-    out = ["### Coverage of the exact supports (graph seed 0)", "",
+def coverage_table(root: Path, stage="coverage", title="graph seed 0"):
+    rows, recs = load(root, stage)
+    out = [f"### Coverage of the exact supports ({title})", "",
            "Predicted values are the independent-round model (ideal quotas / refined with the actual m_q, b_q, groups "
            "per record); measured: exact layer-wide pairs / triples, 10M sampled quadruples (95 % CI); per output: median "
            "over the parent's 38 fixed outputs.", "",
@@ -86,6 +86,8 @@ def coverage_table(root: Path):
            "|---|---|---|---|---|---:|---:|---:|"]
     table = []
     for tag, r in recs.items():
+        if "enabled" not in r:  # (timing records of a mixed stage)
+            continue
         e = r["enabled"]
         p = r.get("predictions") or {}
         ide, ref = p.get("ideal", {}), p.get("refined", {})
@@ -94,13 +96,14 @@ def coverage_table(root: Path):
         w = r.get("width", {})
         sh = r.get("sharing", {}).get("record", {})
         gm = r.get("support_record_multiplicity", {}).get("quad", {}).get("group_multiplicity", {})
-        row = dict(support=r["support"], pair=e["pair"]["fraction"], triple=e["triple"]["fraction"], quad=q["fraction"],
+        row = dict(stage=stage, graph_seed=r["graph_seed"], support=r["support"], pair=e["pair"]["fraction"], triple=e["triple"]["fraction"], quad=q["fraction"],
                    quad_ci=q["ci95"], po_pair=po["pair"]["median"], po_triple=po["triple"]["median"],
                    po_quad=po["quad"]["median"], bias_only=w.get("bias_only_mask_fraction", 0.0),
                    pred_ideal=ide, pred_refined=ref, distinct_per_record=sh.get("distinct_per_scope", {}).get("median"),
                    groups_per_quad=gm.get("covered_quantiles", {}).get("mean"), bounds=r.get("bounds"))
         table.append(row)
-        out.append(f"| {r['support']} | {pct(ide.get('t2'), 4)} / {pct(ref.get('t2'), 4)} / {pct(row['pair'], 4)} | "
+        gtag = "" if r["graph_seed"] == 0 else f" (g{r['graph_seed']})"
+        out.append(f"| {r['support']}{gtag} | {pct(ide.get('t2'), 4)} / {pct(ref.get('t2'), 4)} / {pct(row['pair'], 4)} | "
                    f"{pct(ide.get('t3'))} / {pct(ref.get('t3'))} / {pct(row['triple'])} | "
                    f"{pct(ref.get('t4'), 3)} / {pct(row['quad'], 3)} [{pct(q['ci95'][0], 3)}, {pct(q['ci95'][1], 3)}] | "
                    f"{pct(row['po_pair'], 3)} / {pct(row['po_triple'], 4)} / {pct(row['po_quad'], 5)} | "
@@ -143,7 +146,9 @@ def mem(rec):
     v = rec["variants"]["default"]
     pb = rec.get("persistent_bytes", {})
     return dict(peak=v["peak_allocated_bytes"], reserved=v["peak_reserved_bytes"], scratch=v["step_scratch_peak_bytes"],
-                index=pb.get("index_records_int16", 0), work=v.get("work_list_bytes", 0), persistent=pb)
+                index=pb.get("index_records_int16", 0),
+                work=v.get("work_list_bytes", 0) or pb.get("work_lists_cached_last_runtime", 0), persistent=pb,
+                executed=rec.get("executed_work"))
 
 
 def screen_table(root: Path, stage="screen"):
@@ -157,8 +162,8 @@ def screen_table(root: Path, stage="screen"):
     out = [f"### Complete training step, screen (graph seed 0; median of 8 restored samples per process; "
            f"dense anchors {', '.join(f'{x:.1f}' for x in dense)} ms)", "",
            "| support | format | layout seeds | step ms (per seed) | step mean | x dense | fwd kernel | dX kernel | "
-           "dW kernel | optimizer | peak GiB | index bytes MiB | work lists MiB |",
-           "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+           "dW kernel | optimizer | peak GiB | index bytes MiB | work lists MiB | executed MMA products fwd / dX / dW (1e12) |",
+           "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     table = []
     for (s, f), ts in sorted(by.items(), key=lambda kv: statistics.mean(med(t["rec"]) for t in kv[1])):
         st = [med(t["rec"]) for t in ts]
@@ -167,12 +172,14 @@ def screen_table(root: Path, stage="screen"):
         avg = lambda k: statistics.mean(p.get(k, 0.0) for p in ph)  # noqa: E731
         row = dict(support=s, format=f, seeds=[layout_seed(t["support"]) for t in ts], steps=st,
                    step=statistics.mean(st), fwd=avg("fwd_kernel"), dx=avg("dx_kernel"), dw=avg("dw_kernel"),
-                   opt=avg("optimizer"), peak=m["peak"], index=m["index"], work=m["work"])
+                   opt=avg("optimizer"), peak=m["peak"], index=m["index"], work=m["work"],
+                   mma=(" / ".join(f"{m['executed']['mma_products'][k] / 1e12:.2f}" for k in ("fwd", "dx", "dw"))
+                        if m.get("executed") else "–"))
         table.append(row)
         out.append(f"| {s} | {f} | {','.join('-' if x is None else str(x) for x in row['seeds'])} | "
                    f"{' / '.join(f'{x:.1f}' for x in st)} | {row['step']:.1f} | "
                    f"{row['step'] / dmean:.3f} | {row['fwd']:.1f} | {row['dx']:.1f} | {row['dw']:.1f} | {row['opt']:.1f} | "
-                   f"{row['peak'] / 2**30:.2f} | {row['index'] / 2**20:.1f} | {row['work'] / 2**20:.1f} |")
+                   f"{row['peak'] / 2**30:.2f} | {row['index'] / 2**20:.1f} | {row['work'] / 2**20:.1f} | {row['mma']} |")
     failed = [t for t in tr if t["status"] != "measured"]
     if failed:
         out += ["", "Not measured: " + ", ".join(f"{t['tag']} ({t['status']})" for t in failed)]
@@ -234,8 +241,9 @@ def phase_detail(root: Path, stage, keys):
         host = rec["variants"]["default"]["phases"].get("host_enqueue", {}).get("median_ms") if \
             "host_enqueue" in rec["variants"]["default"]["phases"] else None
         first = None
-        if isinstance(cold, dict):
-            first = cold.get("default", {}).get("step_ms") if isinstance(cold.get("default"), dict) else None
+        if isinstance(cold, dict) and isinstance(cold.get("default"), dict):
+            fs = cold["default"].get("first_step_wall_s")
+            first = None if fs is None else 1000 * fs
         out.append(f"| {t['support']} | {t['format']} | " + " | ".join(fmt(p.get(x)) for x in PH) +
                    f" | {fmt(host)} | {fmt(first)} | {fmt(rec.get('build_seconds'), 1)} | "
                    f"{fmt(gs.get('select_seconds'), 2)} / {fmt(gs.get('conversion_seconds'), 2)} |")
@@ -289,7 +297,7 @@ def learn_table(rows, title, steps=None):
                    f"{r['rel_var_start']:.3f} / {r['rel_var_after']:.3f} | {r['rel_var_after_p10']:.3f} | "
                    f"{r['var01_pruned']:,} / {r['var01_after']:,} | {pct(r['switching'], 1)} | {r['pr_pruned']:.1f} / "
                    f"{r['pr_after']:.1f} | {1e4 * r['outvar_pruned']:.3f} / {1e4 * r['outvar_after']:.3f} | "
-                   f"{fmt(r['grad_after'], 6)} |")
+                   f"{'–' if r['grad_after'] is None else format(r['grad_after'], '.3e')} |")
     return out
 
 
@@ -393,6 +401,10 @@ def main():
     md += t + [""]
     t, cov = coverage_table(root)
     md += t + [""]
+    for st, ti in (("coverage_confirm", "graph seeds 1 / 2 of the confirmation"), ("k8", "CONDITIONAL K8 extension")):
+        t, c2 = coverage_table(root, st, ti)
+        md += t + [""]
+        cov += c2
     t, scr, dmean = screen_table(root)
     md += t + [""]
     md += ["### Per-phase medians (ms), screen, first layout seed of each support", ""]

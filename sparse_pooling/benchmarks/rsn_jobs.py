@@ -133,13 +133,27 @@ def refresh_plan():
                      "control) and one A8 schedule (0.1875, T16); one legacy-rule rerun reproduces the parent's drift")
 
 
-def learn_job(spec, norm="none", steps=32, data_seed=0, sr_seed=0, scale_bias=False, tag=None):
-    tag = tag or (f"learn_{RC.spec_id(spec)}_{norm}{'_wb' if scale_bias else ''}_s{steps}_d{data_seed}")
+def learn_job(spec, norm="none", steps=32, data_seed=0, sr_seed=0, scale_bias=False, tag=None, s_max=8.0):
+    tag = tag or (f"learn_{RC.spec_id(spec)}_{norm}{'_wb' if scale_bias else ''}"
+                  f"{'' if s_max == 8.0 else f'_cap{s_max:g}'}_s{steps}_d{data_seed}")
     args = ["--support", spec, "--norm", norm, "--steps", str(steps), "--data-seed", str(data_seed), "--sr-seed",
             str(sr_seed), "--eval-every", "8" if steps <= 32 else "32"]
     if scale_bias:
         args.append("--scale-bias")
+    if s_max != 8.0:
+        args += ["--s-max", str(s_max)]
     return dict(kind="script", tag=tag, script="rsn_learn.py", args=args)
+
+
+def cap_plan(sel):
+    """sel: dict(supports=[...]): energy restoration with s_max 16 (sensitivity when clipping > 1 %), 32 updates and
+    256 updates x seeds 0 / 1 / 2."""
+    jobs = []
+    for s in sel["supports"]:
+        jobs.append(learn_job(s, "energy", 32, 0, 0, s_max=16.0))
+        for d in sel.get("seeds_256", [0, 1, 2]):
+            jobs.append(learn_job(s, "energy", 256, d, d, s_max=16.0))
+    return dict(stage="cap16", selection=sel, jobs=jobs)
 
 
 def norm_first_plan():
@@ -228,7 +242,7 @@ def run_plan(plan, out, timeout, resume):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["screen", "confirm", "coverage", "coverage_sel", "refresh", "norm_first", "norm",
-                                      "interaction", "k8", "plan"])
+                                      "interaction", "k8", "cap16", "plan"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--selection", default="")
     ap.add_argument("--plan-file", default="")
@@ -237,10 +251,10 @@ def main():
     a = ap.parse_args()
     if a.stage == "plan":
         plan = json.loads(Path(a.plan_file).read_text())
-    elif a.stage in ("confirm", "norm", "interaction", "coverage_sel"):
+    elif a.stage in ("confirm", "norm", "interaction", "coverage_sel", "cap16"):
         sel = json.loads(Path(a.selection).read_text())
         plan = dict(confirm=confirm_plan, norm=norm_plan, interaction=interaction_plan,
-                    coverage_sel=coverage_sel_plan)[a.stage](sel)
+                    coverage_sel=coverage_sel_plan, cap16=cap_plan)[a.stage](sel)
     else:
         plan = dict(screen=screen_plan, coverage=coverage_plan, refresh=refresh_plan, norm_first=norm_first_plan,
                     k8=k8_plan)[a.stage]()
