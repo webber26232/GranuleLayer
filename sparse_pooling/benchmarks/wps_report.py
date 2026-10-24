@@ -425,7 +425,8 @@ def merged(root):
         k = ("dense", 1.0, "magnitude") if d["policy"] == "dense" else (d["policy"], d["rho_target"], d["score"])
         cl = d["diagnostics_after"]["classes"]
         rows[k].update(heldout=d["heldout_finetuned"], pruned=d["heldout_pruned"],
-                       switching=cl["switching"] / d["diagnostics_after"]["sample"])
+                       switching=cl["switching"] / d["diagnostics_after"]["sample"],
+                       useful=d["diagnostics_after"]["variance_threshold_counts"]["0.01"] / d["diagnostics_after"]["sample"])
     _, it = load(root, "interaction")
     for tag, d in it.items():
         k = ("dense", 1.0, "magnitude") if d["policy"] == "dense" else (d["policy"], d["rho_target"], d["score"])
@@ -456,21 +457,58 @@ def policy_table(root):
     return "\n".join(L), rows
 
 
-def pareto(rows):
-    """Non-dominated masks over (step time, input-dependent width = 1 - bias-only, layer triple coverage, held-out
-    loss after fine-tuning) among the masks with all four measured."""
+PARETO_TOL = dict(step_rel=0.01, useful=0.01, triple=0.005, heldout=3e-4)
+
+
+def pareto(rows, tol=PARETO_TOL):
+    """Small Pareto set of the PRIMARY masks (random-score controls excluded) over: complete-step time (new
+    kernels), USEFUL input-dependent width (fraction of the fixed neuron sample with input-driven variance > 0.01,
+    ~5 % of the dense median), layer triple coverage, held-out loss after fine-tuning.  b dominates a when it is
+    no worse than a beyond the tolerance in every objective and better beyond it in at least one (tolerances:
+    1 % step time, 1 point width, 0.5 point triples, ``heldout`` = the measured run-to-run noise bound)."""
     pts = []
     for k, r in rows.items():
         st = r.get("step_wide") or r.get("step_dense")
-        if st is None or r.get("heldout") is None or r.get("triple") is None:
+        if k[2] == "random" or st is None or r.get("heldout") is None or r.get("triple") is None or r.get("useful") is None:
             continue
-        pts.append((k, (st, -(1 - r.get("bias_only", 0.0)), -r["triple"], r["heldout"])))
+        pts.append((k, dict(step=st, useful=r["useful"], triple=r["triple"], heldout=r["heldout"])))
+
+    def better(b, a):  # b better than a beyond tolerance, per objective
+        return dict(step=b["step"] < a["step"] * (1 - tol["step_rel"]), useful=b["useful"] > a["useful"] + tol["useful"],
+                    triple=b["triple"] > a["triple"] + tol["triple"], heldout=b["heldout"] < a["heldout"] - tol["heldout"])
+
+    def worse(b, a):
+        return dict(step=b["step"] > a["step"] * (1 + tol["step_rel"]), useful=b["useful"] < a["useful"] - tol["useful"],
+                    triple=b["triple"] < a["triple"] - tol["triple"], heldout=b["heldout"] > a["heldout"] + tol["heldout"])
+
     keep = []
-    for k, v in pts:
-        dom = any(all(b <= a for a, b in zip(v, u)) and any(b < a for a, b in zip(v, u)) for _, u in pts)
+    for k, a in pts:
+        dom = any(not any(worse(b, a).values()) and any(better(b, a).values()) for k2, b in pts if k2 != k)
         if not dom:
             keep.append(k)
     return sorted(keep, key=lambda k: (k[1], k[0]))
+
+
+def frontier(rows, keep, tol=PARETO_TOL):
+    """Non-dominated primary masks over (complete step, held-out loss) among those satisfying ``keep``."""
+    pts = [(k, r) for k, r in rows.items() if k[2] != "random" and keep(r) and (r.get("step_wide") or r.get("step_dense"))
+           and r.get("heldout") is not None]
+    out = []
+    for k, a in pts:
+        sa = a.get("step_wide") or a.get("step_dense")
+        dom = False
+        for k2, b in pts:
+            if k2 == k:
+                continue
+            sb = b.get("step_wide") or b.get("step_dense")
+            no_worse = sb <= sa * (1 + tol["step_rel"]) and b["heldout"] <= a["heldout"] + tol["heldout"]
+            better = sb < sa * (1 - tol["step_rel"]) or b["heldout"] < a["heldout"] - tol["heldout"]
+            if no_worse and better:
+                dom = True
+                break
+        if not dom:
+            out.append(k)
+    return sorted(out, key=lambda k: (k[1], k[0]))
 
 
 def main():
@@ -502,8 +540,18 @@ def main():
     parts += [f"Mask identity: {len(chk) - len(bad)} / {len(chk)} coverage / fine-tune supports have the element-mask "
               f"sha256 of the timed mask" + ("" if not bad else f"; MISMATCH: {[c['tag'] for c in bad]}"), ""]
     pt, rows = policy_table(root)
-    parts += [pt, "", "Pareto set (step, input-dependent width, layer triples, held-out): " +
-              ", ".join(f"{k[0]} {k[1]:g}{' (random)' if k[2] == 'random' else ''}" for k in pareto(rows)), ""]
+    nm = lambda ks: ", ".join(f"{k[0]} {k[1]:g}" for k in ks)  # noqa: E731
+    dense = rows.get(("dense", 1.0, "magnitude"), {})
+    full = lambda r: r.get("useful", 0) >= 0.95 and r.get("triple", 0) >= dense.get("triple", 1) - 0.001  # noqa: E731
+    parts += [pt, "",
+              f"Four-objective non-dominated set (complete step, useful width, layer triples, held-out; tolerances "
+              f"{PARETO_TOL}): {nm(pareto(rows))}", "",
+              "Small Pareto sets (complete step vs held-out loss after fine-tuning, same tolerances):", "",
+              f"* unconstrained: {nm(frontier(rows, lambda r: True))}",
+              f"* useful width >= 95 % of the neuron sample AND layer triples within 0.1 point of the dense potential: "
+              f"{nm(frontier(rows, full))}",
+              f"* rho <= 0.10 with every row connected (structural): "
+              f"{nm(frontier(rows, lambda r: r.get('bias_only', 1) == 0 and r.get('rho_mask', 1) <= 0.1001))}", ""]
     Path(a.out).write_text("\n".join(parts) + "\n")
     print(f"wrote {a.out}")
 
