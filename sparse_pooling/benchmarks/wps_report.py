@@ -299,16 +299,37 @@ def finetune_table(root, stage="finetune"):
     return "\n".join(L), out
 
 
+def exact_floors(root):
+    """{terms: {orderk: floor}} from interaction_floors.json (wps_interaction_floor.py; exact additive floors of the
+    actual targets on the held-out batches), or None."""
+    f = Path(root) / "interaction_floors.json"
+    if not f.exists():
+        return None
+    return {r["terms"]: r["floor"] for r in json.loads(f.read_text())["floors"]}
+
+
+def explained(d, root):
+    """1 - nMSE / floor per order 2 / 3 / 4 with the EXACT floor of the run's targets (falls back to the record)."""
+    fl = exact_floors(root)
+    T = d.get("terms", 1)
+    if fl and T in fl:
+        return {o: 1.0 - d["final"][f"order{o}"] / fl[T][f"order{o}"] for o in (2, 3, 4)}
+    return {o: d["final"][f"explained_interaction_order{o}"] for o in (2, 3, 4)}
+
+
 def interaction_table(root, stage="interaction"):
     _, recs = load(root, stage)
     if not recs:
         return ""
     any_ = next(iter(recs.values()))
     tc = any_.get("target_constants", {})
+    fl = (exact_floors(root) or {}).get(1)
     L = ["### Interaction diagnostic (reduced labelled configuration: H = 262,144, one C256 record per output; fresh init; "
          "1000 updates)", "",
-         "Additive floors (the normalized MSE no support additive across the blocks can beat): " +
-         ", ".join(f"order {k}: {v['additive_floor']:.4f}" for k, v in tc.items() if int(k) > 1), "",
+         "Exact additive floors of the targets on the held-out batches (the normalized MSE no support additive across the "
+         "blocks can beat; wps_interaction_floor.py): " +
+         (", ".join(f"order {o}: {fl[f'order{o}']:.4f}" for o in (2, 3, 4)) if fl else
+          ", ".join(f"order {k}: {v['additive_floor']:.4f}" for k, v in tc.items() if int(k) > 1)), "",
          "| support | normalized held-out MSE: order 1 / 2 / 3 / 4 | explained interaction share: order 2 / 3 / 4 | "
          "neurons per output seeing their whole term: order 1 / 2 / 3 / 4 |", "|---|---|---|---|"]
     for tag in sorted(recs, key=lambda t: (recs[t].get("rho_target", 1), t)):
@@ -316,8 +337,9 @@ def interaction_table(root, stage="interaction"):
         f = d["final"]
         ns = d.get("neurons_seeing_their_whole_product") or {}
         nm = f"{d['policy']} {d['rho_target']:g}" + (" (random)" if d.get("score") == "random" else "")
+        ex = explained(d, root)
         L.append(f"| {nm} | " + " / ".join(f"{f[f'order{o}']:.4f}" for o in (1, 2, 3, 4)) + " | " +
-                 " / ".join(f"{f[f'explained_interaction_order{o}']:.3f}" for o in (2, 3, 4)) + " | " +
+                 " / ".join(f"{ex[o]:.3f}" for o in (2, 3, 4)) + " | " +
                  (" / ".join(f"{ns.get(f'order{o}', 0):.1f}" for o in (1, 2, 3, 4)) if ns else "256 (all)") + " |")
     return "\n".join(L)
 
@@ -326,13 +348,18 @@ def capacity_table(root):
     _, recs = load(root, "interaction_capacity")
     if not recs:
         return ""
+    fl = (exact_floors(root) or {}).get(16)
     L = ["### Interaction capacity stress (16 independent terms per record; otherwise identical)", "",
-         "| support | explained interaction share: order 2 / 3 / 4 | normalized MSE order 1 |", "|---|---|---:|"]
+         "Exact additive floors of these targets (lower than the single-term floors: terms sharing an input add their "
+         "additive parts coherently): " + (", ".join(f"order {o}: {fl[f'order{o}']:.4f}" for o in (2, 3, 4)) if fl else "–"),
+         "", "| support | normalized held-out MSE: order 1 / 2 / 3 / 4 | explained interaction share: order 2 / 3 / 4 |",
+         "|---|---|---|"]
     for tag in sorted(recs, key=lambda t: (recs[t].get("rho_target", 1), t)):
         d = recs[tag]
         f = d["final"]
-        L.append(f"| {d['policy']} {d['rho_target']:g} | " +
-                 " / ".join(f"{f[f'explained_interaction_order{o}']:.3f}" for o in (2, 3, 4)) + f" | {f['order1']:.4f} |")
+        ex = explained(d, root)
+        L.append(f"| {d['policy']} {d['rho_target']:g} | " + " / ".join(f"{f[f'order{o}']:.4f}" for o in (1, 2, 3, 4)) +
+                 " | " + " / ".join(f"{ex[o]:.3f}" for o in (2, 3, 4)) + " |")
     return "\n".join(L)
 
 
@@ -496,7 +523,7 @@ def merged(root):
     _, it = load(root, "interaction")
     for tag, d in it.items():
         k = ("dense", 1.0, "magnitude") if d["policy"] == "dense" else (d["policy"], d["rho_target"], d["score"])
-        rows[k].update({f"int{o}": d["final"][f"explained_interaction_order{o}"] for o in (2, 3, 4)})
+        rows[k].update({f"int{o}": v for o, v in explained(d, root).items()})
     return rows
 
 
@@ -579,12 +606,40 @@ def frontier(rows, keep, tol=PARETO_TOL):
     return sorted(out, key=lambda k: (k[1], k[0]))
 
 
+def write_csv(root, d: Path):
+    """timing.csv (every timing record: stage, mask, format, seed, phases) and policies.csv (merged C256 rows)."""
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "timing.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["stage", "tag", "C", "graph_seed", "policy", "rho", "score", "format", "inference", "rho_mask"] +
+                   list(PH) + ["peak_alloc_bytes", "peak_reserved_bytes", "canonical_params_sha", "mask_sha"])
+        for st in ("screen", "c2048", "ablation", "inference", "confirm", "winners"):
+            for r in timing_rows(root, st):
+                if r["rec"] is None:
+                    continue
+                rec = r["rec"]
+                v = rec["variants"]["default"]
+                w.writerow([st, r["tag"], r["C"], r["seed"], r["policy"], r["rho"], r["score"], r["format"], r["inference"],
+                            rec["graph_stats"].get("rho_mask")] + [med(rec, p) for p in PH] +
+                           [v["peak_allocated_bytes"], v["peak_reserved_bytes"], ident(rec)[0], ident(rec)[1]])
+    rows = merged(root)
+    keys = sorted({k for r in rows.values() for k in r})
+    with open(d / "policies.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["policy", "rho", "score"] + keys)
+        for k in sorted(rows, key=lambda k: (k[1], k[0], k[2])):
+            w.writerow(list(k) + [rows[k].get(x) for x in keys])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--csv", default="")
     a = ap.parse_args()
     root = Path(a.root)
+    if a.csv:
+        write_csv(root, Path(a.csv))
     parts = ["# Width-preserving sparsity: tables (generated by benchmarks/wps_report.py)", ""]
     t, by, dense = screen_tables(root)
     parts += [t, "", phase_table(by), "", phase_table(by, "dense_masked"), "", memory_table(by), "",
