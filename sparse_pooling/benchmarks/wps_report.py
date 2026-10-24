@@ -349,8 +349,13 @@ def confirm_table(root, stage="confirm"):
     if not rs:
         return ""
     steps = defaultdict(lambda: defaultdict(dict))
+    lists = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for r in rs:
-        steps[(r["policy"], r["rho"], r["score"])][r["format"]][r["seed"]] = med(r["rec"])
+        lists[(r["policy"], r["rho"], r["score"])][r["format"]][r["seed"]].append(med(r["rec"]))
+    for k, f in lists.items():  # the 3 dense anchors of a seed: their median
+        for fm, ss in f.items():
+            for sd, v in ss.items():
+                steps[k][fm][sd] = statistics.median(v)
     L = ["### Confirmation (graph seeds 0 / 1 / 2, seed-specific checkpoints; 4 x 2 x 3 = 24 samples per seed)", "",
          "| mask | format | step per seed (ms) | mean | vs dense masked: ratio mean ± t95 | vs unpruned dense: ratio mean ± t95 |",
          "|---|---|---|---:|---:|---:|"]
@@ -367,6 +372,25 @@ def confirm_table(root, stage="confirm"):
                      " / ".join(fmt(ss[s]) for s in seeds) + f" | {fmt(statistics.mean(ss.values()))} | " +
                      (f"×{m1:.3f} ± {h1:.3f}" if h1 is not None else (f"×{m1:.3f}" if m1 else "–")) + " | " +
                      (f"×{m2:.3f} ± {h2:.3f}" if h2 is not None else (f"×{m2:.3f}" if m2 else "–")) + " |")
+    pairs = [(("P16", 0.25, "wide"), ("U16", 0.25, "wide")), (("P16", 0.25, "lowered"), ("P16", 0.25, "wide")),
+             (("P16", 0.25, "tile"), ("P16", 0.25, "wide")), (("U16", 0.25, "tile"), ("U16", 0.25, "wide")),
+             (("A8", 0.25, "wide"), ("U8", 0.25, "wide")), (("A8", 0.25, "wide"), ("U16", 0.25, "wide")),
+             (("U8", 0.25, "wide"), ("U16", 0.25, "wide")), (("H2A", 0.10, "wide"), ("U16", 0.10, "wide")),
+             (("H2A", 0.10, "wide"), ("H2", 0.10, "wide")), (("P8", 0.125, "lowered"), ("P8", 0.125, "wide")),
+             (("P8", 0.125, "wide"), ("U8", 0.125, "wide")), (("A16", 0.375, "wide"), ("U16", 0.375, "wide")),
+             (("A16", 0.375, "tile"), ("A16", 0.375, "wide"))]
+    L += ["", "Paired step-time ratios (a / b per graph seed; mean ± t95 over the 3 seeds; > 1: a is slower):", "",
+          "| a | b | per seed | mean ± t95 |", "|---|---|---|---:|"]
+    for (pa, ra, fa), (pb, rb, fb) in pairs:
+        A = steps.get((pa, ra, "magnitude"), {}).get(fa, {})
+        Bv = steps.get((pb, rb, "magnitude"), {}).get(fb, {})
+        sd = sorted(set(A) & set(Bv))
+        if not sd:
+            continue
+        rr = [A[x] / Bv[x] for x in sd]
+        m, h = ci(rr)
+        L.append(f"| {pa} {ra:g} {fa} | {pb} {rb:g} {fb} | " + " / ".join(f"{v:.3f}" for v in rr) +
+                 f" | {m:.3f}" + (f" ± {h:.3f}" if h is not None else "") + " |")
     return "\n".join(L)
 
 
