@@ -348,6 +348,7 @@ def main():
         kcsr["canonical_start"] = canonical.identity(lay, opt)
         kcsr["canonical_start"]["seconds"] = time.perf_counter() - t1
         kcsr["canonical_start"]["after_reset"] = bool(args.canonical_start)
+        torch.cuda.empty_cache()  # (identity buffers never count towards the measured memory)
     state = None
     ref_fp = None
     if args.protocol == "complete":

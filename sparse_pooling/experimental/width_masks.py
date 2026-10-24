@@ -188,7 +188,7 @@ def build(policy, rho: float, w: torch.Tensor, L, score: str = "magnitude", seed
     if isinstance(policy, str):
         policy = POLICIES[policy]
     dev = w.device
-    cnt = layout_counts(L, dev)
+    cnt = layout_counts(L, dev if dev.type != "meta" else "cpu")  # (meta weights: feasibility check only)
     feas = feasibility(policy, rho, L, dev, cnt)
     if not feas["feasible"]:
         raise Infeasible(feas["reason"])
