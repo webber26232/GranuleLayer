@@ -198,6 +198,30 @@ def interaction_plan(steps=1000):
     return dict(stage="interaction", jobs=jobs)
 
 
+REPEATS = [("dense", None), ("U16", 0.25), ("A8", 0.25), ("P16", 0.25), ("U16", 0.10), ("H2A", 0.10), ("H2", 0.10)]
+
+
+def finetune_repeat_plan():
+    """Run-to-run noise of the fine-tuning diagnostic: the same jobs again (same inputs / seeds; only FP32
+    atomic summation order differs between runs)."""
+    jobs = []
+    for p, d in REPEATS:
+        args = ["--policy", p] + ([] if p == "dense" else ["--rho", str(d)])
+        tag = "ft_dense_C256_rep" if p == "dense" else f"ft_{WC.case_id(p, d)}_rep"
+        jobs.append(dict(kind="learn", tag=tag, script="wps_learn.py", args=args))
+    return dict(stage="finetune_repeat", jobs=jobs)
+
+
+def interaction_capacity_plan(steps=1000, terms=16):
+    """Capacity stress of the interaction diagnostic: 16 independent terms per record (same policies)."""
+    jobs = [dict(kind="interaction", tag=f"intT{terms}_dense_C256", script="wps_interaction.py",
+                 args=["--policy", "dense", "--steps", str(steps), "--terms", str(terms)])]
+    for p, d in INTERACTION:
+        jobs.append(dict(kind="interaction", tag=f"intT{terms}_{WC.case_id(p, d)}", script="wps_interaction.py",
+                         args=["--policy", p, "--rho", str(d), "--steps", str(steps), "--terms", str(terms)]))
+    return dict(stage="interaction_capacity", jobs=jobs)
+
+
 def regen_plan():
     """Regeneration check of the reused C256 graph-seed-0 alpha = 0 checkpoint (k64_learn.py, same code path):
     hashes compared by the report; byte identity is NOT expected (FP32 atomics)."""
@@ -286,7 +310,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["screen", "inference", "c2048", "ablation", "reject", "confirm", "winners", "plan",
                                       "coverage", "finetune", "coverage_ft", "interaction", "regen", "refresh_cost",
-                                      "refresh"])
+                                      "refresh", "interaction_capacity", "finetune_repeat"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--selection", default="")
     ap.add_argument("--plan-file", default="")
@@ -301,7 +325,8 @@ def main():
     else:
         plan = dict(screen=screen_plan, inference=inference_plan, c2048=c2048_plan, ablation=ablation_plan,
                     reject=reject_plan, coverage=coverage_plan, finetune=learn_plan, coverage_ft=coverage_ft_plan,
-                    interaction=interaction_plan, regen=regen_plan, refresh_cost=refresh_cost_plan)[a.stage]()
+                    interaction=interaction_plan, regen=regen_plan, refresh_cost=refresh_cost_plan,
+                    interaction_capacity=interaction_capacity_plan, finetune_repeat=finetune_repeat_plan)[a.stage]()
     run_plan(plan, a.out, a.timeout, a.resume)
 
 

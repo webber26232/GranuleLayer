@@ -212,13 +212,14 @@ def coverage_rows(root, stage="coverage"):
     return recs
 
 
-def coverage_table(recs, title="Coverage of the enabled supports (C256 seed 0; exact pairs / triples, sampled quadruples)"):
+def coverage_table(recs, title="Coverage of the enabled supports (graph seed 0; exact pairs / triples, sampled quadruples)"):
     L = [f"### {title}", "",
          "| support | enabled density | bias-only mask / numeric | full-support neurons | layer pairs | triples | quadruples [95 % CI] | "
          "per-output features median | per-output triples median | per-output quads median | layer quad multiplicity median (covered) | "
          "per-output triple multiplicity: 0 / 1 / 2-15 / 16-63 / 64+ (median output) | anchors: every record full & nonzero | per-output = potential |",
          "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"]
-    for tag in sorted(recs):
+    for tag in sorted(recs, key=lambda t: (recs[t].get("C", 0), (recs[t].get("width") or {}).get("enabled_slots", 8e8),
+                                         t)):
         d = recs[tag]
         e = d.get("enabled") or d.get("dense")
         if e is None:
@@ -236,8 +237,8 @@ def coverage_table(recs, title="Coverage of the enabled supports (C256 seed 0; e
         an = d.get("anchors")
         av = d.get("anchor_vs_potential_per_output")
         dens = w.get("enabled_slots", 8e8) / 8e8
-        L.append(f"| {d.get('kind')} | {dens:.4f} | {100 * w.get('bias_only_mask_fraction', 0):.1f} / "
-                 f"{100 * w.get('bias_only_numeric_fraction', 0):.1f} % | {w.get('full_support_neurons_mask', '–'):,} | "
+        L.append(f"| C{d.get('C')} {d.get('kind')} | {dens:.4f} | {100 * w.get('bias_only_mask_fraction', 0):.1f} / "
+                 f"{100 * w.get('bias_only_numeric_fraction', 0):.1f} % | {fmt(w.get('full_support_neurons_mask'), 0)} | "
                  f"{100 * e['pair']['fraction']:.3f} % | {100 * e['triple']['fraction']:.3f} % | "
                  f"{100 * q['fraction']:.4f} [{100 * q['ci95'][0]:.4f}, {100 * q['ci95'][1]:.4f}] % | "
                  f"{po['features']['median']:.0f} | {100 * po['triple']['median']:.4f} % | {100 * po['quad']['median']:.5f} % | "
@@ -245,6 +246,27 @@ def coverage_table(recs, title="Coverage of the enabled supports (C256 seed 0; e
                  f"{'–' if not an else ('yes' if an['all_records_have_full_mask_anchor'] and an['all_records_have_numerically_full_anchor'] else 'NO')} | "
                  f"{'–' if not av else ('yes' if av['all_equal'] else 'NO')} |")
     return "\n".join(L)
+
+
+def mask_identity_check(root):
+    """Coverage / fine-tune supports vs the timed masks: element-mask sha256 (graph seed 0)."""
+    timed = {}
+    for st in ("screen", "c2048"):
+        for r in timing_rows(root, st):
+            if r["rec"] is not None and r["policy"] != "dense":
+                timed.setdefault((r["C"], r["policy"], r["rho"], r["score"]), set()).add(
+                    r["rec"]["graph_stats"].get("mask_sha256"))
+    out = []
+    for st in ("coverage", "finetune"):
+        _, recs = load(root, st)
+        for tag, d in recs.items():
+            if d.get("policy") in (None, "dense") or d.get("mask_file"):
+                continue
+            k = (d.get("C", 256), d["policy"], d["rho_target"], d.get("score", "magnitude"))
+            t = timed.get(k)
+            out.append(dict(stage=st, tag=tag, ok=bool(t) and t == {d.get("mask_sha256")}, timed=sorted(t or []),
+                            analysed=d.get("mask_sha256")))
+    return out
 
 
 def finetune_table(root, stage="finetune"):
@@ -451,6 +473,10 @@ def main():
         parts += [coverage_table(covf, "Coverage of the exact nonzero supports after fine-tuning"), ""]
     ft, _ = finetune_table(root)
     parts += [ft, "", interaction_table(root), "", confirm_table(root), ""]
+    chk = mask_identity_check(root)
+    bad = [c for c in chk if not c["ok"]]
+    parts += [f"Mask identity: {len(chk) - len(bad)} / {len(chk)} coverage / fine-tune supports have the element-mask "
+              f"sha256 of the timed mask" + ("" if not bad else f"; MISMATCH: {[c['tag'] for c in bad]}"), ""]
     pt, rows = policy_table(root)
     parts += [pt, "", "Pareto set (step, input-dependent width, layer triples, held-out): " +
               ", ".join(f"{k[0]} {k[1]:g}{' (random)' if k[2] == 'random' else ''}" for k in pareto(rows)), ""]

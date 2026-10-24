@@ -53,8 +53,8 @@ def xbatch(seed, dev, M=M_TRAIN):
 
 
 @torch.no_grad()
-def target_inputs(lay):
-    """ids [G, NBv, 4] global inputs of every record's product, rec_valid [G, NBv], order [G], loc [G, NBv, 4]."""
+def target_inputs(lay, terms=1):
+    """ids [G, NBv, T, 4] global inputs of every record's T terms, rec_valid [G, NBv], order [G], loc [G, NBv, T, 4]."""
     L = lay.layout
     dev = lay.weight.device
     b = lay.kg_buckets.to(torch.int64)
@@ -66,9 +66,9 @@ def target_inputs(lay):
     q = bq.view(L.groups, NB)
     valid = q >= 0
     gen = torch.Generator(device="cpu").manual_seed(HASH_SEED)
-    off = torch.randint(0, 16, (L.groups, NB, 4), generator=gen).to(dev)
-    loc = 16 * torch.arange(4, device=dev)[None, None, :] + off  # one input per local 16-block
-    ids = lay.sg_feat.to(torch.int64)[q.clamp_min(0)[..., None], loc]
+    off = torch.randint(0, 16, (L.groups, NB, terms, 4), generator=gen).to(dev)
+    loc = 16 * torch.arange(4, device=dev)[None, None, None, :] + off  # one input per local 16-block, per term
+    ids = lay.sg_feat.to(torch.int64)[q.clamp_min(0)[..., None, None], loc]  # [G, NB, T, 4]
     order = 1 + torch.arange(L.groups, device=dev) % 4
     return ids, valid, order, loc
 
@@ -108,16 +108,17 @@ def sigmas(dev):
 
 
 def targets(x, ids, valid, order, sig):
-    G, NB, _ = ids.shape
+    G, NB, T, _ = ids.shape
     t = torch.zeros(x.shape[0], G, device=x.device)
     for j in range(NB):
-        xs = x[:, ids[:, j]]  # [M, G, 4]
-        p = torch.zeros(x.shape[0], G, device=x.device)
-        for k in (1, 2, 3, 4):
-            sel = order == k
-            p[:, sel] = (_f(xs[:, sel], k) - sig[k][0]) / sig[k][1]
-        t += p * valid[:, j][None, :]
-    return t / valid.sum(1).clamp_min(1).sqrt()[None, :]
+        for u in range(T):
+            xs = x[:, ids[:, j, u]]  # [M, G, 4]
+            p = torch.zeros(x.shape[0], G, device=x.device)
+            for k in (1, 2, 3, 4):
+                sel = order == k
+                p[:, sel] = (_f(xs[:, sel], k) - sig[k][0]) / sig[k][1]
+            t += p * valid[:, j][None, :]
+    return t / (valid.sum(1).clamp_min(1) * T).sqrt()[None, :]
 
 
 def main():
@@ -130,6 +131,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--steps", type=int, default=1000)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--terms", type=int, default=1, help="independent terms per record (capacity stress: T > 1 "
+                    "terms of the same order with independently drawn inputs; target normalized by sqrt(T n_rec))")
     ap.add_argument("--hidden", type=int, default=262_144, help="H of the diagnostic (default: one C256 record "
                     "per output, n_g = 256; the full-size H dilutes each record's term over 48 records and was not "
                     "learned by the dense control)")
@@ -158,11 +161,12 @@ def main():
         lay = KgxLayer(WC.D, a.hidden, WC.G, a.C, ConnectivityPlan(WC.S, WC.R, seed=a.graph_seed), variant="idf",
                        tile=128, device=dev, seed=WC.INIT_SEED, keep_indices=False)
     lay.enable_main_grad()
-    ids, rvalid, order, loc = target_inputs(lay)
+    ids, rvalid, order, loc = target_inputs(lay, a.terms)
     sig = sigmas(dev)
     mask, ms = None, None
     res = dict(C=a.C, graph_seed=a.graph_seed, policy=a.policy, rho_target=a.rho, score=a.score, seed=a.seed,
                steps=a.steps, lr_layer=a.lr, lr_readout=1e-2, M_train=M_TRAIN, hidden=a.hidden, init=a.init,
+               terms=a.terms,
                checkpoint=dict(path=ck, weight_sha256=rec["weight_sha256"]), hash_seed=HASH_SEED,
                provenance=provenance(Path(common.__file__).resolve().parent.parent),
                target="single-index ReLU terms f_k (module docstring)",
@@ -177,7 +181,7 @@ def main():
         # neurons that see ALL k inputs of their own record's product (support of the row group)
         L = lay.layout
         m = mask.view(L.groups, L.blocks_per_group, L.block, 64).bool()
-        seen = m.gather(3, loc[:, :, None, :].expand(-1, -1, L.block, 4))  # [G, NB, C, 4]
+        seen = m.gather(3, loc[:, :, None, 0, :].expand(-1, -1, L.block, 4))  # [G, NB, C, 4] (first term)
         k = order[:, None, None, None]
         need = torch.arange(4, device=dev)[None, None, None, :] < k
         allk = ((seen | ~need).all(3)) & L.valid_mask(dev)
