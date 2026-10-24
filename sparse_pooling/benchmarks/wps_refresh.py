@@ -55,14 +55,24 @@ def tile_l1(t: torch.Tensor, ms, valid) -> torch.Tensor:
     return out
 
 
+CHUNK = 1 << 26
+
+
 @torch.no_grad()
-def masked_sum(t: torch.Tensor, m: torch.Tensor, chunk: int = 1 << 26) -> float:
-    """FP64 sum of t over the slots where m != 0 (chunked: surviving-state checks of the remap)."""
+def masked_sum(t: torch.Tensor, m: torch.Tensor, chunk: int = CHUNK) -> float:
+    """FP64 sum of t over the slots where m is true (chunked: a whole-tensor reduction of these 800M-slot tensors
+    would materialize 8 B per element)."""
     tv, mv = t.reshape(-1), m.reshape(-1)
     s = 0.0
     for i in range(0, tv.numel(), chunk):
-        s += float((tv[i:i + chunk].double() * (mv[i:i + chunk] != 0)).sum())
+        s += float((tv[i:i + chunk].double() * mv[i:i + chunk]).sum())
     return s
+
+
+@torch.no_grad()
+def count(fn, n: int, chunk: int = CHUNK) -> int:
+    """sum over chunks [i, i + chunk) of int(fn(i, j).sum())."""
+    return sum(int(fn(i, min(n, i + chunk)).sum()) for i in range(0, n, chunk))
 
 
 @torch.no_grad()
@@ -73,23 +83,36 @@ def remap_state(opt, lay, ms, mask_old, rec, valid):
     from sparse_pooling.experimental import l1 as L1
 
     mask = ms.element_mask(lay.layout)
-    keep = (mask_old != 0) & (mask != 0)
+    mo, mn = mask_old.reshape(-1), mask.reshape(-1)
+    w = lay.weight.detach().reshape(-1)
+    n = mn.numel()
     st = opt.state.get(lay.weight, {})
-    before = dict(w=masked_sum(lay.weight.detach(), keep),
-                  **{k: masked_sum(st[k], keep) for k in ("m", "v") if k in st})
+    keys = [k for k in ("m", "v") if k in st]
+
+    def sums(sel_fn, absval=False):
+        out = {}
+        for name, t in [("w", w)] + [(k, st[k].reshape(-1)) for k in keys]:
+            s = 0.0
+            for i in range(0, n, CHUNK):
+                x = t[i:i + CHUNK].double()
+                s += float(((x.abs() if absval else x) * sel_fn(i, i + CHUNK)).sum())
+            out[name] = s
+        return out
+
+    keep = lambda i, j: (mo[i:j] != 0) & (mn[i:j] != 0)  # noqa: E731
+    grown = lambda i, j: (mn[i:j] != 0) & (mo[i:j] == 0)  # noqa: E731
+    before = sums(keep)
     L1.apply_mask_(opt, lay.weight, mask)
-    after = dict(w=masked_sum(lay.weight.detach(), keep),
-                 **{k: masked_sum(st[k], keep) for k in ("m", "v") if k in st})
-    grown = (mask != 0) & (mask_old == 0)
-    gz = dict(w=masked_sum(lay.weight.detach().abs(), grown),
-              **{k: masked_sum(st[k].float().abs(), grown) for k in ("m", "v") if k in st})
-    nz = lay.weight.detach() != 0
-    rec.update(state_remap=dict(surviving_slots=int(keep.sum()), grown_slots_mask=int(grown.sum()),
-                                pruned_slots_mask=int(((mask_old != 0) & (mask == 0)).sum()),
+    after = sums(keep)
+    gz = sums(grown, absval=True)
+    vv = valid.reshape(-1)
+    H = int(vv.sum())
+    nz_valid = count(lambda i, j: (w[i:j].view(-1, 64) != 0) & vv[i // 64:j // 64, None], n)
+    rec.update(state_remap=dict(surviving_slots=count(keep, n), grown_slots_mask=count(grown, n),
+                                pruned_slots_mask=count(lambda i, j: (mo[i:j] != 0) & (mn[i:j] == 0), n),
                                 surviving_preserved=before == after, grown_zero=all(v == 0 for v in gz.values()),
-                                nonzero_outside_mask=int((nz & (mask == 0)).sum())),
-               mask_density=int((mask != 0).sum()) / (64 * int(valid.sum())),
-               nonzero_density=int((nz & valid[..., None]).sum()) / (64 * int(valid.sum())))
+                                nonzero_outside_mask=count(lambda i, j: (w[i:j] != 0) & (mn[i:j] == 0), n)),
+               mask_density=count(lambda i, j: mn[i:j] != 0, n) / (64 * H), nonzero_density=nz_valid / (64 * H))
     return mask
 
 
