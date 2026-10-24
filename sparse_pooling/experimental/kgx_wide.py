@@ -392,13 +392,30 @@ def executed_work(layer, B: int, split: bool = True) -> dict:
 
 
 # ------------------------------------------------------------------ benchmark factory (k64_factory:wide)
-FORMATS = ("dense", "dense_masked", "wide", "tile", "lowered")
+FORMATS = ("dense", "dense_masked", "wide", "tile", "lowered", "indexed")
+
+
+def local_as_maskset(sup):
+    """A fixed-partition local support (one tile id per valid row group) as a one-tile MaskSet (P16 / P8 geometry),
+    so the index-free tile kernels execute exactly the same function."""
+    from . import width_masks as WM
+
+    nkt = 64 // sup.k
+    gv = sup.nv > 0
+    tiles = torch.zeros((sup.nv.numel(), nkt), dtype=torch.bool, device=sup.env.device)
+    tiles[torch.nonzero(gv).squeeze(1), sup.subset[gv]] = True
+    pol = WM.POLICIES["P16" if sup.k == 16 else "P8"]
+    return WM.MaskSet(pol, tiles, torch.zeros_like(gv), tiles.clone(), None, sup.nv,
+                      dict(policy=sup.policy, rho_mask=sup.k / 64, from_local_support=sup.fingerprint()))
 
 
 def build_policy_layer(args, conn, plan):
     """Layer of one width-preserving policy built from a saved pre-pruning checkpoint (outside every timed
     region).  args.factory: checkpoint, format (FORMATS), policy (width_masks.POLICIES; omitted for "dense",
     the unpruned control), density, score ("magnitude" | "random"), seed, tile (physical neuron tile).
+    A local support (local_supports.POLICIES: FP-mag, FP-balanced, RP-record, RP-row, BP-row) takes k (16 / 8) and
+    layout_seed instead of density; its formats: "indexed" (kgen K = k, C = 16 with the explicit local records,
+    kgx_onetile.lower_local), "dense_masked", and for the fixed-partition ones "tile" / "wide" (index-free).
 
     The checkpoint's graph spec and weight / bias sha256 are verified; every format of the same (checkpoint,
     policy, density, score, seed) holds the same W_eff, mask and neuron identity (canonical hashes)."""
@@ -433,15 +450,29 @@ def build_policy_layer(args, conn, plan):
         return lay
     L = lay.layout
     t0 = time.perf_counter()
-    ms = WM.build(f["policy"], float(f["density"]), lay.weight.detach(), L, score=f.get("score", "magnitude"),
-                  seed=int(f.get("seed", 0)))
-    em = ms.element_mask(L)
+    from . import local_supports as LS
+
+    sup = None
+    if f["policy"] in LS.POLICIES:  # a fixed / randomized local support (random-support study)
+        sup = LS.build(f["policy"], int(f.get("k", 16)), L, lay.kg_buckets, w=lay.weight.detach(),
+                       graph_seed=conn.seed, layout_seed=int(f.get("layout_seed", 0)), device="cuda")
+        em = sup.element_mask(L)
+        ms = local_as_maskset(sup) if sup.policy in ("FP-mag", "FP-balanced") else None
+        stats = {k: v for k, v in sup.stats.items() if k != "selection"}
+        stats.update(policy=sup.policy, rho_mask=sup.enabled_slots() / (64 * L.hidden_dim))
+    else:
+        ms = WM.build(f["policy"], float(f["density"]), lay.weight.detach(), L, score=f.get("score", "magnitude"),
+                      seed=int(f.get("seed", 0)))
+        em = ms.element_mask(L)
+        stats = ms.stats
     torch.cuda.synchronize()
     sel_s = time.perf_counter() - t0
     mask_sha = SP.mask_fingerprint(em)
     t0 = time.perf_counter()
     with torch.no_grad():
         lay.weight.data.mul_(em.to(lay.weight.dtype))
+    if fmt in ("wide", "tile", "lowered") and ms is None:
+        raise SystemExit(f"format {fmt!r} needs a fixed-partition support (FP-mag / FP-balanced) or a tile policy")
     if fmt == "dense_masked":
         out = lay
         out.mask = em
@@ -451,14 +482,21 @@ def build_policy_layer(args, conn, plan):
         if ms.tb != 16 or ms.bb is not None:
             raise SystemExit("format 'tile' (the measured 16 x 16 kernels) needs a b16 policy without backbone")
         out = SP.KgxTileLayer(lay, ms.tiles)
+    elif fmt == "indexed":
+        if sup is None:
+            raise SystemExit("format 'indexed' (kgen K = k, C = 16 with explicit local records) needs a local support")
+        from .kgx_onetile import lower_local
+
+        out = lower_local(lay, sup, plan)
     else:
         out = lower_one_tile(lay, ms, plan)
     torch.cuda.synchronize()
     conv_s = time.perf_counter() - t0
-    out.mask_set_stats = ms.stats
-    out.graph_stats.update(checkpoint=ck, policy=ms.stats["policy"], format=fmt, mask_stats=ms.stats,
-                           rho_mask=ms.stats["rho_mask"], mask_sha256=mask_sha, select_seconds=sel_s,
-                           conversion_seconds=conv_s)
+    out.mask_set_stats = stats
+    out.graph_stats.update(checkpoint=ck, policy=stats["policy"], format=fmt, mask_stats=stats,
+                           rho_mask=stats["rho_mask"], mask_sha256=mask_sha, select_seconds=sel_s,
+                           conversion_seconds=conv_s,
+                           support_fingerprint=None if sup is None else sup.fingerprint())
     if fmt != "dense_masked":
         del lay, em
     torch.cuda.empty_cache()

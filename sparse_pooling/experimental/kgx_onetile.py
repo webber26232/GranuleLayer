@@ -39,20 +39,34 @@ class LoweredOneTile(KgenLayer):
         s = g * (L.blocks_per_group * 16) + n
         W = src["weight"].reshape(-1, L.fan_in)[s]
         rows = torch.zeros((len(s), 64), dtype=W.dtype, device=W.device)
-        rows.scatter_(1, self.env[s // 16], W)
+        rows.scatter_(1, self.env[s // 16].long(), W)
         return rows, src["bias"].reshape(-1)[s]
 
     def canon_mask_rows(self, g, n):
         L = self.layout
         s = g * (L.blocks_per_group * 16) + n
         m = torch.zeros((len(s), 64), dtype=torch.bool, device=s.device)
-        m.scatter_(1, self.env[s // 16], True)
+        m.scatter_(1, self.env[s // 16].long(), True)
         return m
 
     def kcsr_describe(self):
         d = super().kcsr_describe() if hasattr(super(), "kcsr_describe") else {}
-        d.update(lowered_from="K64 one-tile support (experimental/kgx_onetile.py)", envelope_K=64)
+        d.update(lowered_from="K64 one-tile / local support (experimental/kgx_onetile.py)", envelope_K=64,
+                 executed_K=self.layout.fan_in, executed_C=16, records_16=self.graph_stats.get("records_16"),
+                 index_bytes=self.indices.numel() * self.indices.element_size())
         return d
+
+    def immutable_fingerprints(self):
+        from .kgx_sparse import _fp_tensor
+
+        return dict(indices=list(_fp_tensor(self.indices)), env=list(_fp_tensor(self.env)),
+                    buckets=list(_fp_tensor(self.kg_buckets)), feat=list(_fp_tensor(self.sg_feat)))
+
+    def extra_persistent_bytes(self) -> dict:
+        """Index records read by the kernels (global int16 ids, one K-record per 16-neuron block) and the uint8
+        canonical envelope map (identity / hashing only: never read by a kernel)."""
+        return {"index_records_int16": self.indices.numel() * self.indices.element_size(),
+                "canonical_envelope_map_uint8": self.env.numel() * self.env.element_size()}
 
 
 @torch.no_grad()
@@ -132,7 +146,7 @@ def lower_env(dense, env_u: torch.Tensor, plan=None, source: str = "lowered-loca
     lay = LoweredOneTile(L.input_dim, L.hidden_dim, G, tb, 16, dense.connectivity, device=dev,
                          plan=plan or dense.plan, graph=(idx.contiguous(), dense.sg_feat, bk, spec),
                          weights=(w.to(torch.bfloat16).contiguous(), bias.to(torch.bfloat16).contiguous()))
-    lay.register_buffer("env", env.contiguous())
+    lay.register_buffer("env", env.to(torch.uint8).contiguous())  # (canonical identity only; kernels read idx)
     lay.graph_stats.update(records_16=int(live.sum()), nominal_envelope=dict(K=64, C=C),
                            executed=dict(K=tb, C=16, sharing="16 neurons per record (one K64 row group)"))
     return lay

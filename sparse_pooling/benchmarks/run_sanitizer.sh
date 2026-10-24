@@ -6,7 +6,8 @@
 #            dx_scatter (scatter variants), det (deterministic reductions, compact dW);
 #            default: all four.  kgen (EXPERIMENTAL generalized fan-in kernels, sanitize_kgen_workload.py)
 #            kgx (EXPERIMENTAL K = 64 kernels + L1AdamW, sanitize_kgx_workload.py) and kgw (width-preserving
-#            16 x 8 / backbone + tile kernels, sanitize_kgw_workload.py) run only when named.
+#            16 x 8 / backbone + tile kernels, sanitize_kgw_workload.py) and rsn (indexed local supports of the
+#            random-support study, sanitize_rsn_workload.py) run only when named.
 # --jobs N      (workload, tool) runs in parallel (default: CPUs - 1).  Each instrumented process is
 #               bound by one CPU core and uses little GPU memory.
 # --out DIR     keep the per-run logs and summary.tsv there (default: a new directory under $TMPDIR;
@@ -67,12 +68,12 @@ ERR_EXIT=97  # --error-exitcode: sanitizer-detected errors
 script_of() {
   case $1 in
     generic) echo sanitize_workload.py ;;
-    sg|dx_scatter|det|kgen|kgx|kgw) echo "sanitize_$1_workload.py" ;;
+    sg|dx_scatter|det|kgen|kgx|kgw|rsn) echo "sanitize_$1_workload.py" ;;
     *) return 1 ;;
   esac
 }
 for wl in "${WL[@]}"; do
-  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det kgen kgx kgw)" >&2; exit 2; }
+  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det kgen kgx kgw rsn)" >&2; exit 2; }
   [ -f "$WDIR/$script" ] || { echo "workload script missing: $WDIR/$script" >&2; exit 2; }
 done
 if [ -z "$OUT" ]; then
