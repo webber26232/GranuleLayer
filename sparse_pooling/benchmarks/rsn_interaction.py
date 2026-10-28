@@ -181,8 +181,8 @@ def main():
             lay.bias.main_grad.copy_(st["main_grad_b"])
             a_g.copy_(st["a_g"])
             c_g.copy_(st["c_g"])
-        opt.state[lay.weight].update({k: v.clone() for k, v in st["opt_w"].items()})
-        opt.state[lay.bias].update({k: v.clone() for k, v in st["opt_b"].items()})
+        opt.state[lay.weight].update({k: (v.clone() if torch.is_tensor(v) else v) for k, v in st["opt_w"].items()})
+        opt.state[lay.bias].update({k: (v.clone() if torch.is_tensor(v) else v) for k, v in st["opt_b"].items()})
         opt._seed = st["sr_counter"]
         opt2.load_state_dict(st["opt2"])
         start = st["step"]

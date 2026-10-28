@@ -37,7 +37,7 @@ class Root:
         self.root = root
 
     def get(self, stage, tag):
-        f = self.root / stage / f"{tag}.json"
+        f = (self.root / stage / f"{tag}.json") if stage else (self.root / f"{tag}.json")
         return json.loads(f.read_text()) if f.exists() else None
 
     def status(self, stage):
@@ -219,6 +219,100 @@ class Report:
                                                    "mean ± 95 % CI", "clipped (connected)", "rel. variance (start)",
                                                    "PR (after)"], rows)
 
+    def final(self):
+        sel = self.r.get("", "final_selection") if (self.r.root / "final_selection.json").exists() else None
+        if sel is None:
+            return
+        self.h("Locked final test (batches 19,000-19,007; data / SR seeds 3 / 4 / 5; graph 0 / layout 0)")
+        vals = {}
+        rows = []
+        for spec, n in sel["methods"]:
+            v, dv = [], []
+            for d in (3, 4, 5):
+                j = self.r.get("final", f"learn_{RC.spec_id(spec)}_g0_{n}_s256_d{d}_final")
+                if j is None:
+                    continue
+                v.append(j["final_test"])
+                dv.append(j["heldout_final"])
+            if not v:
+                continue
+            vals[spec] = v
+            rows.append([spec, n, " / ".join(f"{x:.4f}" for x in v), fmt_ci(v), fmt_ci(dv)])
+        self.table("final_test", ["method", "treatment", "final test per seed (3 / 4 / 5)", "final test mean ± 95 % CI",
+                                  "dev validation (same runs) mean ± CI"], rows)
+        rows = []
+        for a, b in sel["comparisons"]:
+            if a not in vals or b not in vals or len(vals[a]) != len(vals[b]):
+                continue
+            d = [x - y for x, y in zip(vals[a], vals[b])]
+            m, h = ci(d)
+            up = m + h
+            verdict = ("improvement" if up < 0 else "noninferior (margin 0.003)" if up < sel["margin"] else
+                       "worse (whole interval above 0; not noninferior)" if m - h > 0 else "inconclusive")
+            rows.append([f"{a} - {b}", " / ".join(f"{x:+.4f}" for x in d), f"{m:+.4f}", f"[{m - h:+.4f}, {up:+.4f}]",
+                         verdict])
+        self.table("final_paired", ["comparison", "per seed", "mean", "paired 95 % CI", "verdict"], rows)
+
+    def interaction(self, stage, title):
+        st = self.r.status(stage)
+        if not st:
+            return
+        rows = []
+        for x in st:
+            j = self.r.get(stage, x["tag"]) if x["status"] == "measured" else None
+            if j is None:
+                rows.append([x["tag"], x["status"]] + [""] * 7)
+                continue
+            h, e = j["final"], j["term_support_eligibility"]
+            ft = j.get("final_test")
+            q = (j.get("oracle_quantization") or {}).get("bf16_input_targets", {})
+            rows.append([j["support"], j.get("oracle") or "ordinary", j["init_seed"], j["lr_layer"], j["steps"],
+                         " / ".join(f"{h[f'explained_interaction_order{o}']:.3f}" for o in "234"),
+                         "" if ft is None else " / ".join(f"{ft[f'explained_interaction_order{o}']:.3f}" for o in "234"),
+                         " / ".join(str(e[f"order{o}"]["terms_with_no_neuron"]) for o in (2, 3, 4)),
+                         "" if not q else f"{q['order2']:.2e}"])
+        self.h(title)
+        self.table(stage, ["support", "init", "init seed", "layer lr", "updates", "explained 2 / 3 / 4 (dev held-out)",
+                           "explained 2 / 3 / 4 (reserved final batches)", "terms without eligible neuron (2 / 3 / 4)",
+                           "oracle nMSE vs BF16-input targets (order 2)"], rows)
+
+    def energy(self):
+        rows = []
+        for st, spec in (("k8_q32", "BP-row/8"), ("w8_screen", "WRS/8:4#0"), ("w8_screen", "WRS/8:16#0"), ("w8_screen", "TopK/8"),
+                         ("m25_screen", "BP-row#0"), ("m25_screen", "TopK/16"), ("m25_screen", "Mix-BP#0"),
+                         ("m25_screen", "Mix-TopK#0")):
+            j = self.r.get(st, f"learn_{RC.spec_id(spec)}_g0_none_s32_d0")
+            if j is None:
+                continue
+            ss = j["support_record"].get("support_stats", {})
+            e = (ss.get("energy") or {}).get("layer_fraction", ss.get("energy_layer_fraction"))
+            rows.append([spec, ss.get("enabled_slots"), "" if e is None else f"{e:.4f}", f"{j['support_select_seconds']:.1f}",
+                         ss.get("chosen_candidate_hist", ""), (ss.get("duplicate_candidates") or ""),
+                         ss.get("support_fingerprint", "")[:16]])
+        if rows:
+            self.h("Retained pre-pruning weight energy and selection cost (graph 0)")
+            self.table("energy", ["support", "enabled slots", "layer energy fraction", "selection s (in fine-tuning)",
+                                  "chosen candidate histogram", "duplicate candidates", "support fingerprint"], rows)
+
+    def grouped_phases(self, stage, tag, ref_tags):
+        j = self.r.get(stage, tag)
+        if j is None:
+            return
+        rows = []
+        for t in [tag] + ref_tags:
+            x = self.r.get(stage, t)
+            if x is None:
+                continue
+            sm = step_samples(x)
+            rows.append([t] + [f"{statistics.median(sm[p]):.1f}" if sm.get(p) else "" for p in
+                               ("fwd_layout", "fwd_zero", "fwd_kernel", "fwd_finalize", "bwd_coef", "bwd_layout",
+                                "bwd_dx_init", "dx_kernel", "dw_kernel", "bwd_post", "optimizer", "step", "host_enqueue",
+                                "fwd_t64", "fwd_t16", "fwd_t8", "dx_t64", "dx_t16", "dx_t8", "dw_t64", "dw_t16", "dw_t8")])
+        self.h("Phase breakdown (median ms, 24 samples, graph 0)")
+        self.table("phases", ["run", "fwd layout", "fwd zero", "fwd kernels", "fwd finalize", "bwd coef", "bwd layout",
+                              "dX init", "dX", "dW / db", "bwd post", "optimizer", "step", "host enqueue",
+                              "fwd K64", "fwd K16", "fwd K8", "dX K64", "dX K16", "dX K8", "dW K64", "dW K16", "dW K8"], rows)
+
     def write(self, out: Path):
         out.mkdir(parents=True, exist_ok=True)
         (out / "tables.md").write_text("\n".join(self.md) + "\n")
@@ -248,6 +342,40 @@ def main():
     R.timing("k8_timing", "K8 confirmation timing (24 samples per process)")
     R.learn("k8_q32", "K8 quality, 32 updates (development, seed 0)", ("BP-row/8", "U8@0.125", "FP-mag/8"), 32, (0,))
     R.learn("k8_q256", "K8 quality, 256 updates (development seeds 0/1/2)", ("BP-row/8", "U8@0.125", "FP-mag/8"), 256)
+    R.learn("k8_graph", "K8 graph / layout checks (selected treatment, data / SR seed 0, 256 updates)",
+            [f"BP-row/8#{ls}" for ls in (0, 1)] + ["U8@0.125"], 256, (0,), ("energy",), g=1)
+    R.learn("k8_graph", "", [f"BP-row/8#{ls}" for ls in (0, 1)] + ["U8@0.125"], 256, (0,), ("energy",), g=2)
+    R.coverage("w8_screen", "Weighted K8 screen: coverage (graph 0)", [(s, 0, None) for s in
+               ("WRS/8:4#0", "WRS/8:16#0", "TopK/8")] + [("BP-row/8#0", 0, "k8_cov"), ("FP-mag/8", 0, "k8_cov")])
+    R.timing("w8_screen", "Weighted K8 screen: timing (8 samples, same session)", ref="BP-row/8", ref_fmt="indexed")
+    R.learn("w8_screen", "Weighted K8 screen: 32 updates", ("WRS/8:4#0", "WRS/8:16#0", "TopK/8"), 32, (0,))
+    R.learn("w8_dev", "Weighted K8 development: 256 updates", ("TopK/8",), 256)
+    R.coverage("m25_screen", "200M-slot 2 x 2: coverage (graph 0)", [(s, 0, None) for s in
+               ("TopK/16", "Mix-BP#0", "Mix-TopK#0")] + [("BP-row#0", 0, "errata_cov"), ("A8@0.25", 0, "errata_cov"),
+                                                        ("U16@0.25", 0, "errata_cov")])
+    R.timing("m25_screen", "200M-slot 2 x 2: timing (8 samples, same session)", ref="BP-row", ref_fmt="indexed")
+    R.learn("m25_screen", "200M-slot 2 x 2: 32 updates", ("TopK/16", "Mix-BP#0", "Mix-TopK#0", "BP-row#0", "A8@0.25",
+                                                          "U16@0.25", "dense"), 32, (0,))
+    R.learn("m25_dev", "200M-slot development: 256 updates", ("TopK/16", "Mix-TopK#0"), 256)
+    R.learn("norm", "200M-slot controls: 256 updates (parent records, reused)", ("BP-row", "A8@0.25", "U16@0.25", "dense"),
+            256, parent_stage="norm")
+    R.timing("m25_dev", "200M-slot confirmation timing, graph 0 (24 samples)", ref="BP-row", ref_fmt="indexed")
+    R.timing("w8_confirm", "TopK/8 graph / layout timing confirmation (24 samples)", ref="U8@0.125")
+    R.timing("m25_confirm", "Mix-TopK graph / layout timing confirmation (24 samples)", ref="BP-row", ref_fmt="indexed")
+    R.coverage("w8_confirm", "TopK/8 coverage, graphs 1 / 2", [("TopK/8", g, None) for g in (1, 2)])
+    R.coverage("m25_confirm", "Mix-TopK coverage, graph / layout checks", [(f"Mix-TopK#{ls}", g, None)
+                                                                         for g in (0, 1, 2) for ls in (0, 1)])
+    for g in (1, 2):
+        R.learn("w8_confirm", f"TopK/8 graph {g} (data / SR seed 0)", ("TopK/8",), 256, (0,), ("energy",), g=g)
+    for g in (0, 1, 2):
+        R.learn("m25_confirm", f"Mix-TopK graph {g} layouts (data / SR seed 0)", ("Mix-TopK#0", "Mix-TopK#1"), 256, (0,),
+                ("energy",), g=g)
+    R.final()
+    R.energy()
+    R.grouped_phases("m25_dev", "Mix-TopK_ls0_g0_grouped", ["TopK_k16_g0_indexed", "BP-row_ls0_g0_indexed",
+                                                            "A8_r0.25_g0_wide", "U16_r0.25_g0_wide"])
+    R.interaction("interaction", "Interaction screen (reduced H 262,144 / C256, T16)")
+    R.interaction("interaction_extra", "Interaction: extra seeds / continuations (beyond the predeclared rule)")
     R.write(Path(a.out) if a.out else root)
     print(f"wrote {len(R.csvs)} tables")
 
