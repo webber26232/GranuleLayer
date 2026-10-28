@@ -49,9 +49,9 @@ def test_structure_budget_and_balance(k, C, H):
     LS, KG, _ = _m()
     L, idx, feat, bk = graph(H=H, C=C)
     nkt = 64 // k
-    geo = LS.geometry(L, bk)
+    geo = LS.geometry(L, bk, Q=feat.shape[0])
     for pol in RANDOM:
-        s = LS.build(pol, k, L, bk, graph_seed=1, layout_seed=0)
+        s = LS.build(pol, k, L, bk, graph_seed=1, layout_seed=0, Q=feat.shape[0])
         gv = s.nv > 0
         assert s.enabled_slots() == k * H and int(s.element_mask(L).sum()) == k * H
         env = s.env[gv]
@@ -90,7 +90,7 @@ def test_fp_mag_is_the_p16_floor_mask():
 
     L, idx, feat, bk = graph(H=3003, C=64)
     w = torch.randn(L.weight_shape, generator=torch.Generator().manual_seed(3)).bfloat16()
-    s = LS.build("FP-mag", 16, L, bk, w=w)
+    s = LS.build("FP-mag", 16, L, bk, w=w, Q=feat.shape[0])
     ms = WM.build("P16", 0.25, w, L)
     assert torch.equal(s.element_mask(L), ms.element_mask(L))
 
@@ -99,15 +99,15 @@ def test_seeds_reproduce_and_are_independent_keys():
     LS, KG, _ = _m()
     L, idx, feat, bk = graph(H=8 * 700 - 3, C=128)
     for pol in RANDOM:
-        a = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=0)
-        b = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=0)
-        c = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=1)
-        d = LS.build(pol, 16, L, bk, graph_seed=2, layout_seed=0)
+        a = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=0, Q=feat.shape[0])
+        b = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=0, Q=feat.shape[0])
+        c = LS.build(pol, 16, L, bk, graph_seed=1, layout_seed=1, Q=feat.shape[0])
+        d = LS.build(pol, 16, L, bk, graph_seed=2, layout_seed=0, Q=feat.shape[0])
         assert a.fingerprint() == b.fingerprint() and torch.equal(a.env, b.env)
         assert a.fingerprint() != c.fingerprint() and a.fingerprint() != d.fingerprint()
     # different policies use different key streams (RP-row vs BP-row draw from distinct keys)
-    r = LS.build("RP-row", 16, L, bk, layout_seed=0)
-    p = LS.build("BP-row", 16, L, bk, layout_seed=0)
+    r = LS.build("RP-row", 16, L, bk, layout_seed=0, Q=feat.shape[0])
+    p = LS.build("BP-row", 16, L, bk, layout_seed=0, Q=feat.shape[0])
     gv = r.nv > 0
     assert not torch.equal(r.env[gv][:8], p.env[gv][:8])
 
@@ -119,7 +119,7 @@ def test_uniformity_and_independence_statistics():
     LS, KG, _ = _m()
     L, idx, feat, bk = graph(D=1024, H=200_000, G=64, C=256, R=8)
     for pol in ("RP-record", "RP-row", "BP-row"):
-        s = LS.build(pol, 16, L, bk, layout_seed=5)
+        s = LS.build(pol, 16, L, bk, layout_seed=5, Q=feat.shape[0])
         gm = s.group_mask()[s.nv > 0].double()
         n = gm.shape[0]
         freq = gm.mean(0)
@@ -129,8 +129,8 @@ def test_uniformity_and_independence_statistics():
             off = co[~torch.eye(64, dtype=torch.bool)]
             want = 16 * 15 / (64 * 63)
             assert abs(float(off.mean()) - want) < 2e-3 and float((off - want).abs().max()) < 6 * math.sqrt(want / n)
-    s = LS.build("RP-record", 16, L, bk, layout_seed=5)
-    geo = LS.geometry(L, bk)
+    s = LS.build("RP-record", 16, L, bk, layout_seed=5, Q=feat.shape[0])
+    geo = LS.geometry(L, bk, Q=feat.shape[0])
     uv = geo["uv"]
     first = uv[geo["rank_rec"] == 0]  # row group 0 of every record: independent records
     gm = s.group_mask()[first].double()
@@ -154,7 +154,7 @@ def exact_cov(sup, feat, t, D):
 def model_given_graph(LS, sup, L, bk, feat, t, D):
     """Expected coverage over the layout randomness for the FIXED graph: mean over all t-tuples of
     1 - prod_{sets containing the tuple} (1 - h_q) (h_q of the refined per-set model)."""
-    ri = LS.refined_inputs(sup, L, bk)
+    ri = LS.refined_inputs(sup, L, bk, Q=feat.shape[0])
     h = LS.set_hit(sup.policy, t, sup.k, ri["m_q"], ri["b_q"], ri["rec_groups"], ri["rec_set"], ri["used_tiles"])
     Q = feat.shape[0]
     member = torch.zeros((Q, D), dtype=torch.bool)
@@ -178,7 +178,7 @@ def test_coverage_models_match_a_tiny_exhaustive_oracle(pol):
     for t in (2, 3):
         vals = []
         for ls in range(160):
-            s = LS.build(pol, 16, L, bk, graph_seed=4, layout_seed=ls)
+            s = LS.build(pol, 16, L, bk, graph_seed=4, layout_seed=ls, Q=feat.shape[0])
             vals.append(exact_cov(s, feat, t, D))
         v = torch.tensor(vals, dtype=torch.float64)
         want, h = model_given_graph(LS, s, L, bk, feat, t, D)
@@ -198,7 +198,7 @@ def test_fixed_partition_coverage_is_deterministic_and_within_the_one_tile_bound
     D = 128
     L, idx, feat, bk = graph(D=D, H=6 * 300, G=6, C=64, R=3, seed=4)
     for t in (2, 3):
-        vals = {exact_cov(LS.build("FP-balanced", 16, L, bk, graph_seed=4, layout_seed=ls), feat, t, D)
+        vals = {exact_cov(LS.build("FP-balanced", 16, L, bk, graph_seed=4, layout_seed=ls, Q=feat.shape[0]), feat, t, D)
                 for ls in range(8)}
         assert len(vals) == 1
         Q = feat.shape[0]
@@ -213,7 +213,7 @@ def test_coverage_pipeline_matches_brute_force_on_local_supports():
     D = 256
     L, idx, feat, bk = graph(D=D, H=3003, G=8, C=64, R=2, dev="cuda")
     for pol in ("RP-record", "BP-row"):
-        s = LS.build(pol, 16, L, bk, layout_seed=2, device="cuda")
+        s = LS.build(pol, 16, L, bk, layout_seed=2, device="cuda", Q=feat.shape[0])
         em = s.element_mask(L)
         sp = KC64.supports_from_dense(L, feat, bk, em)
         ex = KC64.exact_support_coverage(sp, (2, 3))
@@ -270,7 +270,7 @@ def test_indexed_lowering_is_the_masked_k64_function(k, C, H):
     x = torch.randn(40, L.input_dim, device="cuda", generator=g).bfloat16().float()
     dy = torch.randn(40, L.groups, device="cuda", generator=g)
     for pol in ("FP-mag",) + RANDOM:
-        s = LS.build(pol, k, L, base.kg_buckets, w=base.weight.detach(), graph_seed=1, layout_seed=3, device="cuda")
+        s = LS.build(pol, k, L, base.kg_buckets, w=base.weight.detach(), graph_seed=1, layout_seed=3, device="cuda", Q=base.sg_feat.shape[0])
         em = s.element_mask(L)
         dm = masked(base, em)
         lo = OT.lower_local(dm, s)
@@ -307,7 +307,7 @@ def test_indexed_lowering_optimizer_state_identity_and_restore(tmp_path):
 
     base = base_layer(8 * 300 + 5, 256)
     L = base.layout
-    s = LS.build("BP-row", 16, L, base.kg_buckets, layout_seed=1, device="cuda")
+    s = LS.build("BP-row", 16, L, base.kg_buckets, layout_seed=1, device="cuda", Q=base.sg_feat.shape[0])
     em = s.element_mask(L)
     dm = masked(base, em)
     lo = OT.lower_local(dm, s)

@@ -24,6 +24,10 @@ Reported: normalized held-out MSE per order (estimates on 2,048 held-out tokens)
 readout-calibrated losses, term-support eligibility (neurons whose enabled support contains all k inputs of
 a term), oracle statistics and, for the oracle, the quantization floor: nMSE of the oracle against targets of the
 FP32 inputs vs of the BF16-rounded inputs the layer actually reads.
+
+Weighted-support study (results/WEIGHTED_RANDOM_SUPPORTS_ANCHORS.md section 7.3): ``--final-test`` evaluates the
+reserved final interaction-test batches (seeds 59_000..59_007, never used for selection) once after training;
+the support record carries the authoritative total Q and the occupied / empty set counts.
 """
 from __future__ import annotations
 
@@ -38,6 +42,8 @@ import common  # noqa: F401
 import rsn_cases as RC
 import wps_cases as WC
 import wps_interaction as WI
+
+FINAL_SEEDS = tuple(range(59_000, 59_008))
 
 
 def main():
@@ -60,6 +66,7 @@ def main():
     ap.add_argument("--state-dir", default="")
     ap.add_argument("--resume", default="", help="state file of a previous run (continuation, same protocol)")
     ap.add_argument("--floors", default="", help="json cache of exact additive floors")
+    ap.add_argument("--final-test", action="store_true", help="evaluate the reserved final test once after training")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     from sparse_pooling.experimental import l1 as L1
@@ -151,10 +158,10 @@ def main():
         return a_g * lay(x.bfloat16()).float() + c_g
 
     @torch.no_grad()
-    def evaluate(xform=None):
+    def evaluate(xform=None, seeds=WI.HELD_SEEDS):
         se = torch.zeros(WC.G, device=dev, dtype=torch.float64)
         var = torch.zeros(WC.G, device=dev, dtype=torch.float64)
-        for s in WI.HELD_SEEDS:
+        for s in seeds:
             x = WI.xbatch(s, dev)
             t = WI.targets(x if xform is None else xform(x), ids, rvalid, order, sig)
             se += ((predict(x) - t) ** 2).sum(0).double()
@@ -225,6 +232,10 @@ def main():
                                                            sha256=hashlib.sha256(p.read_bytes()).hexdigest()))
     res["history"] = hist
     res["final"] = hist[-1]
+    if a.final_test:
+        if set(FINAL_SEEDS) & ({WI.TRAIN_SEED + i for i in range(a.steps)} | set(WI.HELD_SEEDS) | {WI.TRAIN_SEED - 1}):
+            raise SystemExit("final interaction-test seeds collide with train / held-out seeds")
+        res["final_test"] = dict(seeds=list(FINAL_SEEDS), **evaluate(seeds=FINAL_SEEDS))
     res["mask_preserved"] = (None if em is None else
                              bool(((lay.weight.detach() != 0) <= em.bool()).all()))
     res["wall_seconds"] = time.perf_counter() - t0

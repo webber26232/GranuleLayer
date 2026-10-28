@@ -66,6 +66,10 @@ PHASES = [
     ("bwd_total", "fwd.end", "bwd.end"),
     ("optimizer", "bwd.end", "opt.end"),
     ("step", "step.begin", "opt.end"),
+    # grouped mixed fan-in adapter (experimental/kgx_grouped.py): per-type launches inside fwd_kernel / dx / dw
+    ("fwd_t64", "fwd.zero", "fwd.t64"), ("fwd_t16", "fwd.t64", "fwd.t16"), ("fwd_t8", "fwd.t16", "fwd.t8"),
+    ("dx_t64", "bwd.dx_init", "bwd.dx.t64"), ("dx_t16", "bwd.dx.t64", "bwd.dx.t16"), ("dx_t8", "bwd.dx.t16", "bwd.dx.t8"),
+    ("dw_t64", "bwd.dx", "bwd.dw.t64"), ("dw_t16", "bwd.dw.t64", "bwd.dw.t16"), ("dw_t8", "bwd.dw.t16", "bwd.dw.t8"),
 ]
 
 
@@ -504,6 +508,8 @@ def main():
             from sparse_pooling.experimental.kgx_onetile import executed_work_lowered
 
             executed = executed_work_lowered(lay, args.batch, args.grad_precision == "split")
+        if executed is None and hasattr(lay, "packs"):  # grouped mixed fan-in adapter (kgx_grouped.py)
+            executed = lay.executed_work(args.batch, args.grad_precision == "split")
     immutable_ok = None
     if immutable_fp0 is not None:  # frozen metadata (masks, row pointers, tile maps) unchanged by the steps
         immutable_ok = lay.immutable_fingerprints() == immutable_fp0

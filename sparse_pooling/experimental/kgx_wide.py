@@ -392,7 +392,7 @@ def executed_work(layer, B: int, split: bool = True) -> dict:
 
 
 # ------------------------------------------------------------------ benchmark factory (k64_factory:wide)
-FORMATS = ("dense", "dense_masked", "wide", "tile", "lowered", "indexed")
+FORMATS = ("dense", "dense_masked", "wide", "tile", "lowered", "indexed", "grouped")
 
 
 def local_as_maskset(sup):
@@ -452,10 +452,21 @@ def build_policy_layer(args, conn, plan):
     t0 = time.perf_counter()
     from . import local_supports as LS
 
+    from . import mixed_supports as MX
+
     sup = None
-    if f["policy"] in LS.POLICIES:  # a fixed / randomized local support (random-support study)
+    if f["policy"] in MX.POLICIES:  # a mixed K64 / K16 / K8 allocation (weighted-support study)
+        sup = MX.build(f["policy"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=conn.seed,
+                       layout_seed=int(f.get("layout_seed", 0)), device="cuda", Q=lay.sg_feat.shape[0],
+                       L_cand=int(f.get("L", 1)))
+        em = sup.element_mask(L)
+        ms = None
+        stats = dict(sup.stats)
+        stats.update(policy=sup.policy, rho_mask=sup.enabled_slots() / (64 * L.hidden_dim))
+    elif f["policy"] in LS.POLICIES:  # a fixed / randomized / weighted local support (random-support study)
         sup = LS.build(f["policy"], int(f.get("k", 16)), L, lay.kg_buckets, w=lay.weight.detach(),
-                       graph_seed=conn.seed, layout_seed=int(f.get("layout_seed", 0)), device="cuda")
+                       graph_seed=conn.seed, layout_seed=int(f.get("layout_seed", 0)), device="cuda",
+                       Q=lay.sg_feat.shape[0], L_cand=int(f.get("L", 1)))
         em = sup.element_mask(L)
         ms = local_as_maskset(sup) if sup.policy in ("FP-mag", "FP-balanced") else None
         stats = {k: v for k, v in sup.stats.items() if k != "selection"}
@@ -471,6 +482,9 @@ def build_policy_layer(args, conn, plan):
     t0 = time.perf_counter()
     with torch.no_grad():
         lay.weight.data.mul_(em.to(lay.weight.dtype))
+    mixed = hasattr(sup, "kc")
+    if (fmt == "grouped" and not mixed) or (mixed and fmt not in ("grouped", "dense_masked")):
+        raise SystemExit(f"format {fmt!r}: a mixed support runs as 'grouped' or 'dense_masked'; 'grouped' needs one")
     if fmt in ("wide", "tile", "lowered") and ms is None:
         raise SystemExit(f"format {fmt!r} needs a fixed-partition support (FP-mag / FP-balanced) or a tile policy")
     if fmt == "dense_masked":
@@ -482,6 +496,10 @@ def build_policy_layer(args, conn, plan):
         if ms.tb != 16 or ms.bb is not None:
             raise SystemExit("format 'tile' (the measured 16 x 16 kernels) needs a b16 policy without backbone")
         out = SP.KgxTileLayer(lay, ms.tiles)
+    elif fmt == "grouped":
+        from .kgx_grouped import lower_mixed
+
+        out = lower_mixed(lay, sup, plan)
     elif fmt == "indexed":
         if sup is None:
             raise SystemExit("format 'indexed' (kgen K = k, C = 16 with explicit local records) needs a local support")

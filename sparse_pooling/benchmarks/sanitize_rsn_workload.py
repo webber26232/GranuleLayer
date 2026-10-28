@@ -47,7 +47,7 @@ for C, H, R in ((256, 8 * 300 + 5, 2), (128, 3003, 2), (64, 2999, 1)):
         for k in (16, 8):
             for pol in LS.POLICIES:
                 s = LS.build(pol, k, L, base.kg_buckets, w=base.weight.detach(), graph_seed=1, layout_seed=3,
-                             device="cuda")
+                             device="cuda", Q=base.sg_feat.shape[0])
                 em = s.element_mask(L)
                 dm = KgxLayer(D, H, G, C, base.connectivity, variant="idf", tile=128, device="cuda",
                               plan=PhysicalPlan(grad_precision=prec),

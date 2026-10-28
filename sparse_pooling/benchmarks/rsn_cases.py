@@ -8,7 +8,10 @@ Support spec strings (``support(spec, ...)``):
 * ``<width policy>@<rho>``        experimental/width_masks policies of the parent study (U16@0.25, A8@0.25,
                                   H2@0.05, H2A@0.1, P16@0.25 = FP-mag, ...), magnitude scores;
 * ``<local policy>[/k][#ls]``     experimental/local_supports policies (FP-mag, FP-balanced, RP-record, RP-row,
-                                  BP-row), fan-in k (default 16), layout seed ls (default 0).
+                                  BP-row, TopK), fan-in k (default 16), layout seed ls (default 0);
+* ``WRS/k:L[#ls]``                weighted random-subset selection with L candidates (weighted-support study);
+* ``Mix-BP[#ls]``, ``Mix-WRS:L[#ls]``, ``Mix-TopK[#ls]``
+                                  experimental/mixed_supports (K64 anchor / K16 / K8 allocation at rho 0.25).
 
 Seeds are separate: ``graph_seed`` (the K64 envelope graph and its checkpoint), ``layout_seed`` (local subsets
 only), init / checkpoint seed, data seed and training (stochastic-rounding) seed of each driver.
@@ -24,7 +27,8 @@ import wps_cases as WC
 D, G, M, K, S, R, H = WC.D, WC.G, WC.M, WC.K, WC.S, WC.R, WC.H
 W0 = WC.W0
 C = 256
-LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row")
+LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK")
+MIXED = ("Mix-BP", "Mix-WRS", "Mix-TopK")
 RANDOMIZED = ("RP-record", "RP-row", "BP-row")
 SCREEN_LAYOUT_SEEDS = (0, 1, 2)
 CONFIRM_GRAPH_SEEDS, CONFIRM_LAYOUT_SEEDS = (0, 1, 2), (0, 1)
@@ -41,14 +45,20 @@ def parse(spec: str) -> dict:
         p, rho = spec.split("@")
         return dict(kind="width", policy=p, rho=float(rho), spec=spec)
     body, _, ls = spec.partition("#")
+    if body.startswith("Mix-"):
+        p, _, Lc = body.partition(":")
+        if p not in MIXED or (p == "Mix-WRS") != bool(Lc):
+            raise ValueError(f"support spec {spec!r}")
+        return dict(kind="mixed", policy=p, L=int(Lc or 1), layout_seed=int(ls or 0), spec=spec)
     p, _, k = body.partition("/")
-    if p not in LOCAL:
+    k, _, Lc = k.partition(":")
+    if p not in LOCAL or (p == "WRS") != bool(Lc):
         raise ValueError(f"support spec {spec!r}")
-    return dict(kind="local", policy=p, k=int(k or 16), layout_seed=int(ls or 0), spec=spec)
+    return dict(kind="local", policy=p, k=int(k or 16), L=int(Lc or 1), layout_seed=int(ls or 0), spec=spec)
 
 
 def spec_id(spec: str) -> str:
-    return spec.replace("@", "_r").replace("/", "_k").replace("#", "_ls")
+    return spec.replace("@", "_r").replace("/", "_k").replace("#", "_ls").replace(":", "_L")
 
 
 @torch.no_grad()
@@ -68,8 +78,14 @@ def support(spec: str, lay, graph_seed: int = 0):
         em = ms.element_mask(L)
         st = {k: v for k, v in ms.stats.items() if "hist" not in k}
         return em, ms, dict(c, rho_mask=ms.stats["rho_mask"], mask_sha256=SP.mask_fingerprint(em), mask_stats=st)
-    sup = LS.build(c["policy"], c["k"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=graph_seed,
-                   layout_seed=c["layout_seed"], device=lay.weight.device)
+    if c["kind"] == "mixed":
+        from sparse_pooling.experimental import mixed_supports as MX
+
+        sup = MX.build(c["policy"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=graph_seed,
+                       layout_seed=c["layout_seed"], device=lay.weight.device, Q=lay.sg_feat.shape[0], L_cand=c["L"])
+    else:
+        sup = LS.build(c["policy"], c["k"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=graph_seed,
+                       layout_seed=c["layout_seed"], device=lay.weight.device, Q=lay.sg_feat.shape[0], L_cand=c["L"])
     em = sup.element_mask(L)
     st = {k: v for k, v in sup.stats.items() if k != "selection"}
     return em, sup, dict(c, rho_mask=sup.enabled_slots() / (64 * L.hidden_dim), mask_sha256=SP.mask_fingerprint(em),

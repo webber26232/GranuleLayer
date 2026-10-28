@@ -28,6 +28,13 @@ after training:
 
 The historical absolute statistic Var > 0.01 is kept only for comparison with the parent; crossing it after
 rescaling is not counted as an improvement by itself.
+
+Weighted-support study additions (results/WEIGHTED_RANDOM_SUPPORTS_ANCHORS.md section 7): ``--final-test``
+evaluates the LOCKED final test (FINAL_TEST_SEEDS 19_000..19_007, same teacher, M 512; never used during
+selection) exactly once, after training; ``--save-state DIR`` stores the final state (enabled values, bias, both
+moments at the enabled slots, step / rounding counter, proj / head and their AdamW state); numerical support
+fingerprints (sha256 of the nonzero enabled mask) before and after training; mixed supports: anchor checks (one
+full-mask, all-nonzero anchor group per record) before and after training.
 """
 from __future__ import annotations
 
@@ -45,6 +52,43 @@ from k64_learn import LR_LAYER, LR_SMALL, REG, WARMUP, Teacher, batch, build, fo
 from wps_learn import DIAG_TOKENS_SEEDS, N_SAMPLE_NEURONS, SAMPLE_NEURON_SEED, neuron_sample, support_monitor
 
 PR_NEURONS, PR_SEED = 2048, 4243
+FINAL_TEST_SEEDS = tuple(range(19_000, 19_008))  # locked final test (weighted-support study)
+
+
+def check_seed_collisions(data_seeds=range(0, 6), steps=256):
+    """The locked final-test seeds collide with no train / calibration / development / diagnostic seed."""
+    used = set(range(8_000, 8_004)) | set(range(9_000, 9_004)) | set(DIAG_TOKENS_SEEDS)
+    used |= set(range(10_000, 10_000 + WARMUP + REG + 32))  # checkpoint construction batches
+    for d in data_seeds:
+        used |= {10_000 + WARMUP + REG + i + 1_000_000 * d for i in range(steps)}
+    clash = used & set(FINAL_TEST_SEEDS)
+    if clash:
+        raise SystemExit(f"final-test seeds collide with {sorted(clash)}")
+    return dict(final_test_seeds=list(FINAL_TEST_SEEDS), checked_against=len(used), collisions=0)
+
+
+@torch.no_grad()
+def final_test(lay, proj, head, teacher, dev):
+    tot = 0.0
+    for s in FINAL_TEST_SEEDS:
+        x0 = batch(s, dev)
+        tot += float(forward_loss(lay, proj, head, x0, teacher(x0)))
+    return tot / len(FINAL_TEST_SEEDS)
+
+
+@torch.no_grad()
+def nonzero_support_sha(lay, em) -> str:
+    import hashlib
+
+    w = lay.weight.detach().reshape(-1)
+    m = None if em is None else em.reshape(-1)
+    h = hashlib.sha256()
+    for i in range(0, w.numel(), 1 << 27):
+        z = w[i:i + (1 << 27)] != 0
+        if m is not None:
+            z &= m[i:i + (1 << 27)].bool()
+        h.update(z.to(torch.uint8).cpu().numpy().tobytes())
+    return h.hexdigest()
 
 
 def _q(v):
@@ -132,6 +176,8 @@ def main():
     ap.add_argument("--sr-seed", type=int, default=0)
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--eval-every", type=int, default=8)
+    ap.add_argument("--final-test", action="store_true", help="evaluate the LOCKED final test once after training")
+    ap.add_argument("--save-state", default="", help="directory for the final state")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     from sparse_pooling.experimental import kgx_sparse as SP
@@ -176,6 +222,9 @@ def main():
                              probes="checkpoint proj on held-out tokens (2,048), fixed before any update",
                              execution="dense masked (the compact formats' function)"),
                provenance=provenance(Path(common.__file__).resolve().parent.parent), hardware_state=hardware_state())
+    if a.final_test:
+        res["final_test_protocol"] = dict(check_seed_collisions(), evaluated="once, after training",
+                                          batch=512, teacher="the same fixed teacher")
     res["heldout_checkpoint"] = heldout(lay, proj, head, teacher, dev)
     res["dense_row_reference"] = dict(input_variance=_q(var_dense))
     t0 = time.perf_counter()
@@ -187,6 +236,12 @@ def main():
         with torch.no_grad():
             lay.weight.mul_(em.to(lay.weight.dtype))
     ms = sel if hasattr(sel, "mandatory") else None
+    mixed = hasattr(sel, "kc")
+    if mixed:
+        import rsn_coverage as RV
+
+        res["anchors_pruned"] = RV.mixed_anchor_check(lay.layout, sel, lay.weight.detach())
+    res["nonzero_support_sha_pruned"] = nonzero_support_sha(lay, em)
     res["heldout_pruned"] = heldout(lay, proj, head, teacher, dev)
     res["signal_pruned"] = dict(probe=signal(lay, em, pick, ids, probes, var_dense, pr_idx),
                                 output_variance=layer_output_variance(lay, probes))
@@ -253,8 +308,37 @@ def main():
                                output_variance=layer_output_variance(lay, probes),
                                output_variance_e2e=layer_output_variance(lay, e2e_tokens()))
     res["support_after"] = support_monitor(lay, em, ms, valid)
+    res["nonzero_support_sha_after"] = nonzero_support_sha(lay, em)
+    if mixed:
+        res["anchors_after"] = RV.mixed_anchor_check(lay.layout, sel, lay.weight.detach())
     if em is not None:
         res["mask_preserved"] = bool(((lay.weight.detach() != 0) <= em.bool()).all())
+    if a.final_test:  # the locked test: once, after training, never inspected during selection
+        res["final_test"] = final_test(lay, proj, head, teacher, dev)
+    if a.save_state:
+        import hashlib
+
+        sd_ = Path(a.save_state)
+        sd_.mkdir(parents=True, exist_ok=True)
+        sel_m = None if em is None else em.reshape(-1).bool()
+        st = opt.state.get(lay.weight, {})
+        pick_w = (lambda t: t.detach().reshape(-1)[sel_m].clone()) if sel_m is not None else (lambda t: t.detach().clone())
+        state = dict(schema="granule.rsn_learn_state/1", support=a.support, norm=a.norm, data_seed=a.data_seed,
+                     sr_seed=a.sr_seed, steps=a.steps, enabled_mask_sha256=srec.get("mask_sha256"),
+                     weight_enabled=pick_w(lay.weight), bias=lay.bias.detach().clone(),
+                     moments={k: pick_w(v) for k, v in st.items() if torch.is_tensor(v) and v.shape == lay.weight.shape},
+                     bias_moments={k: v.clone() for k, v in opt.state.get(lay.bias, {}).items() if torch.is_tensor(v)},
+                     step_state={k: v for k, v in st.items() if not torch.is_tensor(v)}, sr_counter=opt._seed,
+                     proj=proj.state_dict(), head=head.state_dict(), opt_small=opt2.state_dict(),
+                     note="weight / moments at the ENABLED slots in canonical flat [G, NB, C, 64] order of the mask")
+        f = sd_ / (Path(a.out).stem + "_final.pt")
+        torch.save(state, f)
+        del state
+        hh = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for blk in iter(lambda: fh.read(1 << 24), b""):
+                hh.update(blk)
+        res["saved_state"] = dict(path=str(f), sha256=hh.hexdigest(), bytes=f.stat().st_size)
     res["wall_seconds"] = time.perf_counter() - t_start
     res["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)

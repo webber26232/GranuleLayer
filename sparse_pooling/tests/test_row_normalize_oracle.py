@@ -203,7 +203,7 @@ def test_indexed_path_rejections_and_nonfinite():
 
     lay = KgxLayer(256, 3003, 8, 64, ConnectivityPlan(64, 2, seed=1), variant="idf", tile=128, device="cuda", seed=3,
                    keep_indices=True)
-    s = LS.build("RP-row", 16, lay.layout, lay.kg_buckets, layout_seed=0, device="cuda")
+    s = LS.build("RP-row", 16, lay.layout, lay.kg_buckets, layout_seed=0, device="cuda", Q=lay.sg_feat.shape[0])
     with torch.no_grad():
         lay.weight.mul_(s.element_mask(lay.layout))
     lo = OT.lower_local(lay, s)

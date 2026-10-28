@@ -20,7 +20,21 @@ Policies (``POLICIES``; nkt = 64 / k fixed tiles [t k, t k + k)):
 * ``RP-row``      every valid row group draws an independent uniform k-subset (first k of a permutation);
 * ``BP-row``      within each input set q, a stream of independent permutations of 64, each cut into nkt
                   disjoint k-subsets; the valid row groups of q in canonical (ascending u: g, j, c // 16) order
-                  consume the stream (group i of q: permutation i // nkt, subset i mod nkt).
+                  consume the stream (group i of q: permutation i // nkt, subset i mod nkt);
+* ``WRS``         weighted random-subset selection with L candidates (weighted-support study,
+                  results/WEIGHTED_RANDOM_SUPPORTS_ANCHORS.md section 4): candidate 0 is the exact BP-row subset of
+                  the same (k, graph seed, layout seed); candidates 1..L-1 are independently keyed uniform
+                  k-subsets (first k of a keyed permutation per candidate id, streamed in CHUNK_ROWS chunks of the
+                  valid groups); the candidate of largest score(A) = sum_{j in A} a[u, j] wins, ties to the
+                  smallest candidate id.  Candidate c is keyed by c alone, so the first L' candidates of any L >= L'
+                  are those of L' (nested families: the retained energy is nondecreasing in L).  Duplicate candidates
+                  are kept (no resampling); a duplicate can never win over its smaller-id copy;
+* ``TopK``        the k largest a[u, j] of the row group, ties to the lower local coordinate (stable descending
+                  sort) -- the unconstrained magnitude endpoint (FP-mag is the best CONTIGUOUS tile).
+
+Feature importance (WRS / TopK): a[u, j] = sum_{valid neurons c of u} W_pre[u, c, j]^2, FP64, accumulated by
+explicit sequential adds over c = 0..15 (padded neurons masked to 0) -- elementwise operations only, so the value
+is independent of chunking and evaluation order; score(A) adds the k values in ascending coordinate order.
 
 Random policies are uniform (no weight dependence).  RNG: ``torch.Generator`` (CPU, Philox-independent
 Mersenne Twister) per purpose, seeded with the first 63 bits of sha256(SCHEMA | policy | k | graph seed |
@@ -30,6 +44,13 @@ resolved by the lower local position).  Phases: ``randint(0, nkt)`` from their o
 selected positions of every subset are sorted before packing, so global indices and weights stay paired.
 The graph seed is the envelope graph's; the layout seed only selects local subsets; checkpoint / training and
 data seeds are separate (callers).
+
+Input sets: the AUTHORITATIVE total Q (``sg_feat.shape[0]`` = R D / S, or the connectivity plan) is passed to
+``geometry`` / ``build`` / ``refined_inputs``; m_q / b_q have length Q including every empty set (leading, interior
+or trailing), and the records report total / occupied / empty counts separately.  (Up to the random-support study
+Q was inferred from the largest assigned q, which dropped trailing empty sets: the reduced H 262,144 record said
+Q 4084 for 4096 sets of which 1024 are occupied.)  BP-row's stream offsets are cumulative over sets in q order and
+an empty set consumes no permutation, so neither q identities nor any existing RNG stream depend on Q.
 """
 from __future__ import annotations
 
@@ -39,26 +60,34 @@ from dataclasses import dataclass, field
 
 import torch
 
-SCHEMA = "granule.local_supports/1"
-POLICIES = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row")
+SCHEMA = "granule.local_supports/2"  # record schema (/2: authoritative Q, WRS / TopK)
+RNG_SCHEMA = "granule.local_supports/1"  # key / fingerprint namespace: UNCHANGED, so every /1 support is reproduced
+POLICIES = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK")
+WEIGHTED = ("WRS", "TopK")
 CHUNK_ROWS = 1 << 16
 RNG = ("torch.Generator('cpu') (mt19937) seeded per purpose / chunk with sha256-derived 63-bit seeds; "
        "permutation = stable argsort of int64 keys uniform in [0, 2^62); ties -> lower local position")
 
 
 def key_seed(*parts) -> int:
-    h = hashlib.sha256("|".join(str(p) for p in (SCHEMA,) + parts).encode()).digest()
+    h = hashlib.sha256("|".join(str(p) for p in (RNG_SCHEMA,) + parts).encode()).digest()
     return int.from_bytes(h[:8], "little") & 0x7FFFFFFFFFFFFFFF
+
+
+def permutation_chunks(n: int, base: tuple, width: int = 64):
+    """Yields (s0, [m, width] int64): the CHUNK_ROWS chunks of ``permutations(n, base, width)`` one at a time."""
+    for c, s0 in enumerate(range(0, n, CHUNK_ROWS)):
+        m = min(CHUNK_ROWS, n - s0)
+        g = torch.Generator().manual_seed(key_seed(*base, "perm", c))
+        keys = torch.randint(0, 1 << 62, (m, width), generator=g, dtype=torch.int64)
+        yield s0, torch.argsort(keys, dim=1, stable=True)
 
 
 def permutations(n: int, base: tuple, width: int = 64) -> torch.Tensor:
     """[n, width] int64: n independent uniform permutations of range(width) from the keyed stream ``base``."""
     out = torch.empty((n, width), dtype=torch.int64)
-    for c, s0 in enumerate(range(0, n, CHUNK_ROWS)):
-        m = min(CHUNK_ROWS, n - s0)
-        g = torch.Generator().manual_seed(key_seed(*base, "perm", c))
-        keys = torch.randint(0, 1 << 62, (m, width), generator=g, dtype=torch.int64)
-        out[s0:s0 + m] = torch.argsort(keys, dim=1, stable=True)
+    for s0, p in permutation_chunks(n, base, width):
+        out[s0:s0 + len(p)] = p
     return out
 
 
@@ -101,7 +130,7 @@ class LocalSupport:
     def fingerprint(self) -> str:
         """sha256 of (k, valid-group env rows): the retained-support identity (separate from the envelope graph,
         the index layout of an execution format and the parameter hashes)."""
-        h = hashlib.sha256(f"{SCHEMA}|support|k={self.k}".encode())
+        h = hashlib.sha256(f"{RNG_SCHEMA}|support|k={self.k}".encode())
         gv = self.nv > 0
         h.update(self.env[gv].to(torch.int8).cpu().numpy().tobytes())
         h.update(torch.nonzero(gv).squeeze(1).to(torch.int64).cpu().numpy().tobytes())
@@ -119,9 +148,10 @@ def block_sets(L, buckets: torch.Tensor, device) -> torch.Tensor:
     return bq
 
 
-def geometry(L, buckets: torch.Tensor, device="cpu") -> dict:
+def geometry(L, buckets: torch.Tensor, device="cpu", *, Q: int) -> dict:
     """Row-group geometry of the envelope: nv [n16], q [n16], valid groups (ascending u), their rank inside the
-    record and inside the set, per-set group / record counts m_q / b_q."""
+    record and inside the set, per-set group / record counts m_q / b_q (length Q, the AUTHORITATIVE number of input
+    sets incl. empty ones; module docstring)."""
     from .width_masks import layout_counts
 
     nv = layout_counts(L, device)["nv"]
@@ -143,39 +173,140 @@ def geometry(L, buckets: torch.Tensor, device="cpu") -> dict:
     qs = qv[order]
     starts = torch.searchsorted(qs, qs, right=False)
     rank_set[order] = torch.arange(len(uv), device=device) - starts
-    Q = int(buckets[:, 0].max()) + 1 if len(buckets) else 0
-    Q = max(Q, int(q.max()) + 1)
+    Q = int(Q)
+    if len(buckets) and (int(buckets[:, 0].min()) < 0 or int(buckets[:, 0].max()) >= Q):
+        raise ValueError(f"a bucket's input set lies outside the Q = {Q} sets")
     m_q = torch.bincount(qv, minlength=Q)
     rec_valid = (nv.view(-1, gpb) > 0).any(1)
     b_q = torch.bincount(bq[rec_valid], minlength=Q)
+    assert m_q.numel() == Q and b_q.numel() == Q
     rec_id = torch.cumsum(rec_valid.to(torch.int64), 0) - 1  # canonical record index of every valid block
     return dict(nv=nv, q=q, uv=uv, rank_rec=rank_rec, rank_set=rank_set, blk=blk, rec=rec_id[blk], m_q=m_q,
-                b_q=b_q, records=int(rec_valid.sum()), gpb=gpb, Q=Q,
+                b_q=b_q, records=int(rec_valid.sum()), gpb=gpb, Q=Q, sets_occupied=int((m_q > 0).sum()),
+                sets_empty=int((m_q == 0).sum()),
                 groups_per_record=(nv.view(-1, gpb) > 0).sum(1)[rec_valid])
 
 
 @torch.no_grad()
+def feature_importance(w: torch.Tensor, L, device="cpu", chunk: int = 1 << 16) -> torch.Tensor:
+    """[n16, 64] float64 a[u, j] = sum over the VALID neurons c of row group u of W_pre[u, c, j]^2 (module
+    docstring: FP64, explicit sequential adds over c = 0..15, padded neurons masked; chunked over groups)."""
+    n16 = L.groups * L.blocks_per_group * L.block // 16
+    wv = w.reshape(n16, 16, 64)
+    valid = L.valid_mask(w.device).reshape(n16, 16)
+    out = torch.empty((n16, 64), dtype=torch.float64, device=device)
+    for u0 in range(0, n16, chunk):
+        x = wv[u0:u0 + chunk].double() * valid[u0:u0 + chunk, :, None]
+        acc = x[:, 0] * x[:, 0]
+        for c in range(1, 16):
+            acc = acc + x[:, c] * x[:, c]
+        out[u0:u0 + chunk] = acc.to(device)
+    return out
+
+
+def subset_score(a: torch.Tensor, env: torch.Tensor) -> torch.Tensor:
+    """[n] float64 sum of a[i, env[i, :]] added in ascending coordinate order (env sorted)."""
+    v = torch.gather(a, 1, env)
+    acc = v[:, 0].clone()
+    for i in range(1, v.shape[1]):
+        acc = acc + v[:, i]
+    return acc
+
+
+def _local_key(env: torch.Tensor) -> torch.Tensor:
+    """[n] int64 exact 64-bit local mask of sorted distinct positions (bit 63 wraps to the sign: still exact)."""
+    return (torch.ones_like(env) << env).sum(1)
+
+
+def bp_stream(m_q: torch.Tensor, rank_set: torch.Tensor, qv: torch.Tensor, k: int, base: tuple):
+    """BP-row allocation of groups (set qv, rank rank_set inside their set / stratum) from the keyed permutation
+    stream ``base``: (env [n, k] sorted, subset id [n], permutations drawn, sets with a partial last pass)."""
+    nkt = 64 // k
+    npq = (m_q + nkt - 1) // nkt
+    off = torch.cumsum(npq, 0) - npq
+    perm = permutations(int(npq.sum()), base)
+    pid = off[qv] + rank_set // nkt
+    sub = rank_set % nkt
+    env = perm.view(-1, nkt, k)[pid, sub].sort(1).values
+    return env, sub, int(npq.sum()), int((m_q % nkt != 0).sum())
+
+
+def wrs_select(a_v: torch.Tensor, env0: torch.Tensor, k: int, L_cand: int, base: tuple) -> dict:
+    """Weighted random-subset selection (module docstring) for n groups with importances a_v [n, 64] and the
+    candidate-0 subsets env0 [n, k]: streamed per candidate (keyed by its id) in CHUNK_ROWS chunks of the groups.
+    Returns env [n, k], chosen candidate id [n], best score, and the duplicate count (candidates whose local mask
+    equals a smaller-id candidate of the same group)."""
+    n = a_v.shape[0]
+    best_env = env0.clone()
+    best = subset_score(a_v, env0)
+    cand = torch.zeros(n, dtype=torch.int64)
+    keys = [_local_key(env0)]
+    dup = torch.zeros(n, dtype=torch.int64)
+    for c in range(1, L_cand):
+        kc = torch.empty(n, dtype=torch.int64)
+        for s0, p in permutation_chunks(n, base + (f"cand{c}",)):
+            e = p[:, :k].sort(1).values
+            sc = subset_score(a_v[s0:s0 + len(p)], e)
+            win = sc > best[s0:s0 + len(p)]  # strict: ties keep the smaller candidate id
+            sl = slice(s0, s0 + len(p))
+            best[sl] = torch.where(win, sc, best[sl])
+            best_env[sl] = torch.where(win[:, None], e, best_env[sl])
+            cand[sl] = torch.where(win, torch.full_like(cand[sl], c), cand[sl])
+            kc[sl] = _local_key(e)
+        dup += torch.stack(keys, 1).eq(kc[:, None]).any(1).to(torch.int64)
+        keys.append(kc)
+    return dict(env=best_env, cand=cand, score=best, duplicates=dup)
+
+
+def topk_select(a_v: torch.Tensor, k: int) -> torch.Tensor:
+    """[n, k] sorted: the k largest importances, ties to the lower local coordinate (stable descending sort)."""
+    order = torch.sort(a_v, dim=1, descending=True, stable=True).indices
+    return order[:, :k].sort(1).values
+
+
+def _dist(v: torch.Tensor) -> dict:
+    v = v.double()
+    if v.numel() == 0:
+        return {}
+    qs = torch.quantile(v[:min(v.numel(), 1 << 24)], torch.tensor([0.01, 0.5, 0.99], dtype=torch.float64))
+    return dict(mean=float(v.mean()), min=float(v.min()), p1=float(qs[0]), median=float(qs[1]), p99=float(qs[2]),
+                max=float(v.max()), n=int(v.numel()))
+
+
+def energy_stats(a_v: torch.Tensor, env: torch.Tensor) -> dict:
+    """Retained pre-pruning weight energy of the selected subsets: per-group fraction and layer total."""
+    tot = a_v.sum(1)
+    kept = subset_score(a_v, env)
+    frac = torch.where(tot > 0, kept / tot.clamp_min(1e-300), torch.zeros_like(tot))
+    return dict(layer_fraction=float(kept.sum() / tot.sum()) if float(tot.sum()) > 0 else 0.0,
+                per_group_fraction=_dist(frac), zero_energy_groups=int((tot == 0).sum()))
+
+
+@torch.no_grad()
 def build(policy: str, k: int, L, buckets: torch.Tensor, w=None, graph_seed: int = 0, layout_seed: int = 0,
-          device="cpu") -> LocalSupport:
-    """The local support of ``policy`` with fan-in k (module docstring); ``w`` (pre-pruning weights) only for
-    FP-mag."""
+          device="cpu", *, Q: int, L_cand: int = 1) -> LocalSupport:
+    """The local support of ``policy`` with fan-in k (module docstring); ``w`` (pre-pruning weights) for FP-mag,
+    WRS and TopK; ``Q`` the authoritative number of input sets; ``L_cand`` the WRS candidate count."""
     if policy not in POLICIES:
         raise ValueError(f"local support policy {policy!r} (one of {POLICIES})")
     if 64 % k or k not in (8, 16):
         raise ValueError("local supports: k in (8, 16)")
+    if policy == "WRS" and L_cand < 1:
+        raise ValueError("WRS: L >= 1 candidates")
     nkt = 64 // k
-    geo = geometry(L, buckets.cpu(), "cpu")
+    geo = geometry(L, buckets.cpu(), "cpu", Q=Q)
     nv, q, uv = geo["nv"], geo["q"], geo["uv"]
     n16 = nv.numel()
     base = (policy, k, f"graph{graph_seed}", f"layout{layout_seed}")
     env = torch.arange(k, dtype=torch.int64).repeat(n16, 1)
     subset = torch.full((n16,), -1, dtype=torch.int64)
     ar = torch.arange(k, dtype=torch.int64)
+    if policy in WEIGHTED or policy == "FP-mag":
+        if w is None:
+            raise ValueError(f"{policy} needs the pre-pruning weights")
     if policy == "FP-mag":
         from . import width_masks as WM
 
-        if w is None:
-            raise ValueError("FP-mag needs the pre-pruning weights")
         ms = WM.build("P16" if k == 16 else "P8", k / 64, w, L)
         t = torch.argmax(ms.tiles.to(torch.int8), dim=1).cpu()
         if not bool((ms.tiles.sum(1).cpu()[nv > 0] == 1).all()):
@@ -202,27 +333,46 @@ def build(policy: str, k: int, L, buckets: torch.Tensor, w=None, graph_seed: int
         subset[uv] = 0
         env[uv] = perm[:, :k].sort(1).values
         extra = {}
-    else:  # BP-row
-        m_q = geo["m_q"]
-        npq = (m_q + nkt - 1) // nkt
-        off = torch.cumsum(npq, 0) - npq
-        perm = permutations(int(npq.sum()), base)
-        qv = q[uv]
-        pid = off[qv] + geo["rank_set"] // nkt
-        s = geo["rank_set"] % nkt
+    elif policy == "BP-row":
+        e, s, npm, part = bp_stream(geo["m_q"], geo["rank_set"], q[uv], k, base)
         subset[uv] = s
-        env[uv] = perm.view(-1, nkt, k)[pid, s].sort(1).values
-        extra = dict(permutations=int(npq.sum()), partial_last_permutation_sets=int((m_q % nkt != 0).sum()))
+        env[uv] = e
+        extra = dict(permutations=npm, partial_last_permutation_sets=part)
+    else:  # WRS / TopK: weight-aware selection from the pre-pruning row-group energies
+        a_v = feature_importance(w, L)[uv]
+        bp_base = ("BP-row", k, f"graph{graph_seed}", f"layout{layout_seed}")
+        e0, s0, npm, part = bp_stream(geo["m_q"], geo["rank_set"], q[uv], k, bp_base)
+        if policy == "WRS":
+            r = wrs_select(a_v, e0, k, L_cand, base + (f"L-stream",))
+            env[uv], subset[uv] = r["env"], r["cand"]
+            ch = torch.bincount(r["cand"], minlength=L_cand)
+            extra = dict(L=L_cand, candidate0="BP-row (same k / graph / layout seed)", bp_permutations=npm,
+                         chosen_candidate_hist=ch.tolist(), chosen_candidate0=int(ch[0]),
+                         duplicate_candidates=dict(total=int(r["duplicates"].sum()),
+                                                   groups_with_any=int((r["duplicates"] > 0).sum())),
+                         candidate_keys=f"key_seed({policy}, {k}, graph{graph_seed}, layout{layout_seed}, "
+                                        "L-stream, cand<c>, perm, <chunk>); candidate c independent of L",
+                         energy_candidate0=energy_stats(a_v, e0))
+        else:
+            env[uv] = topk_select(a_v, k)
+            subset[uv] = 0
+            extra = dict(tie_break="stable descending sort: equal importances -> lower local coordinate",
+                         energy_bp_row=energy_stats(a_v, e0))
+        extra.update(energy=energy_stats(a_v, env[uv]), importance="a[u, j] = sum_valid c W_pre[u, c, j]^2 (FP64, "
+                     "sequential over c)", score="sum_{j in A} a[u, j] (FP64, ascending coordinate order)")
+        del a_v
     sup = LocalSupport(policy, k, env.to(device), nv.to(device), q.to(device), subset.to(device))
-    sup.stats = dict(schema=SCHEMA, policy=policy, k=k, nkt=nkt, graph_seed=graph_seed,
-                     layout_seed=layout_seed if policy not in ("FP-mag",) else None, rng=RNG,
+    sup.stats = dict(schema=SCHEMA, rng_schema=RNG_SCHEMA, policy=policy, k=k, nkt=nkt, graph_seed=graph_seed,
+                     layout_seed=layout_seed if policy not in ("FP-mag", "TopK") else None, rng=RNG,
                      H=int(nv.sum()), W0=64 * int(nv.sum()), enabled_slots=sup.enabled_slots(),
                      rho_mask=k / 64, valid_groups=len(uv), partial_groups=int(((nv > 0) & (nv < 16)).sum()),
-                     records=geo["records"], sets_occupied=int((geo["m_q"] > 0).sum()), Q=geo["Q"],
+                     records=geo["records"], Q=geo["Q"], Q_total=geo["Q"], sets_occupied=geo["sets_occupied"],
+                     sets_empty=geo["sets_empty"],
                      groups_per_record=dict(min=int(geo["groups_per_record"].min()),
                                             max=int(geo["groups_per_record"].max())),
                      m_q=dict(min=int(geo["m_q"].min()), max=int(geo["m_q"].max()),
-                              mean=float(geo["m_q"].double().mean())),
+                              mean=float(geo["m_q"].double().mean()),
+                              mean_occupied=float(geo["m_q"][geo["m_q"] > 0].double().mean())),
                      b_q=dict(min=int(geo["b_q"].min()), max=int(geo["b_q"].max()),
                               mean=float(geo["b_q"].double().mean())),
                      support_fingerprint=sup.fingerprint(), **extra)
@@ -324,9 +474,10 @@ def per_output_union_bound(records_per_output: int, t: int, k: int, D: int = 102
     return min(1.0, records_per_output * math.comb(k, t) / math.comb(D, t))
 
 
-def refined_inputs(sup: "LocalSupport", L, buckets) -> dict:
-    """Actual m_q, b_q, groups per record and their sets, and the tiles of the fixed partition used per set."""
-    geo = geometry(L, buckets.cpu(), "cpu")
+def refined_inputs(sup: "LocalSupport", L, buckets, *, Q: int) -> dict:
+    """Actual m_q, b_q (length Q, empty sets included), groups per record and their sets, and the tiles of the fixed
+    partition used per set."""
+    geo = geometry(L, buckets.cpu(), "cpu", Q=Q)
     nkt = 64 // sup.k
     gpb = geo["gpb"]
     rec_valid = (geo["nv"].view(-1, gpb) > 0).any(1)
@@ -335,4 +486,4 @@ def refined_inputs(sup: "LocalSupport", L, buckets) -> dict:
     if sup.policy in ("FP-balanced", "FP-mag"):
         used[geo["q"][geo["uv"]], sup.subset.cpu()[geo["uv"]]] = True
     return dict(m_q=geo["m_q"], b_q=geo["b_q"], rec_groups=geo["groups_per_record"], rec_set=rec_set,
-                used_tiles=used.sum(1), Q=geo["Q"])
+                used_tiles=used.sum(1), Q=geo["Q"], sets_occupied=geo["sets_occupied"], sets_empty=geo["sets_empty"])
