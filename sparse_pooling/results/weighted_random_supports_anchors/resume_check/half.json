@@ -1,0 +1,239 @@
+{
+ "schema": "granule.rsn_interaction/1",
+ "support": "TopK/8",
+ "graph_seed": 0,
+ "terms": 16,
+ "hidden": 262144,
+ "C": 256,
+ "init_seed": 17,
+ "norm": "none",
+ "oracle": null,
+ "perturb": 0.0,
+ "perturb_seed": null,
+ "sr_seed": 0,
+ "lr_layer": 0.01,
+ "lr_readout": 0.01,
+ "steps": 20,
+ "M_train": 512,
+ "hash_seed": 777,
+ "data": {
+  "train": "seeds 50_000 + i",
+  "heldout": "seeds 49_000..49_003",
+  "fixed_teacher": true
+ },
+ "target_constants": {
+  "1": {
+   "mu": -0.00017495932935957559,
+   "sigma": 1.0002300458436402,
+   "single_term_floor": 0.0
+  },
+  "2": {
+   "mu": 0.1993801750477905,
+   "sigma": 0.4890522952475696,
+   "single_term_floor": 0.30136914905558454
+  },
+  "3": {
+   "mu": 0.30259588138148025,
+   "sigma": 0.6700862481406327,
+   "single_term_floor": 0.3401953246994778
+  },
+  "4": {
+   "mu": 0.3952711771833177,
+   "sigma": 0.8251478840359684,
+   "single_term_floor": 0.3492942964019149
+  }
+ },
+ "additive_floor": {
+  "order1": 0.0,
+  "order2": 0.19289173138395865,
+  "order3": 0.2204301561888317,
+  "order4": 0.22682278645314596
+ },
+ "floor_rule": "wps_interaction_floor.floors (exact for the actual targets)",
+ "provenance": {
+  "repo": "/home/evga/Projects/pamachine/GranuleLayer-kwa",
+  "commit": "32692772f6fc462d37c6afcff2bb3c9af14b0ce7",
+  "branch": "k8-weighted-supports-anchors",
+  "status_porcelain": [
+   " M sparse_pooling/benchmarks/kwa_report.py",
+   " M sparse_pooling/benchmarks/rsn_interaction.py"
+  ],
+  "changed_paths": [
+   {
+    "code": " M",
+    "path": "sparse_pooling/benchmarks/kwa_report.py",
+    "kind": "source"
+   },
+   {
+    "code": " M",
+    "path": "sparse_pooling/benchmarks/rsn_interaction.py",
+    "kind": "source"
+   }
+  ],
+  "source_dirty": true,
+  "generated_dirty": false,
+  "source_changed_tracked": [
+   "sparse_pooling/benchmarks/kwa_report.py",
+   "sparse_pooling/benchmarks/rsn_interaction.py"
+  ],
+  "source_untracked": [],
+  "source_diff": "diff --git a/sparse_pooling/benchmarks/kwa_report.py b/sparse_pooling/benchmarks/kwa_report.py\nindex 1b3f417..7a1828e 100644\n--- a/sparse_pooling/benchmarks/kwa_report.py\n+++ b/sparse_pooling/benchmarks/kwa_report.py\n@@ -37,7 +37,7 @@ class Root:\n         self.root = root\n \n     def get(self, stage, tag):\n-        f = self.root / stage / f\"{tag}.json\"\n+        f = (self.root / stage / f\"{tag}.json\") if stage else (self.root / f\"{tag}.json\")\n         return json.loads(f.read_text()) if f.exists() else None\n \n     def status(self, stage):\n@@ -219,6 +219,100 @@ class Report:\n                                                    \"mean \u00b1 95 % CI\", \"clipped (connected)\", \"rel. variance (start)\",\n                                                    \"PR (after)\"], rows)\n \n+    def final(self):\n+        sel = self.r.get(\"\", \"final_selection\") if (self.r.root / \"final_selection.json\").exists() else None\n+        if sel is None:\n+            return\n+        self.h(\"Locked final test (batches 19,000-19,007; data / SR seeds 3 / 4 / 5; graph 0 / layout 0)\")\n+        vals = {}\n+        rows = []\n+        for spec, n in sel[\"methods\"]:\n+            v, dv = [], []\n+            for d in (3, 4, 5):\n+                j = self.r.get(\"final\", f\"learn_{RC.spec_id(spec)}_g0_{n}_s256_d{d}_final\")\n+                if j is None:\n+                    continue\n+                v.append(j[\"final_test\"])\n+                dv.append(j[\"heldout_final\"])\n+            if not v:\n+                continue\n+            vals[spec] = v\n+            rows.append([spec, n, \" / \".join(f\"{x:.4f}\" for x in v), fmt_ci(v), fmt_ci(dv)])\n+        self.table(\"final_test\", [\"method\", \"treatment\", \"final test per seed (3 / 4 / 5)\", \"final test mean \u00b1 95 % CI\",\n+                                  \"dev validation (same runs) mean \u00b1 CI\"], rows)\n+        rows = []\n+        for a, b in sel[\"comparisons\"]:\n+            if a not in vals or b not in vals or len(vals[a]) != len(vals[b]):\n+                continue\n+            d = [x - y for x, y in zip(vals[a], vals[b])]\n+            m, h = ci(d)\n+            up = m + h\n+            verdict = (\"improvement\" if up < 0 else \"noninferior (margin 0.003)\" if up < sel[\"margin\"] else\n+                       \"worse (whole interval above 0; not noninferior)\" if m - h > 0 else \"inconclusive\")\n+            rows.append([f\"{a} - {b}\", \" / \".join(f\"{x:+.4f}\" for x in d), f\"{m:+.4f}\", f\"[{m - h:+.4f}, {up:+.4f}]\",\n+                         verdict])\n+        self.table(\"final_paired\", [\"comparison\", \"per seed\", \"mean\", \"paired 95 % CI\", \"verdict\"], rows)\n+\n+    def interaction(self, stage, title):\n+        st = self.r.status(stage)\n+        if not st:\n+            return\n+        rows = []\n+        for x in st:\n+            j = self.r.get(stage, x[\"tag\"]) if x[\"status\"] == \"measured\" else None\n+            if j is None:\n+                rows.append([x[\"tag\"], x[\"status\"]] + [\"\"] * 7)\n+                continue\n+            h, e = j[\"final\"], j[\"term_support_eligibility\"]\n+            ft = j.get(\"final_test\")\n+            q = (j.get(\"oracle_quantization\") or {}).get(\"bf16_input_targets\", {})\n+            rows.append([j[\"support\"], j.get(\"oracle\") or \"ordinary\", j[\"init_seed\"], j[\"lr_layer\"], j[\"steps\"],\n+                         \" / \".join(f\"{h[f'explained_interaction_order{o}']:.3f}\" for o in \"234\"),\n+                         \"\" if ft is None else \" / \".join(f\"{ft[f'explained_interaction_order{o}']:.3f}\" for o in \"234\"),\n+                         \" / \".join(str(e[f\"order{o}\"][\"terms_with_no_neuron\"]) for o in (2, 3, 4)),\n+                         \"\" if not q else f\"{q['order2']:.2e}\"])\n+        self.h(title)\n+        self.table(stage, [\"support\", \"init\", \"init seed\", \"layer lr\", \"updates\", \"explained 2 / 3 / 4 (dev held-out)\",\n+                           \"explained 2 / 3 / 4 (reserved final batches)\", \"terms without eligible neuron (2 / 3 / 4)\",\n+                           \"oracle nMSE vs BF16-input targets (order 2)\"], rows)\n+\n+    def energy(self):\n+        rows = []\n+        for st, spec in ((\"k8_q32\", \"BP-row/8\"), (\"w8_screen\", \"WRS/8:4#0\"), (\"w8_screen\", \"WRS/8:16#0\"), (\"w8_screen\", \"TopK/8\"),\n+                         (\"m25_screen\", \"BP-row#0\"), (\"m25_screen\", \"TopK/16\"), (\"m25_screen\", \"Mix-BP#0\"),\n+                         (\"m25_screen\", \"Mix-TopK#0\")):\n+            j = self.r.get(st, f\"learn_{RC.spec_id(spec)}_g0_none_s32_d0\")\n+            if j is None:\n+                continue\n+            ss = j[\"support_record\"].get(\"support_stats\", {})\n+            e = (ss.get(\"energy\") or {}).get(\"layer_fraction\", ss.get(\"energy_layer_fraction\"))\n+            rows.append([spec, ss.get(\"enabled_slots\"), \"\" if e is None else f\"{e:.4f}\", f\"{j['support_select_seconds']:.1f}\",\n+                         ss.get(\"chosen_candidate_hist\", \"\"), (ss.get(\"duplicate_candidates\") or \"\"),\n+                         ss.get(\"support_fingerprint\", \"\")[:16]])\n+        if rows:\n+            self.h(\"Retained pre-pruning weight energy and selection cost (graph 0)\")\n+            self.table(\"energy\", [\"support\", \"enabled slots\", \"layer energy fraction\", \"selection s (in fine-tuning)\",\n+                                  \"chosen candidate histogram\", \"duplicate candidates\", \"support fingerprint\"], rows)\n+\n+    def grouped_phases(self, stage, tag, ref_tags):\n+        j = self.r.get(stage, tag)\n+        if j is None:\n+            return\n+        rows = []\n+        for t in [tag] + ref_tags:\n+            x = self.r.get(stage, t)\n+            if x is None:\n+                continue\n+            sm = step_samples(x)\n+            rows.append([t] + [f\"{statistics.median(sm[p]):.1f}\" if sm.get(p) else \"\" for p in\n+                               (\"fwd_layout\", \"fwd_zero\", \"fwd_kernel\", \"fwd_finalize\", \"bwd_coef\", \"bwd_layout\",\n+                                \"bwd_dx_init\", \"dx_kernel\", \"dw_kernel\", \"bwd_post\", \"optimizer\", \"step\", \"host_enqueue\",\n+                                \"fwd_t64\", \"fwd_t16\", \"fwd_t8\", \"dx_t64\", \"dx_t16\", \"dx_t8\", \"dw_t64\", \"dw_t16\", \"dw_t8\")])\n+        self.h(\"Phase breakdown (median ms, 24 samples, graph 0)\")\n+        self.table(\"phases\", [\"run\", \"fwd layout\", \"fwd zero\", \"fwd kernels\", \"fwd finalize\", \"bwd coef\", \"bwd layout\",\n+                              \"dX init\", \"dX\", \"dW / db\", \"bwd post\", \"optimizer\", \"step\", \"host enqueue\",\n+                              \"fwd K64\", \"fwd K16\", \"fwd K8\", \"dX K64\", \"dX K16\", \"dX K8\", \"dW K64\", \"dW K16\", \"dW K8\"], rows)\n+\n     def write(self, out: Path):\n         out.mkdir(parents=True, exist_ok=True)\n         (out / \"tables.md\").write_text(\"\\n\".join(self.md) + \"\\n\")\n@@ -248,6 +342,40 @@ def main():\n     R.timing(\"k8_timing\", \"K8 confirmation timing (24 samples per process)\")\n     R.learn(\"k8_q32\", \"K8 quality, 32 updates (development, seed 0)\", (\"BP-row/8\", \"U8@0.125\", \"FP-mag/8\"), 32, (0,))\n     R.learn(\"k8_q256\", \"K8 quality, 256 updates (development seeds 0/1/2)\", (\"BP-row/8\", \"U8@0.125\", \"FP-mag/8\"), 256)\n+    R.learn(\"k8_graph\", \"K8 graph / layout checks (selected treatment, data / SR seed 0, 256 updates)\",\n+            [f\"BP-row/8#{ls}\" for ls in (0, 1)] + [\"U8@0.125\"], 256, (0,), (\"energy\",), g=1)\n+    R.learn(\"k8_graph\", \"\", [f\"BP-row/8#{ls}\" for ls in (0, 1)] + [\"U8@0.125\"], 256, (0,), (\"energy\",), g=2)\n+    R.coverage(\"w8_screen\", \"Weighted K8 screen: coverage (graph 0)\", [(s, 0, None) for s in\n+               (\"WRS/8:4#0\", \"WRS/8:16#0\", \"TopK/8\")] + [(\"BP-row/8#0\", 0, \"k8_cov\"), (\"FP-mag/8\", 0, \"k8_cov\")])\n+    R.timing(\"w8_screen\", \"Weighted K8 screen: timing (8 samples, same session)\", ref=\"BP-row/8\", ref_fmt=\"indexed\")\n+    R.learn(\"w8_screen\", \"Weighted K8 screen: 32 updates\", (\"WRS/8:4#0\", \"WRS/8:16#0\", \"TopK/8\"), 32, (0,))\n+    R.learn(\"w8_dev\", \"Weighted K8 development: 256 updates\", (\"TopK/8\",), 256)\n+    R.coverage(\"m25_screen\", \"200M-slot 2 x 2: coverage (graph 0)\", [(s, 0, None) for s in\n+               (\"TopK/16\", \"Mix-BP#0\", \"Mix-TopK#0\")] + [(\"BP-row#0\", 0, \"errata_cov\"), (\"A8@0.25\", 0, \"errata_cov\"),\n+                                                        (\"U16@0.25\", 0, \"errata_cov\")])\n+    R.timing(\"m25_screen\", \"200M-slot 2 x 2: timing (8 samples, same session)\", ref=\"BP-row\", ref_fmt=\"indexed\")\n+    R.learn(\"m25_screen\", \"200M-slot 2 x 2: 32 updates\", (\"TopK/16\", \"Mix-BP#0\", \"Mix-TopK#0\", \"BP-row#0\", \"A8@0.25\",\n+                                                          \"U16@0.25\", \"dense\"), 32, (0,))\n+    R.learn(\"m25_dev\", \"200M-slot development: 256 updates\", (\"TopK/16\", \"Mix-TopK#0\"), 256)\n+    R.learn(\"norm\", \"200M-slot controls: 256 updates (parent records, reused)\", (\"BP-row\", \"A8@0.25\", \"U16@0.25\", \"dense\"),\n+            256, parent_stage=\"norm\")\n+    R.timing(\"m25_dev\", \"200M-slot confirmation timing, graph 0 (24 samples)\", ref=\"BP-row\", ref_fmt=\"indexed\")\n+    R.timing(\"w8_confirm\", \"TopK/8 graph / layout timing confirmation (24 samples)\", ref=\"U8@0.125\")\n+    R.timing(\"m25_confirm\", \"Mix-TopK graph / layout timing confirmation (24 samples)\", ref=\"BP-row\", ref_fmt=\"indexed\")\n+    R.coverage(\"w8_confirm\", \"TopK/8 coverage, graphs 1 / 2\", [(\"TopK/8\", g, None) for g in (1, 2)])\n+    R.coverage(\"m25_confirm\", \"Mix-TopK coverage, graph / layout checks\", [(f\"Mix-TopK#{ls}\", g, None)\n+                                                                         for g in (0, 1, 2) for ls in (0, 1)])\n+    for g in (1, 2):\n+        R.learn(\"w8_confirm\", f\"TopK/8 graph {g} (data / SR seed 0)\", (\"TopK/8\",), 256, (0,), (\"energy\",), g=g)\n+    for g in (0, 1, 2):\n+        R.learn(\"m25_confirm\", f\"Mix-TopK graph {g} layouts (data / SR seed 0)\", (\"Mix-TopK#0\", \"Mix-TopK#1\"), 256, (0,),\n+                (\"energy\",), g=g)\n+    R.final()\n+    R.energy()\n+    R.grouped_phases(\"m25_dev\", \"Mix-TopK_ls0_g0_grouped\", [\"TopK_k16_g0_indexed\", \"BP-row_ls0_g0_indexed\",\n+                                                            \"A8_r0.25_g0_wide\", \"U16_r0.25_g0_wide\"])\n+    R.interaction(\"interaction\", \"Interaction screen (reduced H 262,144 / C256, T16)\")\n+    R.interaction(\"interaction_extra\", \"Interaction: extra seeds / continuations (beyond the predeclared rule)\")\n     R.write(Path(a.out) if a.out else root)\n     print(f\"wrote {len(R.csvs)} tables\")\n \ndiff --git a/sparse_pooling/benchmarks/rsn_interaction.py b/sparse_pooling/benchmarks/rsn_interaction.py\nindex 6f0d6a3..145e085 100644\n--- a/sparse_pooling/benchmarks/rsn_interaction.py\n+++ b/sparse_pooling/benchmarks/rsn_interaction.py\n@@ -181,8 +181,8 @@ def main():\n             lay.bias.main_grad.copy_(st[\"main_grad_b\"])\n             a_g.copy_(st[\"a_g\"])\n             c_g.copy_(st[\"c_g\"])\n-        opt.state[lay.weight].update({k: v.clone() for k, v in st[\"opt_w\"].items()})\n-        opt.state[lay.bias].update({k: v.clone() for k, v in st[\"opt_b\"].items()})\n+        opt.state[lay.weight].update({k: (v.clone() if torch.is_tensor(v) else v) for k, v in st[\"opt_w\"].items()})\n+        opt.state[lay.bias].update({k: (v.clone() if torch.is_tensor(v) else v) for k, v in st[\"opt_b\"].items()})\n         opt._seed = st[\"sr_counter\"]\n         opt2.load_state_dict(st[\"opt2\"])\n         start = st[\"step\"]\n",
+  "source_tree_sha256": "dc1baf0617b411d544285be3ca2b31880f5bd33398829a96f904de45b1c689be",
+  "source_files": 243
+ },
+ "occupied_sets": 1024,
+ "support_record": {
+  "kind": "local",
+  "policy": "TopK",
+  "k": 8,
+  "L": 1,
+  "layout_seed": 0,
+  "spec": "TopK/8",
+  "rho_mask": 0.125,
+  "mask_sha256": "2f5818c0548e4a2d1c2f9297528b8dae1408b01cb57d838a9c41d7193af68134",
+  "support_fingerprint": "b504df703bc7ff82722becf5c478c97998aa733f6926dfb5eafde075c035f46f",
+  "support_stats": {
+   "schema": "granule.local_supports/2",
+   "rng_schema": "granule.local_supports/1",
+   "policy": "TopK",
+   "k": 8,
+   "nkt": 8,
+   "graph_seed": 0,
+   "layout_seed": null,
+   "rng": "torch.Generator('cpu') (mt19937) seeded per purpose / chunk with sha256-derived 63-bit seeds; permutation = stable argsort of int64 keys uniform in [0, 2^62); ties -> lower local position",
+   "H": 262144,
+   "W0": 16777216,
+   "enabled_slots": 2097152,
+   "rho_mask": 0.125,
+   "valid_groups": 16384,
+   "partial_groups": 0,
+   "records": 1024,
+   "Q": 4096,
+   "Q_total": 4096,
+   "sets_occupied": 1024,
+   "sets_empty": 3072,
+   "groups_per_record": {
+    "min": 16,
+    "max": 16
+   },
+   "m_q": {
+    "min": 0,
+    "max": 16,
+    "mean": 4.0,
+    "mean_occupied": 16.0
+   },
+   "b_q": {
+    "min": 0,
+    "max": 1,
+    "mean": 0.25
+   },
+   "support_fingerprint": "b504df703bc7ff82722becf5c478c97998aa733f6926dfb5eafde075c035f46f",
+   "tie_break": "stable descending sort: equal importances -> lower local coordinate",
+   "energy_bp_row": {
+    "layer_fraction": 0.12480080563692411,
+    "per_group_fraction": {
+     "mean": 0.12480415141986739,
+     "min": 0.07324675292239757,
+     "p1": 0.09314193328829654,
+     "median": 0.12432479399030025,
+     "p99": 0.16009868855845236,
+     "max": 0.18624262816785198,
+     "n": 16384
+    },
+    "zero_energy_groups": 0
+   },
+   "energy": {
+    "layer_fraction": 0.20491691323493674,
+    "per_group_fraction": {
+     "mean": 0.20491210830379983,
+     "min": 0.17152659288225036,
+     "p1": 0.18298914471161257,
+     "median": 0.204543692873188,
+     "p99": 0.23155530230234905,
+     "max": 0.25875463619271183,
+     "n": 16384
+    },
+    "zero_energy_groups": 0
+   },
+   "importance": "a[u, j] = sum_valid c W_pre[u, c, j]^2 (FP64, sequential over c)",
+   "score": "sum_{j in A} a[u, j] (FP64, ascending coordinate order)",
+   "rows_sorted_distinct_in_envelope": true
+  }
+ },
+ "term_support_eligibility": {
+  "order1": {
+   "mean_neurons_per_term": 32.30859375,
+   "terms_with_no_neuron": 526,
+   "terms": 4096
+  },
+  "order2": {
+   "mean_neurons_per_term": 3.61328125,
+   "terms_with_no_neuron": 3267,
+   "terms": 4096
+  },
+  "order3": {
+   "mean_neurons_per_term": 0.34375,
+   "terms_with_no_neuron": 4010,
+   "terms": 4096
+  },
+  "order4": {
+   "mean_neurons_per_term": 0.03515625,
+   "terms_with_no_neuron": 4087,
+   "terms": 4096
+  }
+ },
+ "saved_states": [
+  {
+   "step": 20,
+   "path": "/tmp/claude-1000/-home-evga-Projects-pamachine-GranuleLayer/59d0cc1a-a1b0-4b68-9369-4a46240cb8ce/scratchpad/resume/st/half_step20.pt",
+   "sha256": "71926856b7893468e6e932b2027c3056a88b4d828c3e8a9a7d4e26185d1a057b"
+  }
+ ],
+ "history": [
+  {
+   "step": 0,
+   "order1": 1.0067334149373504,
+   "order2": 0.9821117605979164,
+   "order3": 0.9823277388640395,
+   "order4": 0.9843853159116626,
+   "explained_interaction_order2": -4.091518198066168,
+   "explained_interaction_order3": -3.4564126608091117,
+   "explained_interaction_order4": -3.3398872366599894
+  },
+  {
+   "step": 10,
+   "train": 1.486158847808838,
+   "order1": 0.8901659592117224,
+   "order2": 0.864992950129822,
+   "order3": 0.8381457546559774,
+   "order4": 0.8218207410628731,
+   "explained_interaction_order2": -3.484344372481261,
+   "explained_interaction_order3": -2.8023189256282115,
+   "explained_interaction_order4": -2.6231842219813037
+  },
+  {
+   "step": 20,
+   "train": 1.2971282005310059,
+   "order1": 0.7845663351636378,
+   "order2": 0.7630809659426041,
+   "order3": 0.7244404549233155,
+   "order4": 0.7039358085321785,
+   "explained_interaction_order2": -2.9560066181564886,
+   "explained_interaction_order3": -2.286485240715989,
+   "explained_interaction_order4": -2.1034616033940146
+  }
+ ],
+ "final": {
+  "step": 20,
+  "train": 1.2971282005310059,
+  "order1": 0.7845663351636378,
+  "order2": 0.7630809659426041,
+  "order3": 0.7244404549233155,
+  "order4": 0.7039358085321785,
+  "explained_interaction_order2": -2.9560066181564886,
+  "explained_interaction_order3": -2.286485240715989,
+  "explained_interaction_order4": -2.1034616033940146
+ },
+ "mask_preserved": true,
+ "wall_seconds": 5.158475919044577
+}

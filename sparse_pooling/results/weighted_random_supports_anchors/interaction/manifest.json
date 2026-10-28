@@ -1,0 +1,112 @@
+{
+ "schema": "granule.kwa_manifest/1",
+ "model": {
+  "D": 1024,
+  "G": 1024,
+  "K_envelope": 64,
+  "C_envelope": 256,
+  "S": 64,
+  "R": 256,
+  "Q_total": 4096,
+  "H": 12500000,
+  "W0": 800000000,
+  "M": 8192,
+  "pooling": "Mean(ReLU)",
+  "numerics": "BF16 inputs / parameters / moments, FP32 accumulation / main_grad, split dZ, optimizer race fix",
+  "optimizer": "L1AdamW lr 1e-4, no L1, wd 0, SR on"
+ },
+ "budgets": {
+  "K8": {
+   "slots": 100000000,
+   "rho": 0.125,
+   "executed": "kgen K8, C16 (16-neuron row groups)"
+  },
+  "K25": {
+   "slots": 200000000,
+   "rho": 0.25
+  },
+  "mixed": {
+   "H64": 786432,
+   "H16": 6994976,
+   "H8": 4718592,
+   "slots": 200000000,
+   "biases": 12500000
+  }
+ },
+ "bounds": {
+  "per_output_records_max": 763,
+  "per_output_union_k8": {
+   "t2": 0.04078842864125122,
+   "t3": 0.00023946239906801108,
+   "t4": 1.1726855977865382e-06
+  },
+  "per_output_union_k16": {
+   "t2": 0.1748075513196481,
+   "t3": 0.0023946239906801107,
+   "t4": 3.0489825542449992e-05
+  }
+ },
+ "seeds": {
+  "graph": [
+   0,
+   1,
+   2
+  ],
+  "layout": [
+   0,
+   1
+  ],
+  "development": [
+   0,
+   1,
+   2
+  ],
+  "final": [
+   3,
+   4,
+   5
+  ],
+  "final_test_batches": [
+   19000,
+   19001,
+   19002,
+   19003,
+   19004,
+   19005,
+   19006,
+   19007
+  ],
+  "development_validation_batches": [
+   9000,
+   9001,
+   9002,
+   9003
+  ],
+  "final_interaction_batches": [
+   59000,
+   59001,
+   59002,
+   59003,
+   59004,
+   59005,
+   59006,
+   59007
+  ],
+  "input": 23
+ },
+ "checkpoints": {
+  "C256_g0": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+  "C256_g1": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_g1_step128.pt",
+  "C256_g2": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_g2_step128.pt"
+ },
+ "noninferiority": {
+  "margin": 0.003,
+  "rule": "paired 95 % t interval of (new - control) over the final training seeds: noninferior iff upper < margin; improvement iff upper < 0; otherwise inconclusive (never 'equivalent')"
+ },
+ "wrs_candidate_counts": [
+  1,
+  4,
+  16
+ ],
+ "spec_grammar": "Cases of the random-support / normalization / optimization-control study\n(results/RANDOM_SUPPORTS_NORMALIZATION_CONTROLS.md): support specifications, seeds, checkpoints and the\nmachine-readable manifest (``manifest()``, no GPU; written before any job runs).\n\nSupport spec strings (``support(spec, ...)``):\n\n* ``dense``                       the unpruned K64 model;\n* ``<width policy>@<rho>``        experimental/width_masks policies of the parent study (U16@0.25, A8@0.25,\n                                  H2@0.05, H2A@0.1, P16@0.25 = FP-mag, ...), magnitude scores;\n* ``<local policy>[/k][#ls]``     experimental/local_supports policies (FP-mag, FP-balanced, RP-record, RP-row,\n                                  BP-row, TopK), fan-in k (default 16), layout seed ls (default 0);\n* ``WRS/k:L[#ls]``                weighted random-subset selection with L candidates (weighted-support study);\n* ``Mix-BP[#ls]``, ``Mix-WRS:L[#ls]``, ``Mix-TopK[#ls]``\n                                  experimental/mixed_supports (K64 anchor / K16 / K8 allocation at rho 0.25).\n\nSeeds are separate: ``graph_seed`` (the K64 envelope graph and its checkpoint), ``layout_seed`` (local subsets\nonly), init / checkpoint seed, data seed and training (stochastic-rounding) seed of each driver.\n"
+}

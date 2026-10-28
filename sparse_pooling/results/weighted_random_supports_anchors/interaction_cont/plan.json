@@ -1,0 +1,84 @@
+{
+ "stage": "interaction",
+ "selection": {
+  "rule": "EXTRA, beyond the predeclared interaction rule (no comparison met its ambiguity criterion): TopK/8 and BP-row/8 continued to 4,000 updates at lr 1e-2 from the kept 1,000-step state (TopK/8 still improving at 1,000; optimization speed vs representation), and init / SR seeds 18/1, 19/2 at 1,000 updates (lr 1e-2, the lr at which the A8 / dense controls did better) for the four sparse methods; all with the reserved final interaction-test batches 59,000-59,007 evaluated once at the end -- the two 4,000-update continuations rerun after the --resume fix (first attempt failed at load: non-tensor 'step')",
+  "jobs": [
+   {
+    "spec": "TopK/8",
+    "terms": 16,
+    "init_seed": 17,
+    "sr_seed": 0,
+    "steps": 4000,
+    "lr": 0.01,
+    "resume": "/home/evga/Projects/pamachine/kwa_runs/interaction/state/int_TopK_k8_T16_none_i17_s1000_lr0.01_step1000.pt",
+    "final": true,
+    "tag": "int_TopK_k8_T16_none_i17_s4000_lr0.01"
+   },
+   {
+    "spec": "BP-row/8#0",
+    "terms": 16,
+    "init_seed": 17,
+    "sr_seed": 0,
+    "steps": 4000,
+    "lr": 0.01,
+    "resume": "/home/evga/Projects/pamachine/kwa_runs/interaction/state/int_BP-row_k8_ls0_T16_none_i17_s1000_lr0.01_step1000.pt",
+    "final": true,
+    "tag": "int_BP-row_k8_ls0_T16_none_i17_s4000_lr0.01"
+   }
+  ]
+ },
+ "jobs": [
+  {
+   "kind": "script",
+   "tag": "int_TopK_k8_T16_none_i17_s4000_lr0.01_final",
+   "script": "rsn_interaction.py",
+   "args": [
+    "--support",
+    "TopK/8",
+    "--terms",
+    "16",
+    "--norm",
+    "none",
+    "--init-seed",
+    "17",
+    "--sr-seed",
+    "0",
+    "--steps",
+    "4000",
+    "--lr",
+    "0.01",
+    "--eval-every",
+    "100",
+    "--resume",
+    "/home/evga/Projects/pamachine/kwa_runs/interaction/state/int_TopK_k8_T16_none_i17_s1000_lr0.01_step1000.pt",
+    "--final-test"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "int_BP-row_k8_ls0_T16_none_i17_s4000_lr0.01_final",
+   "script": "rsn_interaction.py",
+   "args": [
+    "--support",
+    "BP-row/8#0",
+    "--terms",
+    "16",
+    "--norm",
+    "none",
+    "--init-seed",
+    "17",
+    "--sr-seed",
+    "0",
+    "--steps",
+    "4000",
+    "--lr",
+    "0.01",
+    "--eval-every",
+    "100",
+    "--resume",
+    "/home/evga/Projects/pamachine/kwa_runs/interaction/state/int_BP-row_k8_ls0_T16_none_i17_s1000_lr0.01_step1000.pt",
+    "--final-test"
+   ]
+  }
+ ]
+}

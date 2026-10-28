@@ -1,0 +1,32 @@
+{
+ "declared_before": "any coverage / timing / learning result of this study was produced (2026-10-27, before stage 1 launched)",
+ "development_vs_final": "development validation = held-out batches 9_000..9_003 (already used by earlier rounds); locked final test = batches 19_000..19_007 (same teacher, M 512), evaluated only in the 'final' stage, once after training, with fresh data / SR seeds 3 / 4 / 5; never read while choosing L, normalization or methods",
+ "treatment_choice": "for every support: the paired initialization treatment (none | energy, cap 8) with the LOWER mean development held-out loss at 256 updates over data / SR seeds 0 / 1 / 2; |difference| < 1e-4 -> none. Clipping above the parent's trigger (1 % of connected rows) is reported; the cap grid is not reopened unless clipping exceeds that trigger by an order of magnitude (10 %) on a selected method",
+ "k8_graph_layout_checks": "the selected BP-row/8 treatment at graph 0/1/2 x layout 0/1 (data / SR seed 0) with same-graph U8 0.125 at ITS selected treatment; reported as graph / layout variation, not training-seed replicates",
+ "weighted_k8_screen": [
+  "candidates: WRS/8:4#0, WRS/8:16#0, TopK/8 (graph 0 / layout 0); controls BP-row/8#0, FP-mag/8",
+  "quality score: the better (lower) 32-update development held-out loss of none / energy",
+  "preferred set: median complete step <= 1.10 x BP-row/8's (same screen session) AND layer-wide exact triple coverage >= 0.80 x BP-row/8's AND per-output triple coverage (median over the parent's fixed outputs) >= 0.80 x BP-row/8's",
+  "advance A = the best quality score in the preferred set (if the preferred set is empty: no A)",
+  "advance B (the ONE explicitly labelled quality-versus-coverage tradeoff) = the best quality score among the non-preferred candidates, only if it beats A's score (or A does not exist); at most two advance",
+  "final weighted rule W* = the advanced policy with the lowest mean 256-update development loss (its selected treatment, seeds 0/1/2); W* is carried unchanged (same L or TopK) to K16 and to the mixed allocation"
+ ],
+ "budget_25": [
+  "2 x 2 at 200M slots: BP-row#0 (K16), W*-16, Mix-BP#0, Mix-W*#0, with A8 0.25 / U16 0.25 controls; screen: coverage, 8-sample timing, 32-update none / energy",
+  "advance (<= 2 new policies): the mixed policy with the better 32-update quality score, plus the better-scoring of {the other mixed policy, W*-16}",
+  "final mixed candidate = the advanced mixed policy with the lower mean 256-update development loss (its selected treatment); its graph / layout checks: timing / coverage / quality (data seed 0) at graph 0/1/2 x layout 0/1"
+ ],
+ "final_confirmation": [
+  "methods (frozen before the final stage): W*/8 and the final mixed candidate (the at most two new methods), with budget-matched controls BP-row/8 and U8 0.125 (100M) and BP-row/16, A8 0.25, U16 0.25 (200M), dense as reference; each at its selected treatment (parent 256-update results for BP-row/16 / A8 / U16 / dense)",
+  "fresh data / SR seeds 3 / 4 / 5, graph 0 / layout 0; final states kept",
+  "paired comparisons: W*/8 - BP-row/8, W*/8 - U8, mixed - A8, mixed - U16, mixed - BP-row/16; margin 0.003: noninferior iff upper 95 % paired t bound < 0.003; improvement iff upper < 0; otherwise inconclusive"
+ ],
+ "interaction": [
+  "reduced H 262,144 / C256 task, T16, orders 2/3/4, raw Gaussian inputs, per-output affine readout (parent calibration, readout lr 1e-2)",
+  "1,000-update screen at layer lr 3e-3 AND 1e-2 (both declared) for BP-row/8, W*/8, the final mixed candidate, A8 0.25, dense; init seed 17; common data",
+  "mixed: teacher-mapped anchor oracle (analytic readout, BF16 floor) and the perturbed oracle (eps 0.1)",
+  "ambiguous comparison = W*/8 vs BP-row/8 or mixed vs A8 whose mean explained interaction (orders 2-4) differs by < 0.05 at either lr, or whose ranking flips between the two lrs: continue it and its A8 / dense controls to 4,000 updates at the lr where the controls (A8, dense) did better, init / SR seeds 17/0, 18/1, 19/2, keeping the 1,000-step prefix state",
+  "the reserved final interaction-test batches 59_000..59_007 are evaluated once at the end of the 4,000-update continuations (after selection)"
+ ],
+ "optimization": "at most one profiling-driven optimization pass on the selected method (dX staging / scatter or grouped launch / buffer overhead first), same-function before / after control and correctness / sanitizer checks; quality results never depend on it"
+}

@@ -376,6 +376,7 @@ def main():
                                                             "A8_r0.25_g0_wide", "U16_r0.25_g0_wide"])
     R.interaction("interaction", "Interaction screen (reduced H 262,144 / C256, T16)")
     R.interaction("interaction_extra", "Interaction: extra seeds / continuations (beyond the predeclared rule)")
+    R.interaction("interaction_cont", "Interaction: 4,000-update continuations after the --resume fix")
     R.write(Path(a.out) if a.out else root)
     print(f"wrote {len(R.csvs)} tables")
 

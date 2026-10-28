@@ -1,0 +1,543 @@
+{
+ "stage": "m25_screen",
+ "selection": {
+  "rule": "selection_rules.json weighted_k8_screen (W*)",
+  "w_star": "TopK/8",
+  "rule_spec": "TopK/8",
+  "norm": "energy",
+  "layout_free": true,
+  "bp_norm": "energy",
+  "u8_norm": "energy",
+  "w16": "TopK/16",
+  "mix_w": "Mix-TopK#0",
+  "candidates": {
+   "TopK/8": {
+    "norm": "energy",
+    "mean": 0.21295564249157906,
+    "inputs": {
+     "none": {
+      "mean": 0.22305051485697427,
+      "seeds": [
+       0.22298052534461021,
+       0.2236335575580597,
+       0.22253746166825294
+      ]
+     },
+     "energy": {
+      "mean": 0.21295564249157906,
+      "seeds": [
+       0.21322185918688774,
+       0.21389659866690636,
+       0.21174846962094307
+      ]
+     }
+    }
+   }
+  },
+  "covered_g0": [
+   "TopK/8"
+  ]
+ },
+ "jobs": [
+  {
+   "kind": "script",
+   "tag": "cov_TopK_k16_g0",
+   "script": "rsn_coverage.py",
+   "args": [
+    "--support",
+    "TopK/16",
+    "--graph-seed",
+    "0"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "cov_Mix-BP_ls0_g0",
+   "script": "rsn_coverage.py",
+   "args": [
+    "--support",
+    "Mix-BP#0",
+    "--graph-seed",
+    "0"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "cov_Mix-TopK_ls0_g0",
+   "script": "rsn_coverage.py",
+   "args": [
+    "--support",
+    "Mix-TopK#0",
+    "--graph-seed",
+    "0"
+   ]
+  },
+  {
+   "kind": "timing",
+   "tag": "dense_g0_anchor0",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "dense",
+    "tile": 128
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "dense",
+   "format": "dense"
+  },
+  {
+   "kind": "timing",
+   "tag": "Mix-TopK_ls0_g0_grouped",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "grouped",
+    "tile": 128,
+    "policy": "Mix-TopK",
+    "layout_seed": 0,
+    "L": 1
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "Mix-TopK#0",
+   "format": "grouped"
+  },
+  {
+   "kind": "timing",
+   "tag": "U16_r0.25_g0_wide",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "wide",
+    "tile": 128,
+    "policy": "U16",
+    "density": 0.25,
+    "score": "magnitude",
+    "seed": 0
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "U16@0.25",
+   "format": "wide"
+  },
+  {
+   "kind": "timing",
+   "tag": "A8_r0.25_g0_wide",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "wide",
+    "tile": 128,
+    "policy": "A8",
+    "density": 0.25,
+    "score": "magnitude",
+    "seed": 0
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "A8@0.25",
+   "format": "wide"
+  },
+  {
+   "kind": "timing",
+   "tag": "dense_g0_anchor1",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "dense",
+    "tile": 128
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "dense",
+   "format": "dense"
+  },
+  {
+   "kind": "timing",
+   "tag": "Mix-BP_ls0_g0_grouped",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "grouped",
+    "tile": 128,
+    "policy": "Mix-BP",
+    "layout_seed": 0,
+    "L": 1
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "Mix-BP#0",
+   "format": "grouped"
+  },
+  {
+   "kind": "timing",
+   "tag": "BP-row_ls0_g0_indexed",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "indexed",
+    "tile": 128,
+    "policy": "BP-row",
+    "k": 16,
+    "layout_seed": 0,
+    "L": 1
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "BP-row#0",
+   "format": "indexed"
+  },
+  {
+   "kind": "timing",
+   "tag": "TopK_k16_g0_indexed",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "indexed",
+    "tile": 128,
+    "policy": "TopK",
+    "k": 16,
+    "layout_seed": 0,
+    "L": 1
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "TopK/16",
+   "format": "indexed"
+  },
+  {
+   "kind": "timing",
+   "tag": "dense_g0_anchor2",
+   "C": 256,
+   "graph_seed": 0,
+   "factory": {
+    "checkpoint": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+    "format": "dense",
+    "tile": 128
+   },
+   "rounds": [
+    2,
+    2,
+    2
+   ],
+   "env": {},
+   "support": "dense",
+   "format": "dense"
+  },
+  {
+   "kind": "script",
+   "tag": "learn_TopK_k16_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "TopK/16",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_TopK_k16_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "TopK/16",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_Mix-BP_ls0_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "Mix-BP#0",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_Mix-BP_ls0_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "Mix-BP#0",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_Mix-TopK_ls0_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "Mix-TopK#0",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_Mix-TopK_ls0_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "Mix-TopK#0",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_BP-row_ls0_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "BP-row#0",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_BP-row_ls0_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "BP-row#0",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_A8_r0.25_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "A8@0.25",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_A8_r0.25_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "A8@0.25",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_U16_r0.25_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "U16@0.25",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_U16_r0.25_g0_energy_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "U16@0.25",
+    "--norm",
+    "energy",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  },
+  {
+   "kind": "script",
+   "tag": "learn_dense_g0_none_s32_d0",
+   "script": "rsn_learn.py",
+   "args": [
+    "--support",
+    "dense",
+    "--norm",
+    "none",
+    "--steps",
+    "32",
+    "--data-seed",
+    "0",
+    "--sr-seed",
+    "0",
+    "--graph-seed",
+    "0",
+    "--eval-every",
+    "8"
+   ]
+  }
+ ],
+ "note": "200M-slot 2 x 2 (uniform K16 / mixed allocation x unweighted / weighted) with A8 / U16 controls; graph 0 / layout 0; quality runs execute the dense masked function"
+}
