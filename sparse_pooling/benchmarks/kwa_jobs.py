@@ -202,15 +202,14 @@ def stage_m25_confirm(sel):
     for g in KW.GRAPH_SEEDS:
         pairs = [(f"{rule}#{ls}", sel["fmt"]) for ls in KW.LAYOUT_SEEDS]
         pairs += [("BP-row#0", "indexed"), ("A8@0.25", "wide"), ("U16@0.25", "wide")]
-        if g:
-            jobs += session(pairs, g, CONFIRM_ROUNDS, ORDER_SEED + 70 + g)
+        jobs += session(pairs, g, CONFIRM_ROUNDS, ORDER_SEED + 70 + g)
         for ls in KW.LAYOUT_SEEDS:
             s = f"{rule}#{ls}"
             if (g, ls) != (0, 0):
                 jobs.append(coverage_job(s, g))
                 jobs.append(learn_job(s, sel["norm"], 256, 0, graph_seed=g))
     return dict(stage="m25_confirm", selection=sel, jobs=jobs,
-                note="graph 1 / 2 timing sessions (graph 0 / layout 0+1 timing = m25_dev's session plus layout 1 here)")
+                note="graph 0 / 1 / 2 timing sessions with layout 0 / 1 (graph 0 layout 0 also timed in m25_dev)")
 
 
 def stage_final(sel):
