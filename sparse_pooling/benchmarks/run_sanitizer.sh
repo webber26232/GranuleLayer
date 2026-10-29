@@ -32,10 +32,36 @@
 #   * the workload printed its completion marker "WORKLOAD COMPLETE <workload>".
 # Exit status: 0 every run passed; 1 at least one run failed; 2 usage / setup error (e.g. no
 # sanitizer); 129 / 130 / 143 interrupted (every child process group is terminated first).
+# A signal IGNORED when the runner starts cannot be trapped by bash: a command launched with '&' from
+# a non-interactive shell (scripts, nohup / systemd-run wrappers started that way) inherits SIGINT and
+# SIGQUIT ignored, so SIGINT is then ignored by this runner too (it says so at startup); SIGTERM and
+# SIGHUP still interrupt it.
 set -uo pipefail
 
-JOBS=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
+SIGINT_IGNORED_ON_ENTRY=0
+[ "$(trap -p INT)" = "trap -- '' SIGINT" ] && SIGINT_IGNORED_ON_ENTRY=1
+declare -A PID_KEY=()  # running job pid -> "<workload>.<tool>"
+declare -A RC=()       # "<workload>.<tool>" -> exit status
 OUT=""
+on_signal() {  # terminate every running job's process group, then exit nonzero
+  local sig=$1 code=$2 pid
+  trap '' INT TERM HUP
+  echo "interrupted (SIG$sig): terminating ${#PID_KEY[@]} running sanitizer job(s)" >&2
+  for pid in "${!PID_KEY[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(jobs -rp)" ] && break
+    sleep 0.5
+  done
+  for pid in "${!PID_KEY[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; done
+  wait 2>/dev/null
+  echo "sanitizer: INTERRUPTED; logs kept in ${OUT:-<none>}" >&2
+  exit "$code"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+
+JOBS=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
 TIMEOUT=14400
 usage() { sed -n '4p' "$0" | sed 's/^# *//' >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -85,9 +111,8 @@ SUMMARY=$OUT/summary.tsv
 rm -f "$SUMMARY"
 export CUDA_MODULE_LOADING=LAZY  # instrument only the kernels that run (the libraries hold ~2000)
 echo "sanitizer: $SAN_PATH ($("$SAN_PATH" --version 2>/dev/null | tail -1)); logs: $OUT; jobs $JOBS; timeout ${TIMEOUT}s"
-
-declare -A PID_KEY=()  # running job pid -> "<workload>.<tool>"
-declare -A RC=()       # "<workload>.<tool>" -> exit status
+[ "$SIGINT_IGNORED_ON_ENTRY" = 1 ] && echo "sanitizer: note: SIGINT was ignored when this runner started (inherited, e.g. a" \
+  "background '&' launch); bash cannot trap it, so SIGINT is ignored -- interrupt with SIGTERM or SIGHUP" >&2
 
 launch() {  # workload, tool: the job runs in its own process group (timeout is the group leader)
   local wl=$1 tool=$2 extra=() log kill_after=()
@@ -114,24 +139,6 @@ reap() {  # collect the exit status of every launched job that has finished
     fi
   done
 }
-
-on_signal() {  # terminate every running job's process group, then exit nonzero
-  local sig=$1 code=$2 pid
-  trap '' INT TERM HUP
-  echo "interrupted (SIG$sig): terminating ${#PID_KEY[@]} running sanitizer job(s)" >&2
-  for pid in "${!PID_KEY[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; done
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -z "$(jobs -rp)" ] && break
-    sleep 0.5
-  done
-  for pid in "${!PID_KEY[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; done
-  wait 2>/dev/null
-  echo "sanitizer: INTERRUPTED; logs kept in $OUT" >&2
-  exit "$code"
-}
-trap 'on_signal INT 130' INT
-trap 'on_signal TERM 143' TERM
-trap 'on_signal HUP 129' HUP
 
 for wl in "${WL[@]}"; do
   for tool in "${TOOLS[@]}"; do

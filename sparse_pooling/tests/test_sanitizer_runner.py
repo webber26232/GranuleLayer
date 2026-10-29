@@ -234,22 +234,68 @@ def test_timeout_fails_and_kills_the_process_group(env):
     assert pids and not any(alive(p) for p in pids)
 
 
-@pytest.mark.parametrize("sig,code", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
-def test_interrupt_terminates_children_and_exits_nonzero(env, sig, code):
+def _fake_pids(env):
+    return [int(f.name.rsplit(".", 1)[1]) for f in env["pids"].iterdir()]
+
+
+def _start_interruptible(env, sigint):
+    """The runner on 4 sleeping fake jobs, with SIGINT's disposition set EXPLICITLY (SIG_DFL or SIG_IGN): an inherited
+    ignored SIGINT (pytest started with '&' from a non-interactive shell) cannot be trapped by bash, which made the
+    interrupt test depend on how the suite was launched (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md section 2.3)."""
     e = dict(env["env"], FAKE_SAN="*=sleep")
     p = subprocess.Popen(["bash", str(RUNNER), "--jobs", "4", "--out", str(env["tmp"] / "out"), sys.executable,
-                          "det"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
+                          "det"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e,
+                         preexec_fn=lambda: signal.signal(signal.SIGINT, sigint))
+    deadline = time.monotonic() + 30
+    while len([f for f in env["pids"].iterdir() if f.name.startswith("wl.")]) < 4:
+        assert time.monotonic() < deadline, "fake jobs did not start"
+        time.sleep(0.1)
+    return p
+
+
+def _teardown(env, p):
+    """Bounded cleanup of a runner that did not finish: SIGTERM (its own handler kills its job groups), a grace
+    period, then SIGKILL of the runner and of THIS test's recorded fake processes only, and reap."""
+    if p.poll() is None:
+        p.terminate()
+        try:
+            p.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+    for x in _fake_pids(env):
+        if alive(x):
+            os.kill(x, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("sig,code", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+def test_interrupt_terminates_children_and_exits_nonzero(env, sig, code):
+    p = _start_interruptible(env, signal.SIG_DFL)
     try:
-        deadline = time.monotonic() + 30
-        while len([f for f in env["pids"].iterdir() if f.name.startswith("wl.")]) < 4:
-            assert time.monotonic() < deadline, "fake jobs did not start"
-            time.sleep(0.1)
         p.send_signal(sig)
         _, err = p.communicate(timeout=30)
     finally:
-        if p.poll() is None:
-            p.kill()
+        _teardown(env, p)
     assert p.returncode == code and "INTERRUPTED" in err
-    pids = [int(f.name.rsplit(".", 1)[1]) for f in env["pids"].iterdir()]
+    pids = _fake_pids(env)
     time.sleep(0.5)
     assert len(pids) == 8 and not any(alive(x) for x in pids)  # 4 sanitizers + 4 workloads
+
+
+def test_sigint_ignored_on_entry_is_reported_and_sigterm_still_cleans_up(env):
+    """The cause of the K8-study suite failure: a runner whose SIGINT is ignored on entry ignores SIGINT (bash cannot
+    trap it).  It must say so at startup, keep running, and still terminate every child on SIGTERM."""
+    p = _start_interruptible(env, signal.SIG_IGN)
+    try:
+        p.send_signal(signal.SIGINT)
+        time.sleep(2.5)  # the trap would have run within ~1.5 s
+        assert p.poll() is None
+        p.send_signal(signal.SIGTERM)
+        _, err = p.communicate(timeout=30)
+    finally:
+        _teardown(env, p)
+    assert "SIGINT was ignored when this runner started" in err
+    assert p.returncode == 143 and "INTERRUPTED" in err
+    pids = _fake_pids(env)
+    time.sleep(0.5)
+    assert len(pids) == 8 and not any(alive(x) for x in pids)

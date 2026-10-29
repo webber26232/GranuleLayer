@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -104,8 +105,10 @@ def query_multiplicity(sp: "KC64.Supports", tup: torch.Tensor, chunk: int = 0):
 
 
 @torch.no_grad()
-def output_rows(sp, outputs, tri, quad, chunk: int = 1 << 15):
-    """Per selected output: features, exact pairs, sampled triples / quadruples with multiplicity."""
+def output_rows(sp, outputs, tri, quad, chunk: int = 1 << 15, joint=None):
+    """Per selected output: features, exact pairs, sampled triples / quadruples with multiplicity.  ``joint``
+    (optional): dict(outputs=set of outputs, triple=[n] int16, quad=[n] int16) accumulates, per sampled tuple, the
+    number of those outputs covering it (joint_coverage.py: the shared-query uncertainty)."""
     from kcsr_coverage import comb_table
 
     dev = sp.q.device
@@ -142,6 +145,8 @@ def output_rows(sp, outputs, tri, quad, chunk: int = 1 << 15):
                 cnt[s0:s0 + chunk] = popcount64(acc).sum(1)
             k = int((cnt > 0).sum())
             n = tup.shape[0]
+            if joint is not None and int(g) in joint["outputs"]:
+                joint[name] += (cnt > 0).to(joint[name].dtype)
             lo, hi = clopper_pearson(k, n)
             rec[f"{name}_hits"], rec[f"{name}_n"], rec[name], rec[f"{name}_ci95"] = k, n, k / n, [lo, hi]
             rec[f"{name}_multiplicity"] = categories(cnt)
@@ -212,7 +217,9 @@ def fixed_outputs(feats_dense: torch.Tensor, counts: torch.Tensor, G: int):
     return sel, why
 
 
-def coverage_of(L, feat, bk, mask, outputs, tri, quad, quad_n, extra_low=True):
+def coverage_of(L, feat, bk, mask, outputs, tri, quad, quad_n, extra_low=True, joint_out=None):
+    """``joint_out`` (optional dict): receives the per-query covering-output counts of the fixed outputs (uint8
+    numpy arrays 'triple' / 'quad', joint_coverage.py) for paired comparisons."""
     t0 = time.perf_counter()
     sp = KC64.supports_from_dense(L, feat, bk, mask)
     res = dict(supports=dict(valid_neurons=int(sp.q.numel()), active_neurons=int((sp.bits != 0).sum()),
@@ -233,13 +240,24 @@ def coverage_of(L, feat, bk, mask, outputs, tri, quad, quad_n, extra_low=True):
     t0 = time.perf_counter()
     feats = KC64.per_output_features(sp)
     res["per_output_features"] = KC64.dist(feats)
+    if joint_out is not None:
+        joint_out["per_output_features"] = feats.cpu().numpy()
     outs = list(outputs)
     low = torch.argsort(feats.cpu(), stable=True)[:4].tolist() if extra_low else []
     res["outputs_low_of_this_support"] = low
-    rows = output_rows(sp, outs + [o for o in low if o not in outs], tri, quad)
+    joint = dict(outputs={int(o) for o in outs}, triple=torch.zeros(tri.shape[0], dtype=torch.int16, device=tri.device),
+                 quad=torch.zeros(quad.shape[0], dtype=torch.int16, device=quad.device))
+    rows = output_rows(sp, outs + [o for o in low if o not in outs], tri, quad, joint=joint)
     for r in rows:
         r["fixed_selection"] = r["output"] in outs
     res["outputs"] = rows
+    import joint_coverage as JC
+
+    res["joint_selected"] = {name: JC.summary(joint[name].cpu().numpy(), len(joint["outputs"]),
+                                               math.comb(KC64_D(), t.shape[1]))
+                             for name, t in (("triple", tri), ("quad", quad))}
+    if joint_out is not None:
+        joint_out.update({name: joint[name].to(torch.uint8).cpu().numpy() for name in ("triple", "quad")})
     fixed = [r for r in rows if r["fixed_selection"]]
     res["per_output_summary"] = {k: KC64.dist(torch.tensor([r[k] for r in fixed], dtype=torch.float64))
                                  for k in ("pair", "triple", "quad", "features")}

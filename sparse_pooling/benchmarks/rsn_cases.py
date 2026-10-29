@@ -8,7 +8,7 @@ Support spec strings (``support(spec, ...)``):
 * ``<width policy>@<rho>``        experimental/width_masks policies of the parent study (U16@0.25, A8@0.25,
                                   H2@0.05, H2A@0.1, P16@0.25 = FP-mag, ...), magnitude scores;
 * ``<local policy>[/k][#ls]``     experimental/local_supports policies (FP-mag, FP-balanced, RP-record, RP-row,
-                                  BP-row, TopK), fan-in k (default 16), layout seed ls (default 0);
+                                  BP-row, TopK, Cover-TopK), fan-in k (default 16), layout seed ls (default 0);
 * ``WRS/k:L[#ls]``                weighted random-subset selection with L candidates (weighted-support study);
 * ``Mix-BP[#ls]``, ``Mix-WRS:L[#ls]``, ``Mix-TopK[#ls]``
                                   experimental/mixed_supports (K64 anchor / K16 / K8 allocation at rho 0.25).
@@ -27,7 +27,7 @@ import wps_cases as WC
 D, G, M, K, S, R, H = WC.D, WC.G, WC.M, WC.K, WC.S, WC.R, WC.H
 W0 = WC.W0
 C = 256
-LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK")
+LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK", "Cover-TopK")
 MIXED = ("Mix-BP", "Mix-WRS", "Mix-TopK")
 RANDOMIZED = ("RP-record", "RP-row", "BP-row")
 SCREEN_LAYOUT_SEEDS = (0, 1, 2)

@@ -159,6 +159,44 @@ def group_multiplicity(L, feat, bk, em, quad_n, bq=None):
 
 
 @torch.no_grad()
+def record_feature_cover(L, em: torch.Tensor, w=None, chunk: int = 1 << 12) -> dict:
+    """Per original record (logical block): local inputs enabled in at least one valid neuron (mask), and with w
+    those that also carry a nonzero weight there (numerical; an enabled zero weight adds no input dependence).
+    Any mask (local, width, mixed).  Returns distributions over the valid records."""
+    from sparse_pooling.experimental.width_masks import layout_counts
+
+    nb = L.groups * L.blocks_per_group
+    valid = L.valid_mask(em.device).view(nb, L.block)
+    emv = em.view(nb, L.block, 64)
+    wv = None if w is None else w.view(nb, L.block, 64)
+    m_cnt, n_cnt, keep = [], [], []
+    for b0 in range(0, nb, chunk):
+        v = valid[b0:b0 + chunk]
+        e = emv[b0:b0 + chunk].bool() & v[:, :, None]
+        m_cnt.append(e.any(1).sum(1))
+        if wv is not None:
+            n_cnt.append((e & (wv[b0:b0 + chunk] != 0)).any(1).sum(1))
+        keep.append(v.any(1))
+    keep = torch.cat(keep)
+    mc = torch.cat(m_cnt)[keep]
+    out = dict(records=int(keep.sum()), mask=KC64.dist(mc), mask_complete=int((mc == 64).sum()),
+               mask_missing_total=int((64 - mc).sum()))
+    if wv is not None:
+        nc = torch.cat(n_cnt)[keep]
+        out.update(numerical=KC64.dist(nc), numerical_complete=int((nc == 64).sum()),
+                   enabled_zero_inputs=int((mc - nc).sum()))
+    return out
+
+
+def feature_union_vs_dense(feats, feats_dense) -> dict:
+    """Per-output exact input-feature union against the dense envelope's (all outputs)."""
+    f, d = torch.as_tensor(feats).long(), torch.as_tensor(feats_dense).long().cpu()
+    miss = d - f
+    return dict(outputs=int(f.numel()), outputs_equal_dense=int((miss == 0).sum()), missing_total=int(miss.sum()),
+                missing_per_output=KC64.dist(miss.double()), never_exceeds_dense=bool((miss >= 0).all()))
+
+
+@torch.no_grad()
 def mixed_anchor_check(L, sup, w) -> dict:
     """Mixed supports: every valid original record holds exactly one anchor row group whose valid neurons enable all
     64 envelope inputs (mask) and hold 64 nonzero weights (numerical)."""
@@ -229,13 +267,13 @@ def main():
     bk = KG.unit_to_block_buckets(ubk, counts, C, 1)
     tab = KG.record_table(WC.D, WC.H, counts, C, 64, idx, feat, bk)
     del idx
-    res = dict(schema="granule.rsn_coverage/1", C=C, S=WC.S, R=WC.R, H=WC.H, graph_seed=a.graph_seed,
+    res = dict(schema="granule.rsn_coverage/2", C=C, S=WC.S, R=WC.R, H=WC.H, graph_seed=a.graph_seed,
                support=a.support, graph_fingerprint=kcsr_graph.fingerprint(tab))
     del tab
     tri = sample_tuples(WC.D, 3, KC64.N_OUT_TRIPLE, KC64.SAMPLE_SEED + 7, dev)
     quad = sample_tuples(WC.D, 4, KC64.N_OUT_QUAD, KC64.SAMPLE_SEED + 8, dev)
     sp0 = KC64.supports_from_dense(L, feat, bk, None)
-    feats0 = KC64.per_output_features(sp0)
+    feats0 = KC64.per_output_features(sp0).cpu()
     outs, why = WV.fixed_outputs(feats0, counts, WC.G)
     del sp0
     torch.cuda.empty_cache()
@@ -251,9 +289,10 @@ def main():
                               "k-input support records per output; 'per_output_union' = the K16 value, kept for "
                               "continuity); it does not apply to multi-tile (U*) or mixed / anchored supports; the "
                               "one-tile bound only to ONE common partition per set")
+    joint = dict(enabled={}, nonzero={})
     if a.support == "dense":
         res["kind"] = "dense potential (all 64 inputs of every valid neuron)"
-        res["enabled"] = WV.coverage_of(L, feat, bk, None, outs, tri, quad, KC64.N_QUAD)
+        res["enabled"] = WV.coverage_of(L, feat, bk, None, outs, tri, quad, KC64.N_QUAD, joint_out=joint["enabled"])
     else:
         rec, w, b, _ = SP.load_checkpoint(WC.ckpt(C, a.graph_seed))
         if rec["spec"]["seed"] != a.graph_seed or rec["C"] != C:
@@ -275,19 +314,30 @@ def main():
         bq = LS.block_sets(L, bk, dev)
         res["sharing"] = sharing(L, em, bq, feat)
         res["support_record_multiplicity"] = group_multiplicity(L, feat, bk, em, qn, bq)
-        res["enabled"] = WV.coverage_of(L, feat, bk, em, outs, tri, quad, qn)
+        res["enabled"] = WV.coverage_of(L, feat, bk, em, outs, tri, quad, qn, joint_out=joint["enabled"])
+        res["record_feature_cover"] = record_feature_cover(L, em, w)
+        res["feature_union_vs_dense"] = dict(
+            enabled=feature_union_vs_dense(joint["enabled"]["per_output_features"], feats0))
         nzm = (em.bool() & (w != 0)).to(torch.uint8)
         if torch.equal(nzm, em):
             res["nonzero"] = dict(identical_to_enabled=True, zero_enabled_weights=0)
         else:
-            res["nonzero"] = WV.coverage_of(L, feat, bk, nzm, outs, tri, quad, qn)
+            res["nonzero"] = WV.coverage_of(L, feat, bk, nzm, outs, tri, quad, qn, joint_out=joint["nonzero"])
             res["nonzero"]["zero_enabled_weights"] = int((em.bool() & (w == 0)).sum())
+            res["feature_union_vs_dense"]["nonzero"] = feature_union_vs_dense(
+                joint["nonzero"]["per_output_features"], feats0)
         del w, b, em, nzm
     res["analysis_peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
     res["analysis_seconds"] = time.perf_counter() - t_all
     res["provenance"] = provenance(Path(common.__file__).resolve().parent.parent)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(res, indent=1, default=str))
+    import numpy as np
+
+    np.savez_compressed(str(Path(a.out).with_suffix("")) + ".joint.npz",
+                        **{f"{scope}_{k}": v for scope, d in joint.items() for k, v in d.items()},
+                        outputs=np.array(outs, dtype=np.int64), tri_seed=KC64.SAMPLE_SEED + 7,
+                        quad_seed=KC64.SAMPLE_SEED + 8)
     e = res["enabled"]
     print(f"{res['kind']}: pair {100 * e['pair']['fraction']:.4f}% triple {100 * e['triple']['fraction']:.4f}% quad "
           f"{100 * e['quad']['fraction']:.5f}% | per-output triple median "

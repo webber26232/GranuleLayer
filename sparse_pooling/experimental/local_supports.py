@@ -31,6 +31,13 @@ Policies (``POLICIES``; nkt = 64 / k fixed tiles [t k, t k + k)):
                   are kept (no resampling); a duplicate can never win over its smaller-id copy;
 * ``TopK``        the k largest a[u, j] of the row group, ties to the lower local coordinate (stable descending
                   sort) -- the unconstrained magnitude endpoint (FP-mag is the best CONTIGUOUS tile).
+* ``Cover-TopK``  TopK followed by a per-record coverage repair (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md section 4):
+                  inside each original record every one of its 64 local inputs must be retained by at least one of
+                  the record's valid row groups, each group keeping exactly k distinct inputs.  While an input j is
+                  uncovered, the swap (u, d -> j) of minimum energy loss a[u, d] - a[u, j] over every uncovered j,
+                  group u and retained donor d with record count c[d] >= 2 is applied (ties lexicographic in (j, u, d),
+                  original local / canonical group order); see ``cover_repair``.  Requires m k >= 64 for every
+                  record of m valid groups (else ValueError, no fallback).
 
 Feature importance (WRS / TopK): a[u, j] = sum_{valid neurons c of u} W_pre[u, c, j]^2, FP64, accumulated by
 explicit sequential adds over c = 0..15 (padded neurons masked to 0) -- elementwise operations only, so the value
@@ -62,8 +69,9 @@ import torch
 
 SCHEMA = "granule.local_supports/2"  # record schema (/2: authoritative Q, WRS / TopK)
 RNG_SCHEMA = "granule.local_supports/1"  # key / fingerprint namespace: UNCHANGED, so every /1 support is reproduced
-POLICIES = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK")
-WEIGHTED = ("WRS", "TopK")
+POLICIES = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK", "Cover-TopK")
+WEIGHTED = ("WRS", "TopK", "Cover-TopK")
+COVER_CHUNK_RECORDS = 1 << 15
 CHUNK_ROWS = 1 << 16
 RNG = ("torch.Generator('cpu') (mt19937) seeded per purpose / chunk with sha256-derived 63-bit seeds; "
        "permutation = stable argsort of int64 keys uniform in [0, 2^62); ties -> lower local position")
@@ -264,6 +272,93 @@ def topk_select(a_v: torch.Tensor, k: int) -> torch.Tensor:
     return order[:, :k].sort(1).values
 
 
+def record_groups(rec: torch.Tensor, rank: torch.Tensor, gpb: int) -> torch.Tensor:
+    """[records, gpb] int64 index (into the valid groups) of each record's row groups by rank, -1 where absent."""
+    nrec = int(rec.max()) + 1 if rec.numel() else 0
+    gidx = torch.full((nrec, gpb), -1, dtype=torch.int64, device=rec.device)
+    gidx[rec, rank] = torch.arange(rec.numel(), device=rec.device)
+    return gidx
+
+
+@torch.no_grad()
+def cover_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank: torch.Tensor, k: int, gpb: int,
+                 S: int = 64, chunk_records: int = COVER_CHUNK_RECORDS) -> dict:
+    """Fixed-fan-in coverage repair of the supports env0 [n, k] (sorted) of n valid groups, group i in record rec[i] at
+    rank rank[i] (module docstring, ``Cover-TopK``).  Each record is independent; records are processed in chunks of
+    ``chunk_records`` (dense [chunk, gpb, S] buffers) and all records of a chunk advance one swap per round, so neither
+    the chunking nor the record order can change a result.  For a group u its cheapest removable donor
+    d*(u) = argmin {a[u, d] : d retained by u, c[d] >= 2} (first minimum = lowest d) does not depend on the target j, so
+    the best swap is min over (j, u) of a[u, d*(u)] - a[u, j], flattened in (j, u) order (first minimum = lexicographic
+    tie-break).  Termination / feasibility: an uncovered j with m k >= S implies a covered coordinate of count >= 2 (the
+    m k selections fill at most S - 1 coordinates), i.e. a legal donor, and j is absent from every group; each swap
+    covers exactly one more input and uncovers none, so the swap count equals the initial number of missing inputs
+    (both checked).  Returns env [n, k] sorted, per-record initial missing / swaps / energy loss (FP64), donor-position
+    histogram, rounds, working-buffer bytes."""
+    n = env0.shape[0]
+    dev = a_v.device
+    gidx = record_groups(rec.to(dev), rank.to(dev), gpb)
+    nrec = gidx.shape[0]
+    m = (gidx >= 0).sum(1)
+    if nrec and int((m * k).min()) < S:
+        bad = int(torch.nonzero(m * k < S)[0])
+        raise ValueError(f"Cover-TopK infeasible: record {bad} has {int(m[bad])} valid groups and k = {k} "
+                         f"(m k = {int(m[bad]) * k} < {S}); no epsilon edges / padding / larger k are used")
+    env = env0.clone().to(dev)
+    miss0 = torch.zeros(nrec, dtype=torch.int64, device=dev)
+    swaps = torch.zeros(nrec, dtype=torch.int64, device=dev)
+    loss = torch.zeros(nrec, dtype=torch.float64, device=dev)
+    donor_pos = torch.zeros(S, dtype=torch.int64, device=dev)
+    target_pos = torch.zeros(S, dtype=torch.int64, device=dev)
+    rounds = 0
+    inf = torch.tensor(float("inf"), dtype=torch.float64, device=dev)
+    coord = torch.arange(S, device=dev)
+    for r0 in range(0, nrec, chunk_records):
+        g = gidx[r0:r0 + chunk_records]
+        valid = g >= 0
+        gg = g.clamp_min(0)
+        A = torch.where(valid[:, :, None], a_v[gg].to(torch.float64), torch.zeros((), dtype=torch.float64, device=dev))
+        X = torch.zeros(A.shape, dtype=torch.bool, device=dev)
+        X.scatter_(2, env[gg], True)
+        X &= valid[:, :, None]
+        c = X.sum(1)
+        miss0[r0:r0 + len(g)] = (c == 0).sum(1)
+        act = torch.nonzero((c == 0).any(1)).squeeze(1)
+        rr = 0
+        while act.numel():
+            Xa, Aa, ca = X[act], A[act], c[act]
+            legal = Xa & (ca >= 2)[:, None, :]
+            dmin, dstar = torch.where(legal, Aa, inf).min(2)  # [na, gpb]: cheapest removable donor, lowest d on ties
+            ok = (ca == 0)[:, None, :] & torch.isfinite(dmin)[:, :, None] & valid[act][:, :, None]
+            cost = torch.where(ok, dmin[:, :, None] - Aa, inf)
+            best, idx = cost.permute(0, 2, 1).reshape(len(act), -1).min(1)  # (j, u) order: lexicographic tie-break
+            if not bool(torch.isfinite(best).all()):
+                raise AssertionError("Cover-TopK: an uncovered input without a legal donor swap (feasibility violated)")
+            j, u = idx // gpb, idx % gpb
+            d = dstar[torch.arange(len(act), device=dev), u]
+            X[act, u, d] = False
+            X[act, u, j] = True
+            c[act, d] -= 1
+            c[act, j] += 1
+            sl = act + r0
+            loss[sl] += best
+            swaps[sl] += 1
+            donor_pos += torch.bincount(d, minlength=S)
+            target_pos += torch.bincount(j, minlength=S)
+            act = act[(c[act] == 0).any(1)]
+            rr += 1
+        rounds = max(rounds, rr)
+        if not bool(((X.sum(2) == k) | ~valid).all()) or not bool((X.sum(1) >= 1).all()):
+            raise AssertionError("Cover-TopK: repaired record violates degree k / coverage >= 1")
+        key = torch.where(X, coord, coord + S)
+        env[gg[valid]] = key.sort(2).values[:, :, :k][valid]
+    if not torch.equal(swaps, miss0):
+        raise AssertionError("Cover-TopK: swap count differs from the initial number of missing inputs")
+    work = min(chunk_records, max(nrec, 1)) * gpb * S * (8 + 8 + 1 + 1)  # A, cost, X, legal (per chunk, active <= all)
+    return dict(env=env, missing0=miss0, swaps=swaps, loss=loss, donor_position_hist=donor_pos,
+                target_position_hist=target_pos, rounds=rounds, groups_per_record=m, chunk_records=chunk_records,
+                working_buffer_bytes=work)
+
+
 def _dist(v: torch.Tensor) -> dict:
     v = v.double()
     if v.numel() == 0:
@@ -353,17 +448,52 @@ def build(policy: str, k: int, L, buckets: torch.Tensor, w=None, graph_seed: int
                          candidate_keys=f"key_seed({policy}, {k}, graph{graph_seed}, layout{layout_seed}, "
                                         "L-stream, cand<c>, perm, <chunk>); candidate c independent of L",
                          energy_candidate0=energy_stats(a_v, e0))
-        else:
+        elif policy == "TopK":
             env[uv] = topk_select(a_v, k)
             subset[uv] = 0
             extra = dict(tie_break="stable descending sort: equal importances -> lower local coordinate",
                          energy_bp_row=energy_stats(a_v, e0))
+        else:  # Cover-TopK
+            import resource
+            import time
+
+            t0 = time.perf_counter()
+            rss0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            et = topk_select(a_v, k)
+            t1 = time.perf_counter()
+            r = cover_repair(a_v, et, geo["rec"], geo["rank_rec"], k, geo["gpb"])
+            t2 = time.perf_counter()
+            env[uv] = r["env"]
+            subset[uv] = 0
+            full = r["groups_per_record"] == geo["gpb"]
+            el = r["loss"]
+            tot_topk = subset_score(a_v, et)
+            rec_topk = torch.zeros(len(el), dtype=torch.float64).index_add_(0, geo["rec"], tot_topk)
+            rel = torch.where(rec_topk > 0, el / rec_topk.clamp_min(1e-300), torch.zeros_like(el))
+            extra = dict(tie_break="TopK: stable descending sort; repair: lexicographic (j, u, d)",
+                         energy_topk=energy_stats(a_v, et), energy_bp_row=energy_stats(a_v, e0),
+                         repair=dict(records=len(el), records_full=int(full.sum()), records_tail=int((~full).sum()),
+                                     tail_groups=sorted(set(r["groups_per_record"][~full].tolist())),
+                                     records_repaired=int((r["swaps"] > 0).sum()), swaps=int(r["swaps"].sum()),
+                                     swaps_equal_initial_missing=bool(torch.equal(r["swaps"], r["missing0"])),
+                                     missing0_per_record=_dist(r["missing0"]),
+                                     missing0_full=_dist(r["missing0"][full]),
+                                     missing0_tail=_dist(r["missing0"][~full]) if bool((~full).any()) else {},
+                                     energy_loss_total=float(el.sum()), energy_loss_relative_to_topk=float(
+                                         el.sum() / tot_topk.sum()) if float(tot_topk.sum()) > 0 else 0.0,
+                                     record_relative_loss=_dist(rel), record_relative_loss_tail=_dist(rel[~full])
+                                     if bool((~full).any()) else {}, donor_position_hist=r["donor_position_hist"].tolist(),
+                                     target_position_hist=r["target_position_hist"].tolist(), rounds=r["rounds"],
+                                     chunk_records=r["chunk_records"], working_buffer_bytes=r["working_buffer_bytes"],
+                                     seconds_topk=t1 - t0, seconds_repair=t2 - t1,
+                                     host_maxrss_growth_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss0,
+                                     device=str(a_v.device)))
         extra.update(energy=energy_stats(a_v, env[uv]), importance="a[u, j] = sum_valid c W_pre[u, c, j]^2 (FP64, "
                      "sequential over c)", score="sum_{j in A} a[u, j] (FP64, ascending coordinate order)")
         del a_v
     sup = LocalSupport(policy, k, env.to(device), nv.to(device), q.to(device), subset.to(device))
     sup.stats = dict(schema=SCHEMA, rng_schema=RNG_SCHEMA, policy=policy, k=k, nkt=nkt, graph_seed=graph_seed,
-                     layout_seed=layout_seed if policy not in ("FP-mag", "TopK") else None, rng=RNG,
+                     layout_seed=layout_seed if policy not in ("FP-mag", "TopK", "Cover-TopK") else None, rng=RNG,
                      H=int(nv.sum()), W0=64 * int(nv.sum()), enabled_slots=sup.enabled_slots(),
                      rho_mask=k / 64, valid_groups=len(uv), partial_groups=int(((nv > 0) & (nv < 16)).sum()),
                      records=geo["records"], Q=geo["Q"], Q_total=geo["Q"], sets_occupied=geo["sets_occupied"],
@@ -378,6 +508,26 @@ def build(policy: str, k: int, L, buckets: torch.Tensor, w=None, graph_seed: int
                      support_fingerprint=sup.fingerprint(), **extra)
     sup.stats.update(balance(sup, geo))
     return sup
+
+
+@torch.no_grad()
+def record_cover(sup: "LocalSupport", L, buckets, w=None, *, Q: int) -> dict:
+    """Per original record: the number of its S local inputs retained by at least one valid row group (MASK
+    coverage), and with w the number that also carry a nonzero weight in at least one valid neuron of a group
+    retaining it (NUMERICAL coverage: an enabled zero weight creates no input dependence).  [records] int64 each."""
+    geo = geometry(L, buckets.cpu(), "cpu", Q=Q)
+    uv, rec = geo["uv"], geo["rec"]
+    gm = sup.group_mask().cpu()[uv]
+    S = gm.shape[1]
+    mask = torch.zeros((geo["records"], S), dtype=torch.int64).index_add_(0, rec, gm.to(torch.int64)) > 0
+    out = dict(mask=mask.sum(1), groups=geo["groups_per_record"])
+    if w is not None:
+        n16 = sup.nv.numel()
+        valid = L.valid_mask(w.device).reshape(n16, 16)
+        nz = ((w.reshape(n16, 16, S) != 0) & valid[:, :, None]).any(1).cpu()[uv] & gm
+        num = torch.zeros((geo["records"], S), dtype=torch.int64).index_add_(0, rec, nz.to(torch.int64)) > 0
+        out["numerical"] = num.sum(1)
+    return out
 
 
 def balance(sup: LocalSupport, geo: dict) -> dict:
