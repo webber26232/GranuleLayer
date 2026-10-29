@@ -298,6 +298,8 @@ def main():
     curve, evals = [], []
     step0 = WARMUP + REG
     small_params = list(proj.parameters()) + list(head.parameters())
+    small0 = {f"{m}.{n}": p.detach().clone() for m, mod in (("proj", proj), ("head", head))
+              for n, p in mod.named_parameters()}
     for i in range(a.steps):
         x0 = batch(10_000 + step0 + i + 1_000_000 * a.data_seed, dev)
         loss = forward_loss(lay, proj, head, x0, teacher(x0))
@@ -321,6 +323,18 @@ def main():
                                output_variance=layer_output_variance(lay, probes),
                                output_variance_e2e=layer_output_variance(lay, e2e_tokens()))
     res["support_after"] = support_monitor(lay, em, ms, valid)
+    with torch.no_grad():  # learned projection / head: how far the trainable small parameters moved
+        cur = {f"{m}.{n}": p.detach() for m, mod in (("proj", proj), ("head", head)) for n, p in mod.named_parameters()}
+        res["learned_small_parameters"] = {k: dict(norm_start=float(small0[k].float().norm()),
+                                                   norm_after=float(cur[k].float().norm()),
+                                                   relative_change=float((cur[k].float() - small0[k].float()).norm() /
+                                                                         small0[k].float().norm().clamp_min(1e-30)))
+                                           for k in cur}
+        e2e = e2e_tokens()
+        res["learned_small_parameters"]["layer_input_tokens"] = dict(
+            probe_rms=float(probes.pow(2).mean().sqrt()), e2e_rms=float(e2e.pow(2).mean().sqrt()),
+            relative_change_vs_probe=float((e2e - probes).norm() / probes.norm().clamp_min(1e-30)))
+    del small0
     res["nonzero_support_sha_after"] = nonzero_support_sha(lay, em)
     if mixed:
         res["anchors_after"] = RV.mixed_anchor_check(lay.layout, sel, lay.weight.detach())
