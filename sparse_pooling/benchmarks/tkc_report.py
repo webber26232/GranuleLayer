@@ -437,7 +437,7 @@ class Report:
                                        "terms without eligible neuron 2 / 3 / 4 (of 256 x 16)"], rows)
 
     def launches(self):
-        j = self.r.get("launch", "launch_counts_g0")
+        j = self.r.get("launch2", "launch_counts_g0") or self.r.get("launch", "launch_counts_g0")
         if j is None:
             return
         rows = [[k, f"{v['kernels_total']:.2f}", f"{sum(v['memset_memcpy'].values()):.2f}", v["backend_calls"]["fwd"],

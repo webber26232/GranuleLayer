@@ -45,7 +45,7 @@ for C, H, R in ((256, 8 * 300 + 5, 2), (128, 3003, 2), (64, 2999, 1)):
             base.bias.normal_(0, 0.2)
         L = base.layout
         for k in (16, 8):
-            for pol in LS.POLICIES:
+            for pol in (x for x in LS.POLICIES if x != "Cover-TopK"):  # Cover-TopK: the tkc workload (m k >= 64)
                 s = LS.build(pol, k, L, base.kg_buckets, w=base.weight.detach(), graph_seed=1, layout_seed=3,
                              device="cuda", Q=base.sg_feat.shape[0])
                 em = s.element_mask(L)

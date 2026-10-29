@@ -413,7 +413,8 @@ def build_policy_layer(args, conn, plan):
     """Layer of one width-preserving policy built from a saved pre-pruning checkpoint (outside every timed
     region).  args.factory: checkpoint, format (FORMATS), policy (width_masks.POLICIES; omitted for "dense",
     the unpruned control), density, score ("magnitude" | "random"), seed, tile (physical neuron tile).
-    A local support (local_supports.POLICIES: FP-mag, FP-balanced, RP-record, RP-row, BP-row) takes k (16 / 8) and
+    A local support (local_supports.POLICIES: FP-mag, FP-balanced, RP-record, RP-row, BP-row, WRS, TopK,
+    Cover-TopK) takes k (16 / 8) and
     layout_seed instead of density; its formats: "indexed" (kgen K = k, C = 16 with the explicit local records,
     kgx_onetile.lower_local), "dense_masked", and for the fixed-partition ones "tile" / "wide" (index-free).
 
