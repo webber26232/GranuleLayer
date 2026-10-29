@@ -44,6 +44,80 @@ import wps_cases as WC
 import wps_interaction as WI
 
 FINAL_SEEDS = tuple(range(59_000, 59_008))
+# versioned interaction-test protocols (``--test-protocol``): kwa59000 = the weighted-support study's reserved batches;
+# tkc69000 = the NEW reserved batches of the TopK16 / Cover-TopK round (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md 6.2)
+TEST_PROTOCOLS = dict(kwa59000=FINAL_SEEDS, tkc69000=tuple(range(69_000, 69_008)))
+
+
+@torch.no_grad()
+def missing_input_floor(lay, em, ids, rvalid, order, sig, terms) -> dict:
+    """Missing-input lower bound of the ORDER-1 outputs (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md section 6.1).
+
+    For order 1 the target is linear: t_g = gamma_g + sum_i beta[g, i] x_i with beta[g, i] = (number of valid terms of
+    g reading global input i) / (sigma_1 sqrt(n_g T)) (duplicate terms add) and gamma_g = -sqrt(n_g T) mu_1 / sigma_1
+    (n_g valid records; mu_1 / sigma_1 the code's Monte Carlo constants, wps_interaction.sigmas).  With independent unit
+    Gaussian inputs, ANY function of the inputs visible to output g (U_g: union over g's valid neurons of the enabled
+    global inputs) has MSE >= sum_{i not in U_g} beta[g, i]^2.  The evaluation divides by sum_t t^2, whose population
+    value is E[t_g^2] = sum_i beta^2 + gamma^2, so the nMSE floor is that ratio, averaged over the order-1 outputs as the
+    evaluation averages nMSE.  BF16 input quantization is NOT included (separate control)."""
+    L = lay.layout
+    dev = lay.weight.device
+    G, NB = L.groups, L.blocks_per_group
+    valid = L.valid_mask(dev)
+    m = torch.ones(L.weight_shape, dtype=torch.bool, device=dev) if em is None else em.bool()
+    loc_on = (m & valid[..., None]).any(2)  # [G, NB, 64] local inputs enabled in some valid neuron of the record
+    feat = lay.sg_feat.to(torch.int64)
+    b = lay.kg_buckets.to(torch.int64)
+    rb = torch.repeat_interleave(torch.arange(len(b), device=dev), b[:, 3])
+    kb = torch.arange(len(rb), device=dev) - torch.repeat_interleave(torch.cumsum(b[:, 3], 0) - b[:, 3], b[:, 3])
+    bq = torch.full((G * NB,), -1, dtype=torch.int64, device=dev)
+    bq[b[rb, 1] * NB + b[rb, 2] + kb] = b[rb, 0]
+    q = bq.view(G, NB)
+    seen = torch.zeros((G, L.input_dim), dtype=torch.bool, device=dev)
+    gi = torch.arange(G, device=dev)[:, None, None].expand(G, NB, 64)
+    on = loc_on & (q >= 0)[..., None]
+    seen[gi[on], feat[q.clamp_min(0)][on]] = True  # U_g in global ids
+    mu1, sd1 = sig[1][0], sig[1][1]
+    n_g = rvalid.sum(1).double()
+    beta = torch.zeros((G, L.input_dim), dtype=torch.float64, device=dev)
+    coef = (1.0 / (sd1 * (n_g * terms).clamp_min(1).sqrt()))
+    gj = torch.arange(G, device=dev)[:, None, None].expand(G, NB, terms)
+    vt = rvalid[:, :, None].expand(G, NB, terms)
+    beta.index_put_((gj[vt], ids[..., 0][vt]), coef[gj[vt]], accumulate=True)
+    gamma = -(n_g * terms).sqrt() * mu1 / sd1
+    miss = (beta ** 2 * (~seen)).sum(1)
+    floor = miss / ((beta ** 2).sum(1) + gamma ** 2)
+    o1 = order == 1
+    inputs_used = (beta != 0).sum(1)
+    inputs_missing = ((beta != 0) & ~seen).sum(1)
+    return dict(order1_mean_floor=float(floor[o1].mean()), order1_outputs=int(o1.sum()),
+                order1_outputs_with_missing=int((miss[o1] > 0).sum()), order1_floor_max=float(floor[o1].max()),
+                order1_target_inputs_per_output=float(inputs_used[o1].double().mean()),
+                order1_missing_target_inputs_per_output=float(inputs_missing[o1].double().mean()),
+                visible_features_per_output=dict(mean=float(seen.sum(1).double().mean()), min=int(seen.sum(1).min()),
+                                                 max=int(seen.sum(1).max())),
+                records_full_local_cover=int((loc_on.sum(2)[q >= 0] == 64).sum()), records=int((q >= 0).sum()),
+                mean_local_inputs_per_record=float(loc_on.sum(2)[q >= 0].double().mean()),
+                gamma_sq_over_e_t2_mean=float((gamma ** 2 / ((beta ** 2).sum(1) + gamma ** 2))[o1].mean()),
+                rule="sum_{i not in U_g} beta^2 / (sum beta^2 + gamma^2), averaged over order-1 outputs; MSE bound for "
+                     "any function of the visible inputs (independent N(0, 1) inputs); excludes BF16 quantization",
+                per_output_floor=floor[o1].tolist())
+
+
+@torch.no_grad()
+def bf16_target_control(ids, rvalid, order, sig, dev, seeds) -> dict:
+    """nMSE of the targets of the BF16-rounded inputs (what the layer reads) against the true targets: the error a
+    model exact on BF16 inputs would still make, per order."""
+    se = torch.zeros(WC.G, device=dev, dtype=torch.float64)
+    var = torch.zeros(WC.G, device=dev, dtype=torch.float64)
+    for s in seeds:
+        x = WI.xbatch(s, dev)
+        t = WI.targets(x, ids, rvalid, order, sig)
+        tb = WI.targets(x.bfloat16().float(), ids, rvalid, order, sig)
+        se += ((tb - t) ** 2).sum(0).double()
+        var += (t ** 2).sum(0).double()
+    nm = se / var
+    return {f"order{o}": float(nm[order == o].mean()) for o in (1, 2, 3, 4)}
 
 
 def main():
@@ -67,6 +141,7 @@ def main():
     ap.add_argument("--resume", default="", help="state file of a previous run (continuation, same protocol)")
     ap.add_argument("--floors", default="", help="json cache of exact additive floors")
     ap.add_argument("--final-test", action="store_true", help="evaluate the reserved final test once after training")
+    ap.add_argument("--test-protocol", default="kwa59000", choices=sorted(TEST_PROTOCOLS))
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     from sparse_pooling.experimental import l1 as L1
@@ -95,7 +170,7 @@ def main():
         if a.floors:
             Path(a.floors).write_text(json.dumps(floors, indent=1))
     floor = floors[key]
-    res = dict(schema="granule.rsn_interaction/1", support=a.support, graph_seed=a.graph_seed, terms=a.terms,
+    res = dict(schema="granule.rsn_interaction/2", support=a.support, graph_seed=a.graph_seed, terms=a.terms,
                hidden=a.hidden, C=RC.C, init_seed=a.init_seed, norm=a.norm, oracle=a.oracle or None,
                perturb=a.perturb, perturb_seed=a.perturb_seed if a.perturb else None, sr_seed=a.sr_seed,
                lr_layer=a.lr, lr_readout=a.lr_readout, steps=a.steps, M_train=WI.M_TRAIN, hash_seed=WI.HASH_SEED,
@@ -125,6 +200,8 @@ def main():
         elig[f"order{o}"] = dict(mean_neurons_per_term=float(cnt.mean()), terms_with_no_neuron=int((cnt == 0).sum()),
                                  terms=int(cnt.numel()))
     res["term_support_eligibility"] = elig
+    res["missing_input_floor"] = missing_input_floor(lay, em, ids, rvalid, order, sig, a.terms)
+    res["bf16_input_target_control"] = bf16_target_control(ids, rvalid, order, sig, dev, WI.HELD_SEEDS)
     a_g = torch.ones(WC.G, device=dev, requires_grad=True)
     c_g = torch.zeros(WC.G, device=dev, requires_grad=True)
     if a.oracle:
@@ -233,9 +310,13 @@ def main():
     res["history"] = hist
     res["final"] = hist[-1]
     if a.final_test:
-        if set(FINAL_SEEDS) & ({WI.TRAIN_SEED + i for i in range(a.steps)} | set(WI.HELD_SEEDS) | {WI.TRAIN_SEED - 1}):
-            raise SystemExit("final interaction-test seeds collide with train / held-out seeds")
-        res["final_test"] = dict(seeds=list(FINAL_SEEDS), **evaluate(seeds=FINAL_SEEDS))
+        fs = TEST_PROTOCOLS[a.test_protocol]
+        others = set().union(*(set(v) for k, v in TEST_PROTOCOLS.items() if k != a.test_protocol))
+        if set(fs) & ({WI.TRAIN_SEED + i for i in range(max(a.steps, 4000))} | set(WI.HELD_SEEDS) |
+                      {WI.TRAIN_SEED - 1} | others):
+            raise SystemExit("final interaction-test seeds collide with train / held-out / other test seeds")
+        res["final_test"] = dict(seeds=list(fs), protocol=a.test_protocol, evaluated_at_step=hist[-1]["step"],
+                                 **evaluate(seeds=fs))
     res["mask_preserved"] = (None if em is None else
                              bool(((lay.weight.detach() != 0) <= em.bool()).all()))
     res["wall_seconds"] = time.perf_counter() - t0

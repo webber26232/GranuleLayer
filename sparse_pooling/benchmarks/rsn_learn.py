@@ -53,27 +53,37 @@ from wps_learn import DIAG_TOKENS_SEEDS, N_SAMPLE_NEURONS, SAMPLE_NEURON_SEED, n
 
 PR_NEURONS, PR_SEED = 2048, 4243
 FINAL_TEST_SEEDS = tuple(range(19_000, 19_008))  # locked final test (weighted-support study)
+# versioned test protocols (``--test-protocol``): kwa19000 = the weighted-support study's locked test (examined in that
+# round, historical since); tkc29000 = the NEW locked test of the TopK16 / Cover-TopK round, reserved before its screen
+TEST_PROTOCOLS = dict(kwa19000=FINAL_TEST_SEEDS, tkc29000=tuple(range(29_000, 29_008)))
 
 
-def check_seed_collisions(data_seeds=range(0, 6), steps=256):
-    """The locked final-test seeds collide with no train / calibration / development / diagnostic seed."""
+def check_seed_collisions(data_seeds=range(0, 12), steps=256, protocol="kwa19000"):
+    """The locked final-test seeds collide with no train / calibration / development / diagnostic seed nor with any
+    OTHER protocol's test seeds."""
+    seeds = TEST_PROTOCOLS[protocol]
     used = set(range(8_000, 8_004)) | set(range(9_000, 9_004)) | set(DIAG_TOKENS_SEEDS)
     used |= set(range(10_000, 10_000 + WARMUP + REG + 32))  # checkpoint construction batches
     for d in data_seeds:
         used |= {10_000 + WARMUP + REG + i + 1_000_000 * d for i in range(steps)}
-    clash = used & set(FINAL_TEST_SEEDS)
+    for name, other in TEST_PROTOCOLS.items():
+        if name != protocol:
+            used |= set(other)
+    clash = used & set(seeds)
     if clash:
         raise SystemExit(f"final-test seeds collide with {sorted(clash)}")
-    return dict(final_test_seeds=list(FINAL_TEST_SEEDS), checked_against=len(used), collisions=0)
+    return dict(protocol=protocol, final_test_seeds=list(seeds), checked_against=len(used), collisions=0,
+                data_seeds_checked=list(data_seeds), steps_checked=steps)
 
 
 @torch.no_grad()
-def final_test(lay, proj, head, teacher, dev):
+def final_test(lay, proj, head, teacher, dev, protocol="kwa19000"):
     tot = 0.0
-    for s in FINAL_TEST_SEEDS:
+    seeds = TEST_PROTOCOLS[protocol]
+    for s in seeds:
         x0 = batch(s, dev)
         tot += float(forward_loss(lay, proj, head, x0, teacher(x0)))
-    return tot / len(FINAL_TEST_SEEDS)
+    return tot / len(seeds)
 
 
 @torch.no_grad()
@@ -177,6 +187,8 @@ def main():
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--eval-every", type=int, default=8)
     ap.add_argument("--final-test", action="store_true", help="evaluate the LOCKED final test once after training")
+    ap.add_argument("--test-protocol", default="kwa19000", choices=sorted(TEST_PROTOCOLS),
+                    help="which locked test set --final-test evaluates (recorded with the value)")
     ap.add_argument("--save-state", default="", help="directory for the final state")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -223,7 +235,8 @@ def main():
                              execution="dense masked (the compact formats' function)"),
                provenance=provenance(Path(common.__file__).resolve().parent.parent), hardware_state=hardware_state())
     if a.final_test:
-        res["final_test_protocol"] = dict(check_seed_collisions(), evaluated="once, after training",
+        res["final_test_protocol"] = dict(check_seed_collisions(steps=max(256, a.steps), protocol=a.test_protocol),
+                                          evaluated="once, after training",
                                           batch=512, teacher="the same fixed teacher")
     res["heldout_checkpoint"] = heldout(lay, proj, head, teacher, dev)
     res["dense_row_reference"] = dict(input_variance=_q(var_dense))
@@ -314,7 +327,8 @@ def main():
     if em is not None:
         res["mask_preserved"] = bool(((lay.weight.detach() != 0) <= em.bool()).all())
     if a.final_test:  # the locked test: once, after training, never inspected during selection
-        res["final_test"] = final_test(lay, proj, head, teacher, dev)
+        res["final_test"] = final_test(lay, proj, head, teacher, dev, a.test_protocol)
+        res["final_test_set"] = a.test_protocol
     if a.save_state:
         import hashlib
 
