@@ -1,0 +1,130 @@
+{
+ "schema": "granule.tkc_floor_check/1",
+ "init_seed": 20,
+ "terms": 16,
+ "batches": 64,
+ "tokens_per_batch": 512,
+ "mc_seeds": [
+  77000,
+  77063
+ ],
+ "provenance": {
+  "repo": "/home/evga/Projects/pamachine/GranuleLayer-tkc",
+  "commit": "2169f5f8710a06389d9ff5b78a7362efa4267792",
+  "branch": "topk16-cover-topk-confirmation",
+  "status_porcelain": [
+   " M sparse_pooling/benchmarks/rsn_interaction.py",
+   " M sparse_pooling/benchmarks/rsn_learn.py",
+   "?? sparse_pooling/benchmarks/tkc_floor_check.py"
+  ],
+  "changed_paths": [
+   {
+    "code": " M",
+    "path": "sparse_pooling/benchmarks/rsn_interaction.py",
+    "kind": "source"
+   },
+   {
+    "code": " M",
+    "path": "sparse_pooling/benchmarks/rsn_learn.py",
+    "kind": "source"
+   },
+   {
+    "code": "??",
+    "path": "sparse_pooling/benchmarks/tkc_floor_check.py",
+    "kind": "source"
+   }
+  ],
+  "source_dirty": true,
+  "generated_dirty": false,
+  "source_changed_tracked": [
+   "sparse_pooling/benchmarks/rsn_interaction.py",
+   "sparse_pooling/benchmarks/rsn_learn.py"
+  ],
+  "source_untracked": [
+   "sparse_pooling/benchmarks/tkc_floor_check.py"
+  ],
+  "source_diff": "diff --git a/sparse_pooling/benchmarks/rsn_interaction.py b/sparse_pooling/benchmarks/rsn_interaction.py\nindex 145e085..a677362 100644\n--- a/sparse_pooling/benchmarks/rsn_interaction.py\n+++ b/sparse_pooling/benchmarks/rsn_interaction.py\n@@ -44,6 +44,80 @@ import wps_cases as WC\n import wps_interaction as WI\n \n FINAL_SEEDS = tuple(range(59_000, 59_008))\n+# versioned interaction-test protocols (``--test-protocol``): kwa59000 = the weighted-support study's reserved batches;\n+# tkc69000 = the NEW reserved batches of the TopK16 / Cover-TopK round (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md 6.2)\n+TEST_PROTOCOLS = dict(kwa59000=FINAL_SEEDS, tkc69000=tuple(range(69_000, 69_008)))\n+\n+\n+@torch.no_grad()\n+def missing_input_floor(lay, em, ids, rvalid, order, sig, terms) -> dict:\n+    \"\"\"Missing-input lower bound of the ORDER-1 outputs (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md section 6.1).\n+\n+    For order 1 the target is linear: t_g = gamma_g + sum_i beta[g, i] x_i with beta[g, i] = (number of valid terms of\n+    g reading global input i) / (sigma_1 sqrt(n_g T)) (duplicate terms add) and gamma_g = -sqrt(n_g T) mu_1 / sigma_1\n+    (n_g valid records; mu_1 / sigma_1 the code's Monte Carlo constants, wps_interaction.sigmas).  With independent unit\n+    Gaussian inputs, ANY function of the inputs visible to output g (U_g: union over g's valid neurons of the enabled\n+    global inputs) has MSE >= sum_{i not in U_g} beta[g, i]^2.  The evaluation divides by sum_t t^2, whose population\n+    value is E[t_g^2] = sum_i beta^2 + gamma^2, so the nMSE floor is that ratio, averaged over the order-1 outputs as the\n+    evaluation averages nMSE.  BF16 input quantization is NOT included (separate control).\"\"\"\n+    L = lay.layout\n+    dev = lay.weight.device\n+    G, NB = L.groups, L.blocks_per_group\n+    valid = L.valid_mask(dev)\n+    m = torch.ones(L.weight_shape, dtype=torch.bool, device=dev) if em is None else em.bool()\n+    loc_on = (m & valid[..., None]).any(2)  # [G, NB, 64] local inputs enabled in some valid neuron of the record\n+    feat = lay.sg_feat.to(torch.int64)\n+    b = lay.kg_buckets.to(torch.int64)\n+    rb = torch.repeat_interleave(torch.arange(len(b), device=dev), b[:, 3])\n+    kb = torch.arange(len(rb), device=dev) - torch.repeat_interleave(torch.cumsum(b[:, 3], 0) - b[:, 3], b[:, 3])\n+    bq = torch.full((G * NB,), -1, dtype=torch.int64, device=dev)\n+    bq[b[rb, 1] * NB + b[rb, 2] + kb] = b[rb, 0]\n+    q = bq.view(G, NB)\n+    seen = torch.zeros((G, L.input_dim), dtype=torch.bool, device=dev)\n+    gi = torch.arange(G, device=dev)[:, None, None].expand(G, NB, 64)\n+    on = loc_on & (q >= 0)[..., None]\n+    seen[gi[on], feat[q.clamp_min(0)][on]] = True  # U_g in global ids\n+    mu1, sd1 = sig[1][0], sig[1][1]\n+    n_g = rvalid.sum(1).double()\n+    beta = torch.zeros((G, L.input_dim), dtype=torch.float64, device=dev)\n+    coef = (1.0 / (sd1 * (n_g * terms).clamp_min(1).sqrt()))\n+    gj = torch.arange(G, device=dev)[:, None, None].expand(G, NB, terms)\n+    vt = rvalid[:, :, None].expand(G, NB, terms)\n+    beta.index_put_((gj[vt], ids[..., 0][vt]), coef[gj[vt]], accumulate=True)\n+    gamma = -(n_g * terms).sqrt() * mu1 / sd1\n+    miss = (beta ** 2 * (~seen)).sum(1)\n+    floor = miss / ((beta ** 2).sum(1) + gamma ** 2)\n+    o1 = order == 1\n+    inputs_used = (beta != 0).sum(1)\n+    inputs_missing = ((beta != 0) & ~seen).sum(1)\n+    return dict(order1_mean_floor=float(floor[o1].mean()), order1_outputs=int(o1.sum()),\n+                order1_outputs_with_missing=int((miss[o1] > 0).sum()), order1_floor_max=float(floor[o1].max()),\n+                order1_target_inputs_per_output=float(inputs_used[o1].double().mean()),\n+                order1_missing_target_inputs_per_output=float(inputs_missing[o1].double().mean()),\n+                visible_features_per_output=dict(mean=float(seen.sum(1).double().mean()), min=int(seen.sum(1).min()),\n+                                                 max=int(seen.sum(1).max())),\n+                records_full_local_cover=int((loc_on.sum(2)[q >= 0] == 64).sum()), records=int((q >= 0).sum()),\n+                mean_local_inputs_per_record=float(loc_on.sum(2)[q >= 0].double().mean()),\n+                gamma_sq_over_e_t2_mean=float((gamma ** 2 / ((beta ** 2).sum(1) + gamma ** 2))[o1].mean()),\n+                rule=\"sum_{i not in U_g} beta^2 / (sum beta^2 + gamma^2), averaged over order-1 outputs; MSE bound for \"\n+                     \"any function of the visible inputs (independent N(0, 1) inputs); excludes BF16 quantization\",\n+                per_output_floor=floor[o1].tolist())\n+\n+\n+@torch.no_grad()\n+def bf16_target_control(ids, rvalid, order, sig, dev, seeds) -> dict:\n+    \"\"\"nMSE of the targets of the BF16-rounded inputs (what the layer reads) against the true targets: the error a\n+    model exact on BF16 inputs would still make, per order.\"\"\"\n+    se = torch.zeros(WC.G, device=dev, dtype=torch.float64)\n+    var = torch.zeros(WC.G, device=dev, dtype=torch.float64)\n+    for s in seeds:\n+        x = WI.xbatch(s, dev)\n+        t = WI.targets(x, ids, rvalid, order, sig)\n+        tb = WI.targets(x.bfloat16().float(), ids, rvalid, order, sig)\n+        se += ((tb - t) ** 2).sum(0).double()\n+        var += (t ** 2).sum(0).double()\n+    nm = se / var\n+    return {f\"order{o}\": float(nm[order == o].mean()) for o in (1, 2, 3, 4)}\n \n \n def main():\n@@ -67,6 +141,7 @@ def main():\n     ap.add_argument(\"--resume\", default=\"\", help=\"state file of a previous run (continuation, same protocol)\")\n     ap.add_argument(\"--floors\", default=\"\", help=\"json cache of exact additive floors\")\n     ap.add_argument(\"--final-test\", action=\"store_true\", help=\"evaluate the reserved final test once after training\")\n+    ap.add_argument(\"--test-protocol\", default=\"kwa59000\", choices=sorted(TEST_PROTOCOLS))\n     ap.add_argument(\"--out\", required=True)\n     a = ap.parse_args()\n     from sparse_pooling.experimental import l1 as L1\n@@ -95,7 +170,7 @@ def main():\n         if a.floors:\n             Path(a.floors).write_text(json.dumps(floors, indent=1))\n     floor = floors[key]\n-    res = dict(schema=\"granule.rsn_interaction/1\", support=a.support, graph_seed=a.graph_seed, terms=a.terms,\n+    res = dict(schema=\"granule.rsn_interaction/2\", support=a.support, graph_seed=a.graph_seed, terms=a.terms,\n                hidden=a.hidden, C=RC.C, init_seed=a.init_seed, norm=a.norm, oracle=a.oracle or None,\n                perturb=a.perturb, perturb_seed=a.perturb_seed if a.perturb else None, sr_seed=a.sr_seed,\n                lr_layer=a.lr, lr_readout=a.lr_readout, steps=a.steps, M_train=WI.M_TRAIN, hash_seed=WI.HASH_SEED,\n@@ -125,6 +200,8 @@ def main():\n         elig[f\"order{o}\"] = dict(mean_neurons_per_term=float(cnt.mean()), terms_with_no_neuron=int((cnt == 0).sum()),\n                                  terms=int(cnt.numel()))\n     res[\"term_support_eligibility\"] = elig\n+    res[\"missing_input_floor\"] = missing_input_floor(lay, em, ids, rvalid, order, sig, a.terms)\n+    res[\"bf16_input_target_control\"] = bf16_target_control(ids, rvalid, order, sig, dev, WI.HELD_SEEDS)\n     a_g = torch.ones(WC.G, device=dev, requires_grad=True)\n     c_g = torch.zeros(WC.G, device=dev, requires_grad=True)\n     if a.oracle:\n@@ -233,9 +310,13 @@ def main():\n     res[\"history\"] = hist\n     res[\"final\"] = hist[-1]\n     if a.final_test:\n-        if set(FINAL_SEEDS) & ({WI.TRAIN_SEED + i for i in range(a.steps)} | set(WI.HELD_SEEDS) | {WI.TRAIN_SEED - 1}):\n-            raise SystemExit(\"final interaction-test seeds collide with train / held-out seeds\")\n-        res[\"final_test\"] = dict(seeds=list(FINAL_SEEDS), **evaluate(seeds=FINAL_SEEDS))\n+        fs = TEST_PROTOCOLS[a.test_protocol]\n+        others = set().union(*(set(v) for k, v in TEST_PROTOCOLS.items() if k != a.test_protocol))\n+        if set(fs) & ({WI.TRAIN_SEED + i for i in range(max(a.steps, 4000))} | set(WI.HELD_SEEDS) |\n+                      {WI.TRAIN_SEED - 1} | others):\n+            raise SystemExit(\"final interaction-test seeds collide with train / held-out / other test seeds\")\n+        res[\"final_test\"] = dict(seeds=list(fs), protocol=a.test_protocol, evaluated_at_step=hist[-1][\"step\"],\n+                                 **evaluate(seeds=fs))\n     res[\"mask_preserved\"] = (None if em is None else\n                              bool(((lay.weight.detach() != 0) <= em.bool()).all()))\n     res[\"wall_seconds\"] = time.perf_counter() - t0\ndiff --git a/sparse_pooling/benchmarks/rsn_learn.py b/sparse_pooling/benchmarks/rsn_learn.py\nindex aaf0600..129566d 100644\n--- a/sparse_pooling/benchmarks/rsn_learn.py\n+++ b/sparse_pooling/benchmarks/rsn_learn.py\n@@ -53,27 +53,37 @@ from wps_learn import DIAG_TOKENS_SEEDS, N_SAMPLE_NEURONS, SAMPLE_NEURON_SEED, n\n \n PR_NEURONS, PR_SEED = 2048, 4243\n FINAL_TEST_SEEDS = tuple(range(19_000, 19_008))  # locked final test (weighted-support study)\n+# versioned test protocols (``--test-protocol``): kwa19000 = the weighted-support study's locked test (examined in that\n+# round, historical since); tkc29000 = the NEW locked test of the TopK16 / Cover-TopK round, reserved before its screen\n+TEST_PROTOCOLS = dict(kwa19000=FINAL_TEST_SEEDS, tkc29000=tuple(range(29_000, 29_008)))\n \n \n-def check_seed_collisions(data_seeds=range(0, 6), steps=256):\n-    \"\"\"The locked final-test seeds collide with no train / calibration / development / diagnostic seed.\"\"\"\n+def check_seed_collisions(data_seeds=range(0, 12), steps=256, protocol=\"kwa19000\"):\n+    \"\"\"The locked final-test seeds collide with no train / calibration / development / diagnostic seed nor with any\n+    OTHER protocol's test seeds.\"\"\"\n+    seeds = TEST_PROTOCOLS[protocol]\n     used = set(range(8_000, 8_004)) | set(range(9_000, 9_004)) | set(DIAG_TOKENS_SEEDS)\n     used |= set(range(10_000, 10_000 + WARMUP + REG + 32))  # checkpoint construction batches\n     for d in data_seeds:\n         used |= {10_000 + WARMUP + REG + i + 1_000_000 * d for i in range(steps)}\n-    clash = used & set(FINAL_TEST_SEEDS)\n+    for name, other in TEST_PROTOCOLS.items():\n+        if name != protocol:\n+            used |= set(other)\n+    clash = used & set(seeds)\n     if clash:\n         raise SystemExit(f\"final-test seeds collide with {sorted(clash)}\")\n-    return dict(final_test_seeds=list(FINAL_TEST_SEEDS), checked_against=len(used), collisions=0)\n+    return dict(protocol=protocol, final_test_seeds=list(seeds), checked_against=len(used), collisions=0,\n+                data_seeds_checked=list(data_seeds), steps_checked=steps)\n \n \n @torch.no_grad()\n-def final_test(lay, proj, head, teacher, dev):\n+def final_test(lay, proj, head, teacher, dev, protocol=\"kwa19000\"):\n     tot = 0.0\n-    for s in FINAL_TEST_SEEDS:\n+    seeds = TEST_PROTOCOLS[protocol]\n+    for s in seeds:\n         x0 = batch(s, dev)\n         tot += float(forward_loss(lay, proj, head, x0, teacher(x0)))\n-    return tot / len(FINAL_TEST_SEEDS)\n+    return tot / len(seeds)\n \n \n @torch.no_grad()\n@@ -177,6 +187,8 @@ def main():\n     ap.add_argument(\"--steps\", type=int, default=32)\n     ap.add_argument(\"--eval-every\", type=int, default=8)\n     ap.add_argument(\"--final-test\", action=\"store_true\", help=\"evaluate the LOCKED final test once after training\")\n+    ap.add_argument(\"--test-protocol\", default=\"kwa19000\", choices=sorted(TEST_PROTOCOLS),\n+                    help=\"which locked test set --final-test evaluates (recorded with the value)\")\n     ap.add_argument(\"--save-state\", default=\"\", help=\"directory for the final state\")\n     ap.add_argument(\"--out\", required=True)\n     a = ap.parse_args()\n@@ -223,7 +235,8 @@ def main():\n                              execution=\"dense masked (the compact formats' function)\"),\n                provenance=provenance(Path(common.__file__).resolve().parent.parent), hardware_state=hardware_state())\n     if a.final_test:\n-        res[\"final_test_protocol\"] = dict(check_seed_collisions(), evaluated=\"once, after training\",\n+        res[\"final_test_protocol\"] = dict(check_seed_collisions(steps=max(256, a.steps), protocol=a.test_protocol),\n+                                          evaluated=\"once, after training\",\n                                           batch=512, teacher=\"the same fixed teacher\")\n     res[\"heldout_checkpoint\"] = heldout(lay, proj, head, teacher, dev)\n     res[\"dense_row_reference\"] = dict(input_variance=_q(var_dense))\n@@ -314,7 +327,8 @@ def main():\n     if em is not None:\n         res[\"mask_preserved\"] = bool(((lay.weight.detach() != 0) <= em.bool()).all())\n     if a.final_test:  # the locked test: once, after training, never inspected during selection\n-        res[\"final_test\"] = final_test(lay, proj, head, teacher, dev)\n+        res[\"final_test\"] = final_test(lay, proj, head, teacher, dev, a.test_protocol)\n+        res[\"final_test_set\"] = a.test_protocol\n     if a.save_state:\n         import hashlib\n \n",
+  "source_tree_sha256": "9f49c83fca136f00421cbc8cb03709de7c2671f55c80d9991bbfaa9d45ae4a05",
+  "source_files": 248
+ },
+ "supports": {
+  "dense": {
+   "analytic": 0.0,
+   "monte_carlo": 7.753460410663234e-15,
+   "monte_carlo_batch_se": 5.51438300140714e-18,
+   "relative_difference": null,
+   "absolute_difference": 7.753460410663234e-15,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 0.0,
+   "outputs_with_missing": 0,
+   "mean_local_inputs_per_record": 64.0,
+   "support_fingerprint": null
+  },
+  "TopK/8": {
+   "analytic": 0.11232469465004206,
+   "monte_carlo": 0.11231696330694024,
+   "monte_carlo_batch_se": 0.00010091441178130921,
+   "relative_difference": -6.883030597954773e-05,
+   "absolute_difference": -7.731343101821664e-06,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 1.234375,
+   "outputs_with_missing": 188,
+   "mean_local_inputs_per_record": 56.5048828125,
+   "support_fingerprint": "c5d1032781f272666f1ee088d44431765a0dac70779f0630f098e93fcd51b3f6"
+  },
+  "Cover-TopK/8": {
+   "analytic": 0.0,
+   "monte_carlo": 7.753460410663234e-15,
+   "monte_carlo_batch_se": 5.51438300140714e-18,
+   "relative_difference": null,
+   "absolute_difference": 7.753460410663234e-15,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 0.0,
+   "outputs_with_missing": 0,
+   "mean_local_inputs_per_record": 64.0,
+   "support_fingerprint": "ac2d67147c79a2ebf15b52c400da1ee0fb3bc8a23616a32f9c34f99bda3ee8f8"
+  },
+  "BP-row/8#0": {
+   "analytic": 0.0,
+   "monte_carlo": 7.753460410663234e-15,
+   "monte_carlo_batch_se": 5.51438300140714e-18,
+   "relative_difference": null,
+   "absolute_difference": 7.753460410663234e-15,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 0.0,
+   "outputs_with_missing": 0,
+   "mean_local_inputs_per_record": 64.0,
+   "support_fingerprint": "5b62c587eeb826614b080aa7452cc732d781e6c8001a024427a0146a99c32a0d"
+  },
+  "TopK/16": {
+   "analytic": 0.009443625178785452,
+   "monte_carlo": 0.009492434421531245,
+   "monte_carlo_batch_se": 2.6574876929139567e-05,
+   "relative_difference": 0.005168485811512263,
+   "absolute_difference": 4.880924274579257e-05,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 0.09765625,
+   "outputs_with_missing": 24,
+   "mean_local_inputs_per_record": 63.3916015625,
+   "support_fingerprint": "0d83ac9d83d85460574103c8f1a7c2a19971023e4fd7fa155281367c5d252efb"
+  },
+  "Cover-TopK/16": {
+   "analytic": 0.0,
+   "monte_carlo": 7.753460410663234e-15,
+   "monte_carlo_batch_se": 5.51438300140714e-18,
+   "relative_difference": null,
+   "absolute_difference": 7.753460410663234e-15,
+   "full_visibility_max_residual_sse": 1.740279267473422e-11,
+   "missing_target_inputs_per_output": 0.0,
+   "outputs_with_missing": 0,
+   "mean_local_inputs_per_record": 64.0,
+   "support_fingerprint": "4e86644e642cfe8a4e3f63544f8be83894d4a3da8063f43941896f1e97943a29"
+  }
+ },
+ "bf16_input_target_control": {
+  "order1": 2.772506982183435e-06,
+  "order2": 8.20306733528e-06,
+  "order3": 6.319520367693426e-06,
+  "order4": 5.519129857461038e-06
+ }
+}

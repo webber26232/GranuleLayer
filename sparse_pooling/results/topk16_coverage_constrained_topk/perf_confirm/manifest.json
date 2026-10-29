@@ -1,0 +1,167 @@
+{
+ "schema": "granule.tkc_manifest/1",
+ "model": {
+  "D": 1024,
+  "G": 1024,
+  "K_envelope": 64,
+  "C_envelope": 256,
+  "S": 64,
+  "R": 256,
+  "Q_total": 4096,
+  "H": 12500000,
+  "W0": 800000000,
+  "M": 8192,
+  "pooling": "Mean(ReLU)",
+  "numerics": "BF16 inputs / parameters / moments, FP32 accumulation / main_grad, split dZ, optimizer race fix, stochastic rounding on",
+  "optimizer": "L1AdamW lr 1e-4, no L1, wd 0"
+ },
+ "budgets": {
+  "k8": {
+   "slots": 100000000,
+   "rho": 0.125
+  },
+  "k16": {
+   "slots": 200000000,
+   "rho": 0.25
+  },
+  "biases": 12500000,
+  "pooling_denominator": "original n_g"
+ },
+ "cover_constraint": "per original record: every valid row group keeps exactly k distinct local inputs; every one of the 64 local inputs is kept by >= 1 valid group; infeasible iff m k < 64",
+ "bounds": {
+  "per_output_records_max": 763,
+  "per_output_union_k8": {
+   "t2": 0.04078842864125122,
+   "t3": 0.00023946239906801108,
+   "t4": 1.1726855977865382e-06
+  },
+  "per_output_union_k16": {
+   "t2": 0.1748075513196481,
+   "t3": 0.0023946239906801107,
+   "t4": 3.0489825542449992e-05
+  }
+ },
+ "seeds": {
+  "graph": [
+   0,
+   1,
+   2
+  ],
+  "bp_layout": [
+   0,
+   1
+  ],
+  "development": [
+   0,
+   1,
+   2
+  ],
+  "final": [
+   6,
+   7,
+   8,
+   9,
+   10,
+   11
+  ],
+  "graph_check": 6,
+  "development_validation_batches": [
+   9000,
+   9001,
+   9002,
+   9003
+  ],
+  "final_test": {
+   "protocol": "tkc29000",
+   "batches": [
+    29000,
+    29001,
+    29002,
+    29003,
+    29004,
+    29005,
+    29006,
+    29007
+   ]
+  },
+  "historical_test": {
+   "protocol": "kwa19000",
+   "batches": [
+    19000,
+    19001,
+    19002,
+    19003,
+    19004,
+    19005,
+    19006,
+    19007
+   ],
+   "status": "examined in the weighted-support round: historical evidence, not a locked test here"
+  },
+  "interaction": {
+   "init_sr": [
+    [
+     20,
+     0
+    ],
+    [
+     21,
+     1
+    ],
+    [
+     22,
+     2
+    ]
+   ],
+   "development_batches": [
+    49000,
+    49001,
+    49002,
+    49003
+   ],
+   "final_test": {
+    "protocol": "tkc69000",
+    "batches": [
+     69000,
+     69001,
+     69002,
+     69003,
+     69004,
+     69005,
+     69006,
+     69007
+    ]
+   }
+  }
+ },
+ "checkpoints": {
+  "C256_g0": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_step128.pt",
+  "C256_g1": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_g1_step128.pt",
+  "C256_g2": "/home/evga/Projects/pamachine/k64l1_ckpt/C256_R256_prox_a0_g2_step128.pt"
+ },
+ "primary_comparisons": [
+  [
+   "TopK/16",
+   "U16@0.25"
+  ],
+  [
+   "Cover-TopK/8",
+   "TopK/8"
+  ],
+  [
+   "Cover-TopK/16",
+   "TopK/16"
+  ]
+ ],
+ "decision_rule": {
+  "margin": 0.003,
+  "family_alpha": 0.05,
+  "family_size": 3,
+  "upper": "mean(delta) + t_{1 - alpha / 3, df 5} sd(delta) / sqrt(6) (one-sided, Bonferroni over the 3 primary comparisons)",
+  "noninferior": "upper < margin",
+  "improvement": "upper < 0",
+  "otherwise": "inconclusive (never 'equal' or 'inferior')",
+  "descriptive": "pointwise two-sided 95 % paired t intervals, labelled descriptive"
+ },
+ "spec_grammar": "Cases of the TopK/16 confirmation / coverage-constrained TopK round (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md):\nfixed workload, seeds, test protocols, bounds, preregistered comparisons and the machine-readable manifest\n(``manifest()``, no GPU; written before any job).\n\nSupport specs are rsn_cases specs: ``TopK/k``, ``Cover-TopK/k`` (k 8 / 16; deterministic, no layout seed),\n``BP-row/8#ls``, ``BP-row#ls`` (K16), ``U8@0.125``, ``U16@0.25``, ``A8@0.25``, ``Mix-TopK#0`` (structural / performance\nreference and a member of the new cohort), ``dense``.  Seeds: graph seed (envelope graph + its alpha-0 checkpoint),\nlayout seed (BP only), data / stochastic-rounding seed of each fine-tuning run, init / SR seeds of the reduced task.\n"
+}

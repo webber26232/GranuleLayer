@@ -90,7 +90,8 @@ support (missing-input) effect; backend efficiency is unchanged (no kernel work)
   kgen K8 / K16, C16 path (`kgx_onetile.lower_local`). Production defaults and auto-dispatch are untouched.
 * **Frozen checkouts:** `../GranuleLayer-tkc-meas1` @ `637b97c` (only the first, superseded stage-1 construct
   jobs), `../GranuleLayer-tkc-run` @ `fcf6925` (every timing / coverage / learning / interaction job) and
-  `../GranuleLayer-tkc-final` @ `9687196` (launch counts v2, sanitizer, runner tests, full suite). Source-clean
+  `../GranuleLayer-tkc-final` @ `9687196` (launch counts v2, first sanitizer pass, runner tests, first full suite) and
+  `../GranuleLayer-tkc-final2` @ `e406ae1` (final code: sanitizer and full suite of record, stage 4). Source-clean
   (`provenance.source_dirty = False` in every record). One library build per bundle across all timing records:
   production `e55eb569423be99b2776`, kgen `023754cd60595afae7e9`, kgx (wide / tile kernels)
   `c400495d8202e34be70f`. Raw results root `../tkc_runs` (outside git).
@@ -573,9 +574,21 @@ session / the new test); a point is listed as dominated only if another is at le
   TrainState restore / canonical identity.
 * Targeted existing regressions: `test_local_supports.py`, `test_weighted_mixed_supports.py`,
   `test_row_normalize_oracle.py` (66 with the new file, all pass).
-* Compute Sanitizer: SANITIZER_RESULT.
-* Runner tests: RUNNER_RESULT.
-* Full suite (final code): SUITE_RESULT.
+* Compute Sanitizer (final code `e406ae1`, stage 4, `run_sanitizer.sh --jobs 5`, compute-sanitizer 2023.1.0):
+  **12 / 12 PASS** — workloads tkc (TopK / Cover-TopK K8 / K16 forward + backward + optimizer), rsn and kgen, each
+  under memcheck, racecheck, initcheck and synccheck; 0 errors, 0 hazards (`sanitizer/summary.tsv`).
+  * First pass at `9687196` (`sanitizer_first_9687196/`): tkc and kgen 8 / 8 PASS, rsn 4 / 4 FAIL. Not a device
+    error: `sanitize_rsn_workload.py` looped over every `LS.POLICIES` entry, and Cover-TopK correctly rejects the
+    rsn geometry (`ValueError: Cover-TopK infeasible: record 1 has 3 valid groups and k = 16 (m k = 48 < 64)`).
+    `e406ae1` excludes Cover-TopK from the rsn loop; it is exercised by the tkc workload.
+  * A first stage-4 attempt at `e406ae1` (`stage4_aborted_e406ae1/`) was killed with its launching session
+    ~3 min in (header-only logs, no device result); it was rerun unchanged as a detached `systemd-run` service.
+* Runner tests (`tests/test_sanitizer_runner.py`, at `9687196`): 25 / 25 passed in each of 8 runs — SIGINT
+  default x3 (`runner_dfl_*.txt`), SIGINT ignored by inheritance x3 (`runner_ign_*.txt`), and under full CPU load
+  x2 (`runner_load_*.txt`).
+* Full suite (final code `e406ae1`, stage 4): **3209 passed, 32 skipped, 0 failed** in 448 s (`full_suite.txt`).
+  The first suite at `9687196` gave the same counts (`full_suite_9687196.txt`), i.e. the previous round's SIGINT
+  failure (§2.3) does not recur.
 
 ## 11. Evidence layout and reproduction
 
@@ -587,9 +600,9 @@ session / the new test); a point is listed as dominated only if another is at le
 * Per stage, every job's JSON + log + `plan.json` / `manifest.json` / `status.jsonl`: `construct/`,
   `construct_quiet/`, `perf_screen/`, `perf_confirm/`, `coverage/` (+ `*.joint.npz`), `errata_cov/`, `dev32/`,
   `dev256/`, `final/`, `graph_checks/`, `interaction/`, `interaction_cont/`, `launch/` (failed v1), `launch2/`,
-  `sanitizer/`, runner / suite outputs.
+  `sanitizer/` (stage 4, of record), `sanitizer_first_9687196/`, `stage4_aborted_e406ae1/`, runner / suite outputs.
 * `runner_sigint/` — stress / trace harnesses, per-trial JSONL, summary, xtrace logs, the deterministic reproduction.
-* `final_states.sha256`, `interaction_states.sha256`; the states (86 GB / 1.5 GB) stay under `../tkc_runs/*/state`.
+* `final_states.sha256`, `interaction_states.sha256`; the states (86 GB final / 1.5 + 1.5 GB interaction, interaction_cont) stay under `../tkc_runs/*/state`.
 
 Reproduce (from `sparse_pooling/benchmarks` of the frozen checkout, `GRANULE_RESULTS_ROOT` set, the env_isaaclab
 python): `bash stage1.sh`, `bash stage2.sh`, `bash stage3.sh` (they call `tkc_jobs.py <stage> --out <stage>

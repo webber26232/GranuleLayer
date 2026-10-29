@@ -1,0 +1,224 @@
+{
+ "schema": "granule.tkc_selection_rules/1",
+ "written": "2026-10-29T10:15:04",
+ "written_before": [
+  "any development learning run of this round (dev32 / dev256)",
+  "any final-test (tkc29000) or interaction-test (tkc69000) evaluation",
+  "any timing or coverage run of Cover-TopK"
+ ],
+ "already_seen_before_writing": [
+  "support construction statistics of Cover-TopK / TopK at graph 0 (energy, swaps, repair cost) and the exact-optimum record sample (pilot_g0.json)",
+  "the analytic / Monte Carlo missing-input floor of the reduced task at init seed 20 (no training)",
+  "the previous round's development and locked-test (19000..19007) values (historical)"
+ ],
+ "continuity": {
+  "rule": "dev32: TopK/8 and TopK/16, none and energy, data / SR seed 0, graph 0, at this round's code; reuse the previous round's 256-update development records of TopK/8 (w8_dev) and TopK/16 (m25_dev) iff every |heldout_final(new) - heldout_final(previous)| <= 1e-3 and the enabled-mask sha256 is identical; otherwise rerun TopK/8 / TopK/16 at 256 updates x seeds 0/1/2 x none/energy into dev256_topk"
+ },
+ "treatment_choice": {
+  "rule": "per policy (Cover-TopK/8, Cover-TopK/16, TopK/8, TopK/16): mean held-out (validation batches 9000..9003) after 256 updates over development data / SR seeds 0/1/2 at graph 0; energy (one-time row-energy restoration, cap s_max 8, the existing epsilon rule) iff mean(energy) < mean(none) - 1e-4, else none",
+  "development_only": true
+ },
+ "fixed_treatments": {
+  "BP-row/8#0": "energy",
+  "U8@0.125": "energy",
+  "BP-row#0": "energy",
+  "U16@0.25": "energy",
+  "A8@0.25": "none",
+  "Mix-TopK#0": "energy",
+  "dense": "none"
+ },
+ "fixed_treatment_sources": {
+  "note": "development selections of the previous rounds (verified records in results/weighted_random_supports_anchors: k8_graph_selection.json bp_norm / u8_norm, parent_treatments.json, m25_final_selection.json); not reopened"
+ },
+ "final_confirmation": {
+  "methods": [
+   "TopK/8",
+   "Cover-TopK/8",
+   "BP-row/8#0",
+   "U8@0.125",
+   "TopK/16",
+   "Cover-TopK/16",
+   "BP-row#0",
+   "U16@0.25",
+   "A8@0.25",
+   "Mix-TopK#0",
+   "dense"
+  ],
+  "graph": 0,
+  "bp_layout": 0,
+  "data_sr_seeds": [
+   6,
+   7,
+   8,
+   9,
+   10,
+   11
+  ],
+  "updates": 256,
+  "test_protocol": "tkc29000",
+  "test_batches": [
+   29000,
+   29001,
+   29002,
+   29003,
+   29004,
+   29005,
+   29006,
+   29007
+  ],
+  "M": 512,
+  "evaluation": "once after each completed run; final state + sha256 kept; no early stop, no retuning, all six seeds run"
+ },
+ "primary_comparisons": [
+  [
+   "TopK/16",
+   "U16@0.25"
+  ],
+  [
+   "Cover-TopK/8",
+   "TopK/8"
+  ],
+  [
+   "Cover-TopK/16",
+   "TopK/16"
+  ]
+ ],
+ "decision_rule": {
+  "delta": "paired per seed: loss(new) - loss(control) on the tkc29000 test",
+  "margin": 0.003,
+  "upper": "mean + t.ppf(1 - 0.05/3, df=5) * sd / sqrt(6)",
+  "noninferior": "upper < 0.003",
+  "improvement": "upper < 0",
+  "otherwise": "inconclusive",
+  "descriptive": "pointwise two-sided 95 % paired t intervals (labelled descriptive)"
+ },
+ "secondary_comparisons": [
+  [
+   "TopK/16",
+   "A8@0.25"
+  ],
+  [
+   "TopK/16",
+   "BP-row#0"
+  ],
+  [
+   "Cover-TopK/8",
+   "U8@0.125"
+  ],
+  [
+   "Cover-TopK/16",
+   "U16@0.25"
+  ],
+  [
+   "Cover-TopK/8",
+   "BP-row/8#0"
+  ],
+  [
+   "Mix-TopK#0",
+   "TopK/16"
+  ]
+ ],
+ "secondary_rule": "pointwise 95 % paired t intervals, labelled secondary / exploratory; no family-wise claim",
+ "graph_checks": {
+  "graphs": [
+   1,
+   2
+  ],
+  "data_sr_seed": 6,
+  "methods": [
+   "TopK/16",
+   "Cover-TopK/16",
+   "TopK/8",
+   "Cover-TopK/8",
+   "BP-row#0",
+   "BP-row#1",
+   "BP-row/8#0"
+  ],
+  "treatment": "the frozen final treatment of each policy (BP layout 1 = layout 0's)",
+  "test_protocol": "tkc29000",
+  "reporting": "separately; never pooled into the six-seed intervals"
+ },
+ "performance": {
+  "screen": "graph 0, 8 samples: TopK/8, Cover-TopK/8, TopK/16, Cover-TopK/16 indexed",
+  "confirmation": "graph 0/1/2 sessions, 24 samples, the 200M and 100M sets with same-session controls",
+  "profiling_gate": "at most one same-function profiling pass iff a Cover-TopK median complete step exceeds its same-session TopK median by > 5 % at either k (graph-mean of the confirmation)"
+ },
+ "coverage": {
+  "rule": "every exact timed support rerun at graph 0/1/2 (the corrected joint-query pass needs the per-query counts); historical exact values compared where the support fingerprints match"
+ },
+ "optional_solver_variant": {
+  "trigger": "(E_opt - E_repair) / E_opt >= 1 % at the median or >= 5 % at the 95th percentile of the stratified graph-0 record sample AND predicted full-model construction <= 10 min",
+  "pilot": {
+   "k8": {
+    "median": 0.000188,
+    "p95": 0.00177,
+    "predicted_seconds": 898
+   },
+   "k16": {
+    "median": 0.0,
+    "p95": 0.0,
+    "predicted_seconds": 765
+   },
+   "sample": "stratified (full / tail x unrepaired / loss quartiles), seed 20261029 + k"
+  },
+  "decision": "NOT triggered (gaps far below both thresholds; predicted MILP construction ~15 / 13 min > 10 min): no full-model solver variant is run"
+ },
+ "interaction": {
+  "task": "reduced raw-input diagnostic: D = G 1024, H 262,144, C256 / S64 / R256, one record per output, T16, hash 777, no projection, per-output affine readout",
+  "specs": [
+   "TopK/8",
+   "Cover-TopK/8",
+   "BP-row/8#0",
+   "TopK/16",
+   "Cover-TopK/16",
+   "BP-row#0",
+   "dense"
+  ],
+  "init_sr": [
+   [
+    20,
+    0
+   ],
+   [
+    21,
+    1
+   ],
+   [
+    22,
+    2
+   ]
+  ],
+  "lr_layer": 0.01,
+  "lr_readout": 0.01,
+  "updates": 1000,
+  "continued_to_4000": [
+   "TopK/8",
+   "Cover-TopK/8",
+   "BP-row/8#0"
+  ],
+  "norm": "none",
+  "init": "fresh K64 init scale, zero bias, the parent's readout calibration",
+  "development_batches": [
+   49000,
+   49001,
+   49002,
+   49003
+  ],
+  "test_protocol": "tkc69000",
+  "test_batches": [
+   69000,
+   69001,
+   69002,
+   69003,
+   69004,
+   69005,
+   69006,
+   69007
+  ],
+  "endpoints": [
+   1000,
+   4000
+  ],
+  "optional": "none run unless listed here"
+ }
+}
