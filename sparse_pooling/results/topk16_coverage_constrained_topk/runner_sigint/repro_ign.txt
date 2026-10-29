@@ -1,0 +1,52 @@
+F
+=================================== FAILURES ===================================
+_________ test_interrupt_terminates_children_and_exits_nonzero[2-130] __________
+
+env = {'env': {'SHELL': '/bin/bash', 'SESSION_MANAGER': 'local/broken-3090:@/tmp/.ICE-unix/2842,unix/broken-3090:/tmp/.ICE-u...chil0/pids'), 'fake': PosixPath('/tmp/pytest-of-evga/pytest-54/test_interrupt_terminates_chil0/bin/compute-sanitizer')}
+sig = <Signals.SIGINT: 2>, code = 130
+
+    @pytest.mark.parametrize("sig,code", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+    def test_interrupt_terminates_children_and_exits_nonzero(env, sig, code):
+        e = dict(env["env"], FAKE_SAN="*=sleep")
+        p = subprocess.Popen(["bash", str(RUNNER), "--jobs", "4", "--out", str(env["tmp"] / "out"), sys.executable,
+                              "det"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
+        try:
+            deadline = time.monotonic() + 30
+            while len([f for f in env["pids"].iterdir() if f.name.startswith("wl.")]) < 4:
+                assert time.monotonic() < deadline, "fake jobs did not start"
+                time.sleep(0.1)
+            p.send_signal(sig)
+>           _, err = p.communicate(timeout=30)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_sanitizer_runner.py:248: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/evga/.conda/envs/env_isaaclab/lib/python3.11/subprocess.py:1209: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/evga/.conda/envs/env_isaaclab/lib/python3.11/subprocess.py:2116: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: None args: ['bash', '/home/evga/Projects/pamachine/Granu...>
+endtime = 568751.15077353, orig_timeout = 30
+stdout_seq = [b'sanitizer: /tmp/pytest-of-evga/pytest-54/test_interrupt_terminates_chil0/bin/compute-sanitizer (Version 2023.1.0); logs: /tmp/pytest-of-evga/pytest-54/test_interrupt_terminates_chil0/out; jobs 4; timeout 14400s\n']
+stderr_seq = [], skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['bash', '/home/evga/Projects/pamachine/GranuleLayer-tkc/sparse_pooling/benchmarks/run_sanitizer.sh', '--jobs', '4', '--out', '/tmp/pytest-of-evga/pytest-54/test_interrupt_terminates_chil0/out', '/home/evga/.conda/envs/env_isaaclab/bin/python', 'det']' timed out after 30 seconds
+
+/home/evga/.conda/envs/env_isaaclab/lib/python3.11/subprocess.py:1253: TimeoutExpired
+=========================== short test summary info ============================
+FAILED tests/test_sanitizer_runner.py::test_interrupt_terminates_children_and_exits_nonzero[2-130]
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 22 deselected in 30.19s

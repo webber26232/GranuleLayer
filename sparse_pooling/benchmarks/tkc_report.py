@@ -173,18 +173,18 @@ class Report:
         for key in sorted(by):
             x = by[key][min(by[key])][0]
             pb = x["pb"]
-            idx = sum(v for k, v in pb.items() if k in ("indices", "graph_metadata", "work_lists_cached_last_runtime",
-                                                       "index_records_int16", "canonical_envelope_map_uint8",
-                                                       "buckets", "group_maps", "block_group_maps") or "map" in k)
+            core = ("weights", "bias", "main_grad", "adam_moments", "compact_values", "active_tiles", "indices")
+            meta = {k: v for k, v in pb.items() if k not in core and isinstance(v, (int, float))}
             mrows.append([key[0], key[1], f"{pb.get('weights', 0) / MiB:.1f}", f"{pb.get('bias', 0) / MiB:.1f}",
                           f"{pb.get('main_grad', 0) / MiB:.1f}", f"{pb.get('adam_moments', 0) / MiB:.1f}",
-                          "; ".join(f"{k} {v / MiB:.1f}" for k, v in pb.items() if k not in
-                                    ("weights", "bias", "main_grad", "adam_moments")),
+                          f"{sum(meta.values()) / MiB:.1f}",
+                          "; ".join(f"{k} {v / MiB:.2f}" for k, v in meta.items()) +
+                          (f"; format {pb['sparse_format']}" if "sparse_format" in pb else ""),
                           f"{x['scratch'] / MiB:.1f}", f"{x['peak'] / 2 ** 30:.2f}", f"{x['res'] / 2 ** 30:.2f}",
                           "" if x["first"] is None else f"{x['first']:.2f}",
                           "" if x["build"] is None else f"{x['build']:.1f}"])
         self.table(stage + "_memory", ["support", "format", "values MiB", "bias MiB", "main_grad MiB", "moments MiB",
-                                       "index / map / metadata / work-list MiB (charged)", "step scratch peak MiB",
+                                       "index / map / metadata / work lists MiB (total charged)", "components MiB", "step scratch peak MiB",
                                        "peak alloc GiB", "peak reserved GiB", "first step wall s", "build s (untimed)"],
                    mrows)
         return gm
@@ -440,8 +440,8 @@ class Report:
         j = self.r.get("launch", "launch_counts_g0")
         if j is None:
             return
-        rows = [[k, v["kernels_total"], sum(v["memset_memcpy"].values()), v["backend_calls"]["fwd"],
-                 v["backend_calls"]["bwd"], "; ".join(f"{n} x{c}" for n, c in list(v["kernels_by_name"].items())[:4])]
+        rows = [[k, f"{v['kernels_total']:.2f}", f"{sum(v['memset_memcpy'].values()):.2f}", v["backend_calls"]["fwd"],
+                 v["backend_calls"]["bwd"], "; ".join(f"{n.split('(')[0][-40:]} x{c:g}" for n, c in v["kernels_by_name"].items() if n.startswith(("void kg", "_l1", "void k")))]
                 for k, v in j["runs"].items()]
         self.h("GPU kernel launches per complete training step (profiler, graph 0, outside timing)")
         self.table("launches", ["support:format", "CUDA kernels", "memset / memcpy", "adapter fwd backend calls",

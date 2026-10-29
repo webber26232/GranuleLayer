@@ -1,6 +1,6 @@
 """Actual GPU kernel-launch totals of one complete training step (forward, backward, optimizer) per execution format
 (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md section 2.2): the SAME layer / optimizer factories as the timing runs
-(k64_factory:wide, k64_opt:l1, M 8192, split dZ, BF16), two warm-up steps, then one step under torch.profiler.
+(k64_factory:wide, k64_opt:l1, M 8192, split dZ, BF16), two warm-up steps, then STEPS steps under torch.profiler (per-step averages; user annotation ranges excluded).
 Counted: every CUDA kernel / memset / memcpy event of the step, grouped by name; separate from the adapter's backend
 calls (``last_info.launches_fwd / _bwd`` of the timing records).  Never used for timing (profiler overhead).
 
@@ -21,6 +21,8 @@ import kwa_jobs as KJ
 import rsn_cases as RC
 import wps_cases as WC
 
+STEPS = 4  # profiled steps (counts reported per step)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -33,7 +35,7 @@ def main():
     from sparse_pooling.supergroups import ConnectivityPlan
     from provenance import provenance
 
-    out = dict(schema="granule.tkc_launch_count/1", graph_seed=a.graph_seed, batch=WC.M,
+    out = dict(schema="granule.tkc_launch_count/2", profiled_steps=STEPS, graph_seed=a.graph_seed, batch=WC.M,
                provenance=provenance(Path(common.__file__).resolve().parent.parent), runs={})
     for item in a.specs.split(","):
         spec, fmt = item.rsplit(":", 1)
@@ -58,19 +60,24 @@ def main():
         from torch.profiler import ProfilerActivity, profile
 
         with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU]) as prof:
-            step()
+            for _ in range(STEPS):
+                step()
             torch.cuda.synchronize()
         kern, other = collections.Counter(), collections.Counter()
         for e in prof.events():
             if e.device_type == torch.autograd.DeviceType.CUDA:
                 n = e.name
+                if "#" in n or n.startswith("Optimizer."):  # user annotation ranges, not kernels
+                    continue
                 if n.lower().startswith(("memset", "memcpy")):
                     other[n.split(" ")[0]] += 1
                 else:
                     kern[n[:90]] += 1
+        per = lambda c: {k: v / STEPS for k, v in c.items()}  # noqa: E731
+        kern, other = per(kern), per(other)
         info = getattr(lay, "last_info", None) or {}
         out["runs"][f"{spec}:{fmt}"] = dict(kernels_total=sum(kern.values()), memset_memcpy=dict(other),
-                                            kernels_by_name=dict(kern.most_common()),
+                                            kernels_by_name=dict(sorted(kern.items(), key=lambda kv: -kv[1])),
                                             backend_calls=dict(fwd=info.get("launches_fwd"), bwd=info.get("launches_bwd")))
         print(f"{spec} {fmt}: {sum(kern.values())} kernels, {sum(other.values())} memset / memcpy", flush=True)
         del lay, opt, x, prof
