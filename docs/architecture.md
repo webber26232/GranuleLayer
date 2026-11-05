@@ -55,6 +55,22 @@ match reason, validation status), the reduction mode and its reason, and per pha
 tiles, warps, copies, chunk sizes, scatter, epilogues, staging, projection, shared memory and fallback
 reasons. The legacy `last_info` keys (`grouped_dx`, `dx_epilogue`, …) are unchanged.
 
+## The named Cover-TopK/16 path
+
+`sparse_pooling/cover_topk16.py` (`CoverTopK16Layer`, an opt-in layer next to `SparsePoolingLayer`) follows the same
+responsibilities:
+
+| Concern | Where |
+|---|---|
+| support policy, importance, cover repair (preprocessing, host or device tensors) | `experimental/local_supports.py` (`Cover-TopK`), `experimental/row_normalize.py` |
+| envelope graph and compact lowering | `experimental/kgen_graph.py`, `experimental/kgen_lowered.py` (K64 `Envelope` -> K16 / C16 records) |
+| execution, runtime caches | `experimental/kgen_layer.py`, `experimental/kgen_runtime.py`, bundle `kgen` |
+| K16 dX legality, precedence, reasons | `backends/dispatch.py` (`kgen_reason`, `kgen_dx_resolve`, `KgenDxDecision`), `backends/cuda/variants.py` (`kgen_k16_dx_smem`) |
+| K16 dX measured choice and scope | `backends/profiles/rtx3090.py` (`KGEN_DX_AUTO`), through `TuningProfile.kgen_dx_variant(KgenDxContext)`; `generic_cuda` and the base class answer "no measured entry" |
+
+The dX decision is made at call time, because the batch is part of its validated scope. `explain()` without a batch
+reports it as pending; `last_info["kgen_dx"]` records what ran.
+
 ## Native sources and bundles
 
 | Bundle | Units | Built |
@@ -62,6 +78,7 @@ reasons. The legacy `last_info` keys (`grouped_dx`, `dx_epilogue`, …) are unch
 | production | `abi.cu`, `sparse_pool.cu`, `fwd_*.cu`, `bwd_*.cu`, `sg_fwd_*`, `sg_dx_*`, `sg_dxs_c8_*` (sc 9 / 10), `sg_dw_*`, `sg_det.cu` | first CUDA call per target |
 | experimental | `experimental/`: other scatter layouts, owner variant, fused backward, compact dW projection, mask dW control | first explicit request |
 | diagnostics | `diagnostics/`: slab layout dumps, projection / ReLU-decision diagnostic | tests / tools only |
+| kgen | `abi.cu`, `experimental/kgen/`: generalized-fan-in kernels (K = 8 / 16 / 32 / 64), K16 dX tiling variants (`kgen_k16_dxv.cu`) | first `CoverTopK16Layer` / explicit `KgenLayer` call |
 
 Headers: `common.cuh` (activations, power, BF16 helpers) includes `isa_sm80.cuh` (mma, ldmatrix,
 movmatrix, cp.async; `#error` below sm_80) and `numerics.cuh` (FTZ compare / multiply, ex2). Kernel

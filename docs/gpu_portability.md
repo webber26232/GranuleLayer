@@ -106,6 +106,21 @@ unless stated otherwise.
 
 No support for A100, RTX 4090, H100 or Blackwell is claimed: compiling for them is not a validation.
 
+### Cover-TopK/16 K16 dX tiling (added with `CoverTopK16Layer`)
+
+| Device class | K16 dX under `dx_variant="auto"` | Status recorded |
+|---|---|---|
+| RTX 3090, validated scope (primary Cover-TopK/16 model, Mean(ReLU), split dZ, fast reduction, M in {64, 512, 8192}) | `mt4_nw8_wg4` | `hardware-validated` |
+| RTX 3090, anything outside that scope | legacy launch | `generic fallback`, with the first out-of-scope field |
+| RTX 3090 with `tuning_profile="generic_cuda"` / `SPARSE_POOL_PROFILE=generic_cuda` | legacy launch | `generic fallback` |
+| any other device | legacy launch (`generic_cuda` profile) | `generic fallback`; no RTX 3090 validation is borrowed |
+| any device, explicit `"mt<MT>_nw<NW>_wg<WG>"` | that tiling if compiled and within the device's shared-memory limit, otherwise `ValueError` | `explicit, unvalidated` (or `explicit, inside the validated scope`) |
+| `tuning_profile="rtx3090"` forced on another device, `"auto"` | the profile's tiling if legal | `user-forced-unvalidated` |
+
+The legacy launch at D 1024 / S 64 needs 74 KiB of opt-in shared memory, `mt4_nw8_wg4` 42 KiB. Numerics of the
+tilings are validated on the RTX 3090 only. `reduction="deterministic"` is rejected on this path: every kgen dX launch
+sums with FP32 atomics.
+
 ## 5. Build targets, overrides and the build cache
 
 Distribution is per-target JIT (`backends/cuda/build.py`): nothing is compiled at import; the first CUDA

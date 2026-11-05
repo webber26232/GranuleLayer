@@ -437,3 +437,15 @@ def test_cpu_only_import_and_host_construction(tmp_path):
     r = subprocess.run([sys.executable, "-c", CPU_SCRIPT], capture_output=True, text=True, env=env, cwd=tmp_path)
     assert r.returncode == 0 and "ok" in r.stdout, r.stdout + r.stderr
     assert not (tmp_path / "cache").exists()
+
+
+@requires_cuda_backend
+def test_documented_quickstart_runs(tmp_path):
+    doc = (ROOT / "docs" / "cover_topk16.md").read_text()
+    m = re.search(r"<!-- quickstart -->\s*```python\n(.*?)```", doc, re.S)
+    assert m, "quickstart block missing"
+    code = m.group(1).replace("cover_topk16_packed.pt", str(tmp_path / "q.pt"))
+    ns = {}
+    exec(compile(code, "quickstart", "exec"), ns)
+    assert ns["layer"].metadata["valid_slots"] == 16 * ns["H"]
+    assert "kgen_dx" in ns["layer"].last_info
