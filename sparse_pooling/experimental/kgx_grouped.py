@@ -1,5 +1,6 @@
 """EXPERIMENTAL grouped execution of a mixed fan-in local support (experimental/mixed_supports.py: K64 anchors,
-K16 and K8 row groups inside the C256 K64 envelope; weighted-support study,
+K16 and K8 row groups; experimental/mix32_supports.py: K32 / K16 / K8 -- the packs follow the support's DECLARED ordered
+class list ``sup.classes``, default (64, 16, 8), so the original Mix-* packing is reproduced unchanged inside the C256 K64 envelope; weighted-support study,
 results/WEIGHTED_RANDOM_SUPPORTS_ANCHORS.md section 5.2) on the EXISTING kgen kernels (bundle "kgen", K64 / K16 /
 K8 at C = 16; no new CUDA code).
 
@@ -216,7 +217,12 @@ class GroupedMixedLayer(nn.Module):
         self.register_buffer("kg_spec", dense.kg_spec)
         self.packs = []
         w_off = b_off = 0
-        for K in CLASSES:
+        classes = tuple(getattr(sup, "classes", CLASSES))
+        present = set(torch.unique(sup.kc.to(dev)[sup.nv.to(dev) > 0]).tolist())
+        if not present <= set(classes):
+            raise Unsupported(f"fan-in classes {sorted(present)} not in the declared ordered list {classes}")
+        self.classes = classes
+        for K in classes:  # declared order (the original Mix-* order (64, 16, 8) is unchanged)
             if not bool(((sup.kc.to(dev) == K) & (sup.nv.to(dev) > 0)).any()):
                 continue  # an entirely empty type is skipped
             pk = pack_type(dense, sup, K, w_off, b_off)

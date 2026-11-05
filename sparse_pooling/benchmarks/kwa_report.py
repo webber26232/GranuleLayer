@@ -40,6 +40,23 @@ class Root:
         f = (self.root / stage / f"{tag}.json") if stage else (self.root / f"{tag}.json")
         return json.loads(f.read_text()) if f.exists() else None
 
+    def records(self, stage, pred=None, schema_prefix=("granule.rsn_learn/", "granule.icdx_backend_train/")):
+        """Every learning record of a stage directory (any file name; plan / manifest / other schemas skipped), in
+        sorted file order, filtered by ``pred``: [(json, file name)].  Callers key them by their explicit fields
+        (paired_stats), so file order never decides a pairing."""
+        d = self.root / stage
+        out = []
+        for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+            try:
+                j = json.loads(f.read_text())
+            except ValueError:
+                continue
+            if not isinstance(j, dict) or not str(j.get("schema", "")).startswith(schema_prefix):
+                continue
+            if pred is None or pred(j):
+                out.append((j, f.name))
+        return out
+
     def status(self, stage):
         f = self.root / stage / "status.jsonl"
         return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []

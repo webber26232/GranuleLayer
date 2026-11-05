@@ -137,3 +137,97 @@ def flow_opt(a: np.ndarray, k: int, q_bits: int = Q_BITS) -> dict:
                 X[u, j[1]] = True
     return dict(solver=f"networkx {nx.__version__} network_simplex", q_bits=q_bits, scale=scale,
                 quantized_objective=int(-cost), X=X, feasible=feasible(X, k), energy=energy(a, X))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Balanced-TopK reference (results/INTERACTION_COVERAGE_K16_DX.md section 3.1): EQUALITY column quotas
+#     maximize sum a[u, j] X[u, j]  s.t.  sum_j X[u, j] = k,  sum_u X[u, j] = q_j,  X binary
+# (a transportation / b-matching problem: totally unimodular, so the LP optimum is integral up to tolerance).
+def quota_feasible(X: np.ndarray, k: int, q: np.ndarray) -> bool:
+    X = X.astype(np.int64)
+    return bool(((X == 0) | (X == 1)).all() and (X.sum(1) == k).all() and (X.sum(0) == np.asarray(q)).all())
+
+
+def quota_exhaustive(a: np.ndarray, k: int, q: np.ndarray):
+    """Brute force over all C(S, k)^m masks with exact column sums q (tiny cases only)."""
+    m, S = a.shape
+    q = np.asarray(q, dtype=np.int64)
+    if q.sum() != m * k:
+        return None, None
+    subs = list(itertools.combinations(range(S), k))
+    masks = np.zeros((len(subs), S), dtype=bool)
+    for i, c in enumerate(subs):
+        masks[i, list(c)] = True
+    best, bestX = None, None
+    for combo in itertools.product(range(len(subs)), repeat=m):
+        X = masks[list(combo)]
+        if (X.sum(0) == q).all():
+            e = energy(a, X)
+            if best is None or e > best:
+                best, bestX = e, X
+    return best, bestX
+
+
+def quota_milp_opt(a: np.ndarray, k: int, q: np.ndarray) -> dict:
+    import scipy
+    from scipy.optimize import Bounds, LinearConstraint, linprog, milp
+    from scipy.sparse import coo_matrix, vstack
+
+    m, S = a.shape
+    q = np.asarray(q, dtype=np.float64)
+    if q.sum() != m * k or (q > m).any() or (q < 0).any():
+        return dict(status="infeasible", reason="quotas do not sum to m k or exceed m", certified=False)
+    n = m * S
+    r = np.repeat(np.arange(m), S)
+    cidx = np.tile(np.arange(S), m)
+    Arow = coo_matrix((np.ones(n), (r, np.arange(n))), shape=(m, n))
+    Acol = coo_matrix((np.ones(n), (cidx, np.arange(n))), shape=(S, n))
+    A = vstack([Arow, Acol]).tocsr()
+    b = np.concatenate([np.full(m, k, dtype=np.float64), q])
+    c = -a.reshape(-1).astype(np.float64)
+    res = milp(c, constraints=LinearConstraint(A, b, b), integrality=np.ones(n), bounds=Bounds(0, 1),
+               options=dict(mip_rel_gap=0.0, presolve=True, disp=False))
+    out = dict(solver=f"scipy {scipy.__version__} milp (HiGHS)", options="mip_rel_gap 0, presolve on, default "
+               "feasibility tolerances (1e-7)", status=int(res.status), message=str(res.message))
+    lp = linprog(c, A_eq=A, b_eq=b, bounds=(0, 1), method="highs")
+    out["lp_upper_bound"] = float(-lp.fun) if lp.status == 0 else None
+    if res.status != 0 or res.x is None:
+        out["certified"] = False
+        return out
+    x = res.x.reshape(m, S)
+    X = np.rint(x)
+    out["max_integrality_violation"] = float(np.abs(x - X).max())
+    out["integral"] = out["max_integrality_violation"] <= 1e-9
+    out["feasible"] = quota_feasible(X, k, q.astype(np.int64))
+    out["X"] = X.astype(bool)
+    out["energy"] = energy(a, X)
+    out["solver_objective"] = float(-res.fun)
+    out["certified"] = bool(out["integral"] and out["feasible"])
+    return out
+
+
+def quota_flow_opt(a: np.ndarray, k: int, q: np.ndarray, q_bits: int = Q_BITS) -> dict:
+    """networkx network simplex on source -> u (k) -> j (cap 1, cost -a_q) -> sink (exactly q_j: node demands)."""
+    import networkx as nx
+
+    m, S = a.shape
+    q = np.asarray(q, dtype=np.int64)
+    amax = float(a.max())
+    scale = (2 ** q_bits) / amax if amax > 0 else 1.0
+    aq = np.rint(a * scale).astype(np.int64)
+    G = nx.DiGraph()
+    for u in range(m):
+        G.add_node(("u", u), demand=-k)
+    for j in range(S):
+        G.add_node(("j", j), demand=int(q[j]))
+    for u in range(m):
+        for j in range(S):
+            G.add_edge(("u", u), ("j", j), capacity=1, weight=-int(aq[u, j]))
+    cost, flow = nx.network_simplex(G)
+    X = np.zeros((m, S), dtype=bool)
+    for u in range(m):
+        for j, f in flow[("u", u)].items():
+            if f:
+                X[u, j[1]] = True
+    return dict(solver=f"networkx {nx.__version__} network_simplex", q_bits=q_bits, quantized_objective=int(-cost),
+                X=X, feasible=quota_feasible(X, k, q), energy=energy(a, X))

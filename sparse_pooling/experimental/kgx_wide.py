@@ -414,7 +414,7 @@ def build_policy_layer(args, conn, plan):
     region).  args.factory: checkpoint, format (FORMATS), policy (width_masks.POLICIES; omitted for "dense",
     the unpruned control), density, score ("magnitude" | "random"), seed, tile (physical neuron tile).
     A local support (local_supports.POLICIES: FP-mag, FP-balanced, RP-record, RP-row, BP-row, WRS, TopK,
-    Cover-TopK) takes k (16 / 8) and
+    Cover-TopK, Balanced-TopK) takes k (16 / 8) and
     layout_seed instead of density; its formats: "indexed" (kgen K = k, C = 16 with the explicit local records,
     kgx_onetile.lower_local), "dense_masked", and for the fixed-partition ones "tile" / "wide" (index-free).
 
@@ -455,8 +455,17 @@ def build_policy_layer(args, conn, plan):
 
     from . import mixed_supports as MX
 
+    from . import mix32_supports as M32
+
     sup = None
-    if f["policy"] in MX.POLICIES:  # a mixed K64 / K16 / K8 allocation (weighted-support study)
+    if f["policy"] in M32.POLICIES:  # K32 / K16 / K8 reallocation with coverage repair (interaction-coverage round)
+        sup = M32.build(f["policy"], int(f["p"]), L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=conn.seed,
+                        layout_seed=int(f.get("layout_seed", 0)), device="cuda", Q=lay.sg_feat.shape[0])
+        em = sup.element_mask(L)
+        ms = None
+        stats = dict(sup.stats)
+        stats.update(rho_mask=sup.enabled_slots() / (64 * L.hidden_dim))
+    elif f["policy"] in MX.POLICIES:  # a mixed K64 / K16 / K8 allocation (weighted-support study)
         sup = MX.build(f["policy"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=conn.seed,
                        layout_seed=int(f.get("layout_seed", 0)), device="cuda", Q=lay.sg_feat.shape[0],
                        L_cand=int(f.get("L", 1)))

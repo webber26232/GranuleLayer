@@ -249,7 +249,7 @@ def main():
         with torch.no_grad():
             lay.weight.mul_(em.to(lay.weight.dtype))
     ms = sel if hasattr(sel, "mandatory") else None
-    mixed = hasattr(sel, "kc")
+    mixed = hasattr(sel, "kc") and bool(sel.anchor.any())  # anchored mixed supports (Cover-Mix32 has no anchor)
     if mixed:
         import rsn_coverage as RV
 

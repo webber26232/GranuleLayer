@@ -306,7 +306,7 @@ def main():
         res["kind"] = a.support
         res["width"] = WV.width_stats(L, em, w)
         res["anchors"] = ((mixed_anchor_check(L, sup, w) if hasattr(sup, "kc") else WV.anchor_check(L, sup, w))
-                          if hasattr(sup, "anchor") else None)
+                          if hasattr(sup, "anchor") and bool(sup.anchor.any()) else None)
         dens = res["width"]["enabled_slots"] / WC.W0
         qn = KC64.N_QUAD_SPARSE if dens <= 0.10 else KC64.N_QUAD
         res["quad_sample_rule"] = f"{qn:,} (50M when the enabled density <= 0.10, else 10M; predeclared)"

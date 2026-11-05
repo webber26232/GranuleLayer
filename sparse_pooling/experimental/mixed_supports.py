@@ -58,6 +58,7 @@ class MixedSupport:
     anchor: torch.Tensor
     cand: torch.Tensor
     stats: dict = field(default_factory=dict)
+    classes: tuple = CLASSES  # declared ordered fan-in classes of the grouped packing (Cover-Mix32: (32, 16, 8))
     k = None  # mixed
 
     def group_mask(self) -> torch.Tensor:

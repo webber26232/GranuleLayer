@@ -40,6 +40,8 @@ def factory_of(spec: str, fmt: str, graph_seed: int) -> dict:
         f.update(policy=c["policy"], k=c["k"], layout_seed=c["layout_seed"], L=c["L"])
     elif c["kind"] == "mixed":
         f.update(policy=c["policy"], layout_seed=c["layout_seed"], L=c["L"])
+    elif c["kind"] == "mix32":
+        f.update(policy=c["policy"], p=c["p"], layout_seed=c["layout_seed"])
     return f
 
 

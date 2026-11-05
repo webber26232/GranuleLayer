@@ -330,43 +330,67 @@ class Report:
                                                          "rel. probe variance (start, median)", "PR (after)"], rows)
 
     def final(self):
+        """Keyed, fail-closed pairing (paired_stats): observations are indexed by (graph, data seed, SR seed, support
+        identity, treatment, protocol, steps, backend); a confirmatory verdict needs the declared seed set exactly once
+        on both sides (results/INTERACTION_COVERAGE_K16_DX.md section 2.1).  The previous zip pairing was correct for
+        the complete 66-record cohort; it would have mispaired a cohort with missing files."""
+        import paired_stats as PS
+
         f = self.r.root / "final_selection.json"
         if not f.exists():
             return
         sel = json.loads(f.read_text())
-        vals, dev = {}, {}
-        rows = []
+        declared = [(d, d) for d in sel["seeds"]]
+        cohorts, dev = {}, {}
+        rows, inv = [], []
         for spec, n in sel["methods"]:
-            v, dv, sh = [], [], []
-            for d in sel["seeds"]:
-                j = self.r.get("final", f"learn_{RC.spec_id(spec)}_g0_{n}_s256_d{d}_{TC.TEST_PROTOCOL}")
-                if j is None:
-                    continue
-                assert j.get("final_test_set") == TC.TEST_PROTOCOL
-                v.append(j["final_test"])
-                dv.append(j["heldout_final"])
+            c, cd = PS.Cohort(spec), PS.Cohort(spec + " (validation)")
+            sh = []
+            for j, src in self.r.records("final", lambda j: j.get("support") == spec and j.get("norm") == n):
+                k = PS.key_of_learn_record(j)
+                c.add(k, j["final_test"], src)
+                cd.add(k, j["heldout_final"], src)
                 sh.append((j.get("saved_state") or {}).get("sha256", "")[:12])
-            if not v:
+            if c.identity is not None and (c.identity[3] != TC.TEST_PROTOCOL or c.identity[0] != 0 or
+                                           c.identity[4] != 256):
+                raise PS.WrongIdentity(f"{spec}: cohort identity {c.identity}")
+            iv = PS.inventory(c, declared)
+            if not c.obs:
                 continue
-            vals[spec], dev[spec] = v, dv
+            cohorts[spec], dev[spec] = c, cd
+            v = [c.obs[s] for s in sorted(c.obs)]
+            dv = [cd.obs[s] for s in sorted(cd.obs)]
             rows.append([spec, n, len(v), " / ".join(f"{x:.4f}" for x in v), fmt_ci(v), fmt_ci(dv)])
+            if not iv["complete"]:
+                inv.append([spec, n, iv["missing"], iv["undeclared"]])
         if not rows:
             return
+        vals = {k: [c.obs[s] for s in sorted(c.obs)] for k, c in cohorts.items()}
         self.h(f"New locked test {TC.TEST_PROTOCOL} (batches 29,000-29,007; data / SR seeds 6..11; graph 0)")
         self.table("final_test", ["method", "treatment", "seeds", "test loss per seed (6..11)",
                                   "test mean ± pointwise 95 % CI", "validation (same runs) mean ± CI"], rows)
-        tcrit = tq(1 - TC.FAMILY_ALPHA / len(TC.PRIMARY), len(TC.FINAL_SEEDS) - 1)
+        if inv:
+            self.table("final_inventory_incomplete", ["method", "treatment", "missing seed keys",
+                                                      "undeclared seed keys"], inv)
+        fam = len(TC.PRIMARY)
+        tcrit = tq(1 - TC.FAMILY_ALPHA / fam, len(TC.FINAL_SEEDS) - 1)
         prow = []
+        empty = PS.Cohort("absent")
         for a, b in sel["primary"]:
-            if a not in vals or b not in vals or len(vals[a]) != len(vals[b]):
-                prow.append([f"{a} - {b}", "missing"] + [""] * 5)
+            r = PS.paired(cohorts.get(a, empty), cohorts.get(b, empty), declared, family_size=fam,
+                          alpha=TC.FAMILY_ALPHA, margin=sel["margin"])
+            if r["status"] != "complete":
+                ds = r.get("descriptive") or {}
+                prow.append([f"{a} - {b}", "INCOMPLETE: " + "; ".join(
+                    f"{side} missing {r['inventory'][side]['missing']} undeclared {r['inventory'][side]['undeclared']}"
+                    for side in ("a", "b") if not r["inventory"][side]["complete"]),
+                    "" if not ds else f"{ds['mean']:+.5f} (n {ds['n']}, descriptive)", "", "", "no verdict"])
                 continue
-            d = [x - y for x, y in zip(vals[a], vals[b])]
-            m, sd = statistics.mean(d), statistics.stdev(d)
-            up = m + tcrit * sd / math.sqrt(len(d))
+            d = [r["deltas"][f"{s[0]}/{s[1]}"] for s in declared]
+            m, up = r["mean"], r["upper"]
             _, h = ci(d)
-            verdict = ("improvement" if up < 0 else "noninferior (margin 0.003)" if up < sel["margin"] else
-                       "inconclusive")
+            verdict = {"improvement": "improvement", "noninferior": "noninferior (margin 0.003)",
+                       "inconclusive": "inconclusive"}[r["verdict"]]
             prow.append([f"{a} - {b}", " / ".join(f"{x:+.4f}" for x in d), f"{m:+.5f}", f"{up:+.5f}",
                          f"[{m - h:+.5f}, {m + h:+.5f}]", verdict])
         self.h("Primary preregistered decisions (Bonferroni over 3, one-sided)", 3)
@@ -376,12 +400,16 @@ class Report:
                                      "pointwise two-sided 95 % CI (descriptive)", "decision"], prow)
         srow = []
         for a, b in sel["secondary"]:
-            if a not in vals or b not in vals:
+            if a not in cohorts or b not in cohorts:
                 continue
-            d = [x - y for x, y in zip(vals[a], vals[b])]
+            r = PS.paired(cohorts[a], cohorts[b], declared, family_size=1, alpha=0.05, margin=sel["margin"])
+            d = list(r["deltas"].values())  # joined by seed key
+            if len(d) < 2:
+                continue
             m, h = ci(d)
-            srow.append([f"{a} - {b}", f"{m:+.5f}", f"[{m - h:+.5f}, {m + h:+.5f}]",
-                         "below 0" if m + h < 0 else "above 0" if m - h > 0 else "includes 0"])
+            lo, hi = m - h, m + h
+            srow.append([f"{a} - {b}" + ("" if r["status"] == "complete" else " (INCOMPLETE)"), f"{m:+.5f}",
+                         f"[{lo:+.5f}, {hi:+.5f}]", "below 0" if hi < 0 else "above 0" if lo > 0 else "includes 0"])
         if srow:
             self.h("Secondary / exploratory comparisons (pointwise 95 %, no family-wise claim)", 3)
             self.table("final_secondary", ["comparison", "mean", "pointwise 95 % CI", "interval"], srow)

@@ -11,7 +11,10 @@ Support spec strings (``support(spec, ...)``):
                                   BP-row, TopK, Cover-TopK), fan-in k (default 16), layout seed ls (default 0);
 * ``WRS/k:L[#ls]``                weighted random-subset selection with L candidates (weighted-support study);
 * ``Mix-BP[#ls]``, ``Mix-WRS:L[#ls]``, ``Mix-TopK[#ls]``
-                                  experimental/mixed_supports (K64 anchor / K16 / K8 allocation at rho 0.25).
+                                  experimental/mixed_supports (K64 anchor / K16 / K8 allocation at rho 0.25);
+* ``Balanced-TopK/16[#ls]``       Cover-TopK + per-record near-uniform column quotas (ls = quota-layout seed);
+* ``Cover-Mix32:p<p>[#ls]``       experimental/mix32_supports (p K32 + 2p K8 full groups per record, rest K16, then
+                                  the variable-degree coverage repair; ls = class-layout seed).
 
 Seeds are separate: ``graph_seed`` (the K64 envelope graph and its checkpoint), ``layout_seed`` (local subsets
 only), init / checkpoint seed, data seed and training (stochastic-rounding) seed of each driver.
@@ -27,7 +30,7 @@ import wps_cases as WC
 D, G, M, K, S, R, H = WC.D, WC.G, WC.M, WC.K, WC.S, WC.R, WC.H
 W0 = WC.W0
 C = 256
-LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK", "Cover-TopK")
+LOCAL = ("FP-mag", "FP-balanced", "RP-record", "RP-row", "BP-row", "WRS", "TopK", "Cover-TopK", "Balanced-TopK")
 MIXED = ("Mix-BP", "Mix-WRS", "Mix-TopK")
 RANDOMIZED = ("RP-record", "RP-row", "BP-row")
 SCREEN_LAYOUT_SEEDS = (0, 1, 2)
@@ -45,6 +48,11 @@ def parse(spec: str) -> dict:
         p, rho = spec.split("@")
         return dict(kind="width", policy=p, rho=float(rho), spec=spec)
     body, _, ls = spec.partition("#")
+    if body.startswith("Cover-Mix32"):
+        pol, _, pp = body.partition(":")
+        if pol != "Cover-Mix32" or not pp.startswith("p") or int(pp[1:]) not in (1, 2):
+            raise ValueError(f"support spec {spec!r}")
+        return dict(kind="mix32", policy=pol, p=int(pp[1:]), layout_seed=int(ls or 0), spec=spec)
     if body.startswith("Mix-"):
         p, _, Lc = body.partition(":")
         if p not in MIXED or (p == "Mix-WRS") != bool(Lc):
@@ -78,7 +86,12 @@ def support(spec: str, lay, graph_seed: int = 0):
         em = ms.element_mask(L)
         st = {k: v for k, v in ms.stats.items() if "hist" not in k}
         return em, ms, dict(c, rho_mask=ms.stats["rho_mask"], mask_sha256=SP.mask_fingerprint(em), mask_stats=st)
-    if c["kind"] == "mixed":
+    if c["kind"] == "mix32":
+        from sparse_pooling.experimental import mix32_supports as M32
+
+        sup = M32.build(c["policy"], c["p"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=graph_seed,
+                        layout_seed=c["layout_seed"], device=lay.weight.device, Q=lay.sg_feat.shape[0])
+    elif c["kind"] == "mixed":
         from sparse_pooling.experimental import mixed_supports as MX
 
         sup = MX.build(c["policy"], L, lay.kg_buckets, w=lay.weight.detach(), graph_seed=graph_seed,
