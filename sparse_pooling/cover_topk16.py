@@ -240,6 +240,21 @@ class CoverTopK16Layer(LoweredLocal):
     def normalization(self) -> dict:
         return self.cover_meta["normalization"]
 
+    def memory_report(self) -> dict:
+        """Unique-storage accounting of the layer's persistent tensors (+ cached work lists when built), bytes and
+        logical element counts in separate fields (sparse_pooling.memory_accounting)."""
+        from .memory_accounting import layer_storage
+
+        groups = dict(weights=[self.weight], bias=[self.bias],
+                      main_grad=[t for t in (getattr(self.weight, "main_grad", None),
+                                             getattr(self.bias, "main_grad", None)) if t is not None],
+                      metadata=[self.indices, self.env, self.sg_feat, self.kg_buckets, self.kg_spec, self.counts,
+                                self.counts_f])
+        if self._rt is not None:
+            sg = self._rt.sg
+            groups["metadata"] += [sg.items, sg.chunks, sg.tasks, sg.dw_chunks, sg.feat]  # sg.feat aliases sg_feat
+        return layer_storage(groups)
+
     def extra_repr(self):
         m = self.cover_meta
         e = m["envelope"]

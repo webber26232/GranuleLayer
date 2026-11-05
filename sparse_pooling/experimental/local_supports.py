@@ -412,10 +412,18 @@ def quota_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
     count therefore equals the initial total deficit (asserted).
 
     Execution: records in chunks; every round all unfinished records of the chunk apply their best swap with MASKED
-    updates (a finished record's update is a no-op), so a round has no data-dependent host branch; the set of unfinished
-    records is compacted and the stop condition read on the host only every ``check_every`` rounds (on a CUDA device
-    that read is a host / device synchronization: their number is returned as ``host_syncs``).
-    Returns env [n, k] sorted, per-record initial deficit / swaps / energy loss (FP64), rounds, host_syncs."""
+    updates (a finished record's update is a no-op), so a round has no data-dependent host BRANCH; the set of
+    unfinished records is compacted and the stop condition read on the host only every ``check_every`` rounds
+    (``polling_checks`` counts these explicit polls).
+
+    Synchronization (corrected accounting, integration review 5.2): on a CUDA device the polls are NOT the only host /
+    device synchronizations.  Every round also uses dynamic-length boolean indexing (``act[live]``, ``u[live]``,
+    ``d[live]``, ``j[live]``, ``best[live]``) and the compaction ``act[...]``, whose output sizes must be known on the
+    host, so each round synchronizes as well.  ``polling_checks`` is therefore a count of explicit check events, not
+    of all synchronizations; ``host_syncs`` is kept as a DEPRECATED alias of ``polling_checks`` for the historical
+    records (research branch interaction-coverage-k16-dx), where it carried the same number under a misleading name.
+    No synchronization-free claim is made; measured construction wall times include every synchronization.
+    Returns env [n, k] sorted, per-record initial deficit / swaps / energy loss (FP64), rounds, polling_checks."""
     n = env0.shape[0]
     dev = a_v.device
     gidx = record_groups(rec.to(dev), rank.to(dev), gpb)
@@ -430,7 +438,7 @@ def quota_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
     deficit0 = torch.zeros(nrec, dtype=torch.int64, device=dev)
     swaps = torch.zeros(nrec, dtype=torch.int64, device=dev)
     loss = torch.zeros(nrec, dtype=torch.float64, device=dev)
-    rounds = syncs = 0
+    rounds = polls = 0
     inf = torch.tensor(float("inf"), dtype=torch.float64, device=dev)
     coord = torch.arange(S, device=dev)
     for r0 in range(0, nrec, chunk_records):
@@ -452,7 +460,7 @@ def quota_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
         while True:
             if rr % check_every == 0:
                 act = act[((c[act] < Qc[act]).any(1))]
-                syncs += 1
+                polls += 1
                 if bool(stalled):
                     raise AssertionError("Balanced-TopK: a record with a deficit had no legal swap (feasibility violated)")
                 if act.numel() == 0:
@@ -486,7 +494,10 @@ def quota_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
         env[gg[valid]] = key.sort(2).values[:, :, :k][valid]
     if not torch.equal(swaps, deficit0):
         raise AssertionError("Balanced-TopK: swap count differs from the initial total deficit")
-    return dict(env=env, deficit0=deficit0, swaps=swaps, loss=loss, rounds=rounds, host_syncs=syncs,
+    return dict(env=env, deficit0=deficit0, swaps=swaps, loss=loss, rounds=rounds, polling_checks=polls,
+                host_syncs=polls,  # DEPRECATED alias of polling_checks (not a count of all synchronizations)
+                synchronization_note="per-round dynamic-length boolean indexing also synchronizes on CUDA; "
+                                     "polling_checks counts explicit stop-condition reads only",
                 groups_per_record=m, chunk_records=chunk_records, check_every=check_every,
                 working_buffer_bytes_estimate=min(chunk_records, max(nrec, 1)) * gpb * S * (8 + 8 + 8 + 1 + 1),
                 working_buffer_note="accounting ESTIMATE of the chunk buffers A, cost, Aa copy, X, masks; not every "
@@ -703,7 +714,9 @@ def build(policy: str, k: int, L, buckets: torch.Tensor, w=None, graph_seed: int
                              deficit0_full=_dist(r["deficit0"][full]),
                              deficit0_tail=_dist(r["deficit0"][~full]) if bool((~full).any()) else {},
                              records_repaired=int((r["swaps"] > 0).sum()), rounds=r["rounds"],
-                             host_syncs=r["host_syncs"], check_every=r["check_every"],
+                             polling_checks=r["polling_checks"],
+                             host_syncs=r["polling_checks"],  # DEPRECATED alias (historical records); not all syncs
+                             synchronization_note=r["synchronization_note"], check_every=r["check_every"],
                              energy_loss_total=float(r["loss"].sum()),
                              energy_loss_relative_to_cover_topk=float(r["loss"].sum() / tot_cov.sum())
                              if float(tot_cov.sum()) > 0 else 0.0,
