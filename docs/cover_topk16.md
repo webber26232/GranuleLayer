@@ -185,13 +185,13 @@ Full model, graph 0, with steady-state persistent tensors counted by unique stor
 | indices + envelope map + sets + buckets + work lists + denominators | 43.9 |
 
 An earlier research table reported 67.7 MiB of metadata for this layer (and 392.9 MiB for U16 wide). It double counted
-aliased storage and added a tile count as bytes. The corrected values are 43.87 / 10.65 MiB (`docs/evidence.md`,
-erratum).
+aliased storage and added a tile count as bytes. The corrected values are 43.87 / 10.65 MiB
+(`docs/validation/cover_topk16_rtx3090_dx.md`, section 9).
 
 One-time costs (graph 0, energy, RTX 3090):
-- support selection: 2.8 s;
-- normalization + lowering: 3.9 s;
-- `from_checkpoint` total: 18.9 s, including the checkpoint load and envelope graph generation;
+- support selection: 2.4 s;
+- normalization + lowering: 3.8 s;
+- `from_checkpoint` total: 16.7 s, including the checkpoint load and envelope graph generation;
 - `save_packed`: 0.5 s; `load_packed`: 0.4 s; packed file: 464 MB;
 - construction peak allocation: 6.7 GiB.
 
@@ -199,6 +199,9 @@ One-time costs (graph 0, energy, RTX 3090):
 
 See `docs/validation/cover_topk16_rtx3090_dx.md`. It holds the integration-head checks and the previous research
 evidence, pinned to commit `f4c538a` of `interaction-coverage-k16-dx` and kept separate from the new checks.
+
+Architecture and backend are recommended independently. Cover-TopK/16 is the accepted full-width sparse recipe; Balanced
+and Mix32 remain research comparisons, and U16 remains a quality / width tradeoff reference.
 
 Limitations:
 - Quality results come from synthetic fine-tuning / diagnostic tasks on one GPU. They are not downstream-accuracy
