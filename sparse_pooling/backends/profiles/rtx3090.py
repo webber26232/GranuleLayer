@@ -93,13 +93,26 @@ DW_INDEXED_STAGES = 2  # cp.async ring depth of the indexed k_dw (2 or 3)
 # which keep 8 warps x 4 work units (MEMORY_TRAFFIC_OPTIMIZATION.md)
 DW_CFG_INDEXED = {"mean": 3, "logmeanexp": 3, "power_mean": 1, "softmax_weighted": 1}
 DX_TARGET_CTAS = 4096  # k_dx grid: ~4096 CTAs, one dX flush per CTA
+# K16 dX tiling of the named Cover-TopK/16 layer (kgen bundle; sparse_pooling.cover_topk16).  One validated workload
+# family only: the primary 200M-slot Cover-TopK/16 model lowered from its K64 / C256 envelope (D = G = 1024,
+# H = 12.5M, S64 / R256, executed K16 / C16), Mean(ReLU), split dZ, fast (atomic) reduction, at the measured batches.
+# mt4_nw8_wg4 = 64 tokens / CTA, 256 threads, two FP32 slab copies shared by 4 warps each (42 KiB dynamic shared
+# memory at D 1024 / S 64 vs legacy 74 KiB: 2 CTAs / SM instead of 1).  Evidence: research commit f4c538a
+# (results/INTERACTION_COVERAGE_K16_DX.md section 6: complete layer step 801.3 -> 592.3 ms at M 8192, graphs 0 / 1 / 2;
+# M 512 0.750x; M 64 0.86x; identical-start compact training, 6 seeds) and the integration-head recheck
+# (docs/validation/cover_topk16_rtx3090_dx.md).  Anything outside this scope keeps the legacy launch.
+KGEN_DX_AUTO = (
+    dict(variant="mt4_nw8_wg4", D=1024, S=64, K=16, C=16, G=1024, H=12_500_000, R=256, envelope_K=64, envelope_C=256,
+         source="cover-topk16", act="relu", precision="split", reduction="fast", batches=(64, 512, 8192),
+         evidence="docs/validation/cover_topk16_rtx3090_dx.md"),
+)
 
 
 class Rtx3090Profile(TuningProfile):
     name = "rtx3090"
-    version = "2026.10.19"
+    version = "2026.11.05"
     description = ("Measured defaults of the RTX 3090 optimization campaign (c8-deterministic-reduction-"
-                   "dw-projection 2b9a84d)")
+                   "dw-projection 2b9a84d) + the Cover-TopK/16 K16 dX tiling (interaction-coverage-k16-dx f4c538a)")
     validation = Validation(numerics=("is_rtx3090",), performance=("is_rtx3090",),
                             evidence=("docs/evidence.md#rtx-3090-campaign",),
                             toolchain="nvcc 12.1.66, driver 550.67, PyTorch 2.7.0+cu128, Triton 3.3.0")
@@ -189,6 +202,21 @@ class Rtx3090Profile(TuningProfile):
 
     def dx_target_ctas(self):
         return DX_TARGET_CTAS
+
+    def kgen_dx_variant(self, ctx):
+        """The measured tiling iff the call lies inside a KGEN_DX_AUTO entry's validated scope (every field equal, the
+        batch one of the measured batches); otherwise None with the first mismatch as the reason."""
+        c = ctx.as_dict()
+        why = "no entry"
+        for e in KGEN_DX_AUTO:
+            bad = [f"{k} = {c[k]!r} (validated {e[k]!r})" for k in c if k != "batch" and k in e and c[k] != e[k]]
+            if not bad and ctx.batch not in e["batches"]:
+                bad = [f"batch M = {ctx.batch} (validated M in {e['batches']})"]
+            if not bad:
+                scope = {k: v for k, v in e.items() if k not in ("variant", "evidence")}
+                return e["variant"], f"profile {self.name} {self.version}: measured {e['variant']} ({e['evidence']})", scope
+            why = "outside the validated scope: " + "; ".join(bad)
+        return None, f"profile {self.name} {self.version}: {why}", None
 
 
 RTX3090 = Rtx3090Profile()
