@@ -21,6 +21,33 @@ from ..capabilities import DeviceCapabilities
 
 
 @dataclass(frozen=True)
+class KgenDxContext:
+    """Everything the K16 dX question of the kgen path may depend on, resolved at CALL time (the batch is part of
+    it).  ``source`` names the graph family ("cover-topk16": the named Cover-TopK/16 layer's lowering of a K64 / C256
+    envelope; "generic" for any other kgen graph); ``envelope_K`` / ``envelope_C`` are that envelope's (0 if none)."""
+
+    D: int
+    S: int
+    K: int
+    C: int
+    G: int
+    H: int
+    R: int
+    envelope_K: int
+    envelope_C: int
+    source: str
+    act: str
+    precision: str
+    reduction: str
+    batch: int
+
+    def as_dict(self) -> Dict:
+        import dataclasses
+
+        return dataclasses.asdict(self)
+
+
+@dataclass(frozen=True)
 class Validation:
     """Where a profile was checked.  ``numerics`` / ``performance``: device matchers (names of
     functions in the profile module) on which the respective evidence exists."""
@@ -96,6 +123,13 @@ class TuningProfile:
 
     def dx_target_ctas(self) -> int:
         return 4096
+
+    # ------------------------------------------------------ kgen (named Cover-TopK/16 path)
+    def kgen_dx_variant(self, ctx: KgenDxContext) -> Tuple[Optional[str], str, Optional[Dict]]:
+        """Measured K16 dX tiling ("mt<MT>_nw<NW>_wg<WG>") for this call, or None = the legacy launch.  Returns
+        (name | None, reason, validated scope | None).  Legality (compiled, shared memory, NW % WG) is checked by
+        dispatch.kgen_dx_resolve afterwards; a profile never makes a variant legal."""
+        return None, f"profile {self.name}: no measured kgen dX entry", None
 
     def describe(self) -> Dict:
         v = self.validation

@@ -4,7 +4,11 @@
 #   bash sparse_pooling/benchmarks/run_sanitizer.sh [--jobs N] [--out DIR] [--timeout SEC] <python> [workload ...]
 # workloads: generic (sanitize_workload.py: every generic kernel), sg (grouped kernels),
 #            dx_scatter (scatter variants), det (deterministic reductions, compact dW);
-#            default: all four.
+#            default: all four.  kgen (generalized fan-in kernels K8 / K16 / K32 / K64, sanitize_kgen_workload.py)
+#            and cover (the named Cover-TopK/16 layer: indexed K16 / C16, legacy + every compiled K16 dX tiling incl.
+#            the profile-selected mt4_nw8_wg4, token / neuron tails, FusedAdamW, packed reload;
+#            sanitize_cover_workload.py) run only when named.  (The research branch's kgx / kgw / rsn / kwa / tkc /
+#            icdx workloads stay on interaction-coverage-k16-dx with their modules.)
 # --jobs N      (workload, tool) runs in parallel (default: CPUs - 1).  Each instrumented process is
 #               bound by one CPU core and uses little GPU memory.
 # --out DIR     keep the per-run logs and summary.tsv there (default: a new directory under $TMPDIR;
@@ -28,10 +32,36 @@
 #   * the workload printed its completion marker "WORKLOAD COMPLETE <workload>".
 # Exit status: 0 every run passed; 1 at least one run failed; 2 usage / setup error (e.g. no
 # sanitizer); 129 / 130 / 143 interrupted (every child process group is terminated first).
+# A signal IGNORED when the runner starts cannot be trapped by bash: a command launched with '&' from
+# a non-interactive shell (scripts, nohup / systemd-run wrappers started that way) inherits SIGINT and
+# SIGQUIT ignored, so SIGINT is then ignored by this runner too (it says so at startup); SIGTERM and
+# SIGHUP still interrupt it.
 set -uo pipefail
 
-JOBS=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
+SIGINT_IGNORED_ON_ENTRY=0
+[ "$(trap -p INT)" = "trap -- '' SIGINT" ] && SIGINT_IGNORED_ON_ENTRY=1
+declare -A PID_KEY=()  # running job pid -> "<workload>.<tool>"
+declare -A RC=()       # "<workload>.<tool>" -> exit status
 OUT=""
+on_signal() {  # terminate every running job's process group, then exit nonzero
+  local sig=$1 code=$2 pid
+  trap '' INT TERM HUP
+  echo "interrupted (SIG$sig): terminating ${#PID_KEY[@]} running sanitizer job(s)" >&2
+  for pid in "${!PID_KEY[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(jobs -rp)" ] && break
+    sleep 0.5
+  done
+  for pid in "${!PID_KEY[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; done
+  wait 2>/dev/null
+  echo "sanitizer: INTERRUPTED; logs kept in ${OUT:-<none>}" >&2
+  exit "$code"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+
+JOBS=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
 TIMEOUT=14400
 usage() { sed -n '4p' "$0" | sed 's/^# *//' >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -65,12 +95,12 @@ ERR_EXIT=97  # --error-exitcode: sanitizer-detected errors
 script_of() {
   case $1 in
     generic) echo sanitize_workload.py ;;
-    sg|dx_scatter|det) echo "sanitize_$1_workload.py" ;;
+    sg|dx_scatter|det|kgen|cover) echo "sanitize_$1_workload.py" ;;
     *) return 1 ;;
   esac
 }
 for wl in "${WL[@]}"; do
-  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det)" >&2; exit 2; }
+  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det kgen cover)" >&2; exit 2; }
   [ -f "$WDIR/$script" ] || { echo "workload script missing: $WDIR/$script" >&2; exit 2; }
 done
 if [ -z "$OUT" ]; then
@@ -81,9 +111,8 @@ SUMMARY=$OUT/summary.tsv
 rm -f "$SUMMARY"
 export CUDA_MODULE_LOADING=LAZY  # instrument only the kernels that run (the libraries hold ~2000)
 echo "sanitizer: $SAN_PATH ($("$SAN_PATH" --version 2>/dev/null | tail -1)); logs: $OUT; jobs $JOBS; timeout ${TIMEOUT}s"
-
-declare -A PID_KEY=()  # running job pid -> "<workload>.<tool>"
-declare -A RC=()       # "<workload>.<tool>" -> exit status
+[ "$SIGINT_IGNORED_ON_ENTRY" = 1 ] && echo "sanitizer: note: SIGINT was ignored when this runner started (inherited, e.g. a" \
+  "background '&' launch); bash cannot trap it, so SIGINT is ignored -- interrupt with SIGTERM or SIGHUP" >&2
 
 launch() {  # workload, tool: the job runs in its own process group (timeout is the group leader)
   local wl=$1 tool=$2 extra=() log kill_after=()
@@ -110,24 +139,6 @@ reap() {  # collect the exit status of every launched job that has finished
     fi
   done
 }
-
-on_signal() {  # terminate every running job's process group, then exit nonzero
-  local sig=$1 code=$2 pid
-  trap '' INT TERM HUP
-  echo "interrupted (SIG$sig): terminating ${#PID_KEY[@]} running sanitizer job(s)" >&2
-  for pid in "${!PID_KEY[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; done
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -z "$(jobs -rp)" ] && break
-    sleep 0.5
-  done
-  for pid in "${!PID_KEY[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; done
-  wait 2>/dev/null
-  echo "sanitizer: INTERRUPTED; logs kept in $OUT" >&2
-  exit "$code"
-}
-trap 'on_signal INT 130' INT
-trap 'on_signal TERM 143' TERM
-trap 'on_signal HUP 129' HUP
 
 for wl in "${WL[@]}"; do
   for tool in "${TOOLS[@]}"; do

@@ -10,7 +10,10 @@ Bundles (explicit manifests; no directory globbing):
   production    every unit the dispatch can select automatically, plus ABI identity;
   experimental  correct variants reachable only through explicit PhysicalPlan options (built on
                 first explicit request);
-  diagnostics   tests / tools kernels (layout dumps, projection diagnostics); never used by a layer.
+  diagnostics   tests / tools kernels (layout dumps, projection diagnostics); never used by a layer;
+  kgen          generalized-fan-in input-supergroup kernels (K = 8 / 16 / 32 / 64, logical C <= 256) of
+                sparse_pooling.experimental, incl. the K16 dX tiling variants; built on first use by the
+                named Cover-TopK/16 layer (sparse_pooling.cover_topk16) or an explicit experimental layer.
 Build kinds: "production" (no extra flags), "development" (SPARSE_POOL_NVCC_EXTRA without
 ablations), "ablation" (SP_ABLATE_* in SPARSE_POOL_NVCC_EXTRA: deliberately WRONG results for
 attribution).  The kind is compiled into the library (sp_build_kind), named in its path and recorded
@@ -65,8 +68,13 @@ BUNDLES: Dict[str, Tuple[str, ...]] = {
         "experimental/sg_dw_c8_exp.cu",
     ),
     "diagnostics": ("abi.cu", "diagnostics/sgx_layout.cu", "diagnostics/diag_proj_c8.cu"),
+    # generalized fan-in (K = 8 / 16 / 32 / 64) input-supergroup kernels of sparse_pooling.experimental and the
+    # K16 dX tiling variants; used by sparse_pooling.cover_topk16 (K16 / C16), never by SparsePoolingLayer
+    "kgen": ("abi.cu", "experimental/kgen/kgen_abi.cu", "experimental/kgen/kgen_k8.cu", "experimental/kgen/kgen_k16.cu",
+             "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu", "experimental/kgen/kgen_k16_dxv.cu"),
 }
-BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2}
+# id 4 ("kgx") is reserved by the research branch (k64-large-c-indexfree-l1 ... interaction-coverage-k16-dx)
+BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3}
 KIND_ID = {"production": 0, "development": 1, "ablation": 2}
 BASE_FLAGS = ("-O3", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC")
 ARCH_ENV, EXTRA_ENV, CACHE_ENV, JOBS_ENV = ("SPARSE_POOL_ARCH", "SPARSE_POOL_NVCC_EXTRA", "SPARSE_POOL_CACHE_DIR",

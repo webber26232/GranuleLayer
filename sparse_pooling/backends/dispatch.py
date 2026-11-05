@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from types import MappingProxyType
 from typing import Dict, Optional, Tuple
 
@@ -545,6 +546,188 @@ class ResolvedPlan:
                         fallbacks=dict(self.fallbacks))
         return dict(batch=self.batch, reduction=self.reduction, profile=self.profile, **dict(self.bwd),
                     dx=dict(self.dx), dw=dict(self.dw), fallbacks=dict(self.fallbacks))
+
+
+# ------------------------------------------- generalized fan-in (kgen bundle)
+def kgen_reason(caps: DeviceCapabilities, K: int, C: int, S: int, D: int, B: int, level, plan: PhysicalPlan,
+                det: bool, cfg=None) -> str:
+    """Why the generalized-fan-in kernels (variants.KGEN_*; sparse_pooling.experimental, used by the named
+    Cover-TopK/16 layer) cannot run a call ("" if they can).  Legality of the compiled forward / legacy dX / dW
+    tilings; the K16 dX tiling choice is kgen_dx_resolve."""
+    fam = native_family_reason(caps)
+    if fam:
+        return fam
+    if K not in V.KGEN_K:
+        return f"fan-in K = {K} is not compiled (kgen: K in {V.KGEN_K})"
+    if C % 8 or not 8 <= C <= V.KGEN_C_MAX:
+        return f"C = {C}: kgen needs C % 8 == 0 and 8 <= C <= {V.KGEN_C_MAX}"
+    if not (V.KGEN_S_RANGE[0] <= S <= V.KGEN_S_RANGE[1]) or S % 8 or K > S:
+        return f"S = {S}: kgen needs S % 8 == 0, {V.KGEN_S_RANGE[0]} <= S <= {V.KGEN_S_RANGE[1]} and K <= S"
+    if level.type != "mean" or level.activation not in ("relu", "identity"):
+        return f"kgen implements Mean(ReLU / identity) only (pooling {level.describe()})"
+    if plan.grad_precision not in ("split", "bf16"):
+        return f"grad_precision {plan.grad_precision!r}"
+    if det:
+        return "kgen reduces with FP32 atomics: reduction='deterministic' is not implemented"
+    if plan.input_layout != "feature_major" or B % 8:
+        return "kgen needs the feature-major input operand (input_layout='feature_major' and B % 8 == 0)"
+    if D % 8 or D > V.SG_MAX_INPUT_DIM:
+        return f"needs D % 8 == 0 and D <= {V.SG_MAX_INPUT_DIM} (shared-memory feature map)"
+    if cfg is not None:
+        lim = smem_limit(caps)
+        for kind, gw in (("fwd", 1), ("dx", cfg[3]), ("dw", 1)):
+            if V.kgen_smem(kind, D, S, cfg, gw) > lim:
+                return f"kgen {kind} needs {V.kgen_smem(kind, D, S, cfg, gw) / 1024:.1f} KiB of shared memory > {lim / 1024:.1f} KiB"
+    return ""
+
+
+def kgen_dx_group_warps(caps: DeviceCapabilities, D: int, S: int, cfg) -> int:
+    """Warps per FP32 dX slab copy of kgen: warp-private copies where they fit the device, else shared
+    (64-bit CAS) copies, doubling the group until the launch fits."""
+    wg, nw, lim = 1, cfg[3], smem_limit(caps)
+    while wg < nw and V.kgen_smem("dx", D, S, cfg, wg) > lim:
+        wg *= 2
+    return wg
+
+
+# ------------------------------------------- K16 dX tiling of the kgen path (named Cover-TopK/16 layer)
+KGEN_DX_NAME = re.compile(r"mt(\d+)_nw(\d+)_wg(\d+)$")
+KGEN_DX_REQUESTS = ("auto", "legacy", "mt<MT>_nw<NW>_wg<WG>")
+
+
+def kgen_dx_parse(name: str) -> Tuple[int, int, int]:
+    m = KGEN_DX_NAME.fullmatch(name or "")
+    if not m:
+        raise ValueError(f"dX variant {name!r}: expected one of {KGEN_DX_REQUESTS}")
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def kgen_dx_variant_reason(caps: DeviceCapabilities, compiled, D: int, S: int, K: int, mt: int, nw: int, wg: int,
+                           impl: int = 0) -> str:
+    """Why a K16 dX tiling cannot launch here ("" if it can): compiled into the loaded kgen library, WG | NW, shared
+    memory within the device's actual opt-in limit."""
+    if K != 16:
+        return f"dX tiling variants exist for K = 16 only (K = {K})"
+    if (mt, nw, impl) not in set(tuple(c) for c in compiled):
+        return f"(MT {mt}, NW {nw}, impl {impl}) is not compiled into the loaded kgen library (compiled: {list(compiled)})"
+    if wg < 1 or nw % wg:
+        return f"WG = {wg} must divide NW = {nw}"
+    need, lim = V.kgen_k16_dx_smem(D, S, mt, nw, wg), smem_limit(caps)
+    if need > lim:
+        return f"needs {need / 1024:.1f} KiB of shared memory > device limit {lim / 1024:.1f} KiB"
+    return ""
+
+
+@dataclasses.dataclass(frozen=True)
+class KgenDxDecision:
+    """The resolved dX launch of one kgen call (dispatch.kgen_dx_resolve)."""
+
+    name: str
+    mt: int
+    nw: int
+    wg: int
+    impl: int
+    legacy: bool
+    source: str   # "explicit" | "explicit-legacy" | "profile" | "fallback" | "fixed"
+    status: str   # see kgen_dx_resolve
+    reason: str
+    profile: str
+    profile_version: str
+    profile_status: str
+    D: int
+    S: int
+    scope: Optional[Tuple] = None  # validated scope (sorted items) of a profile / in-scope explicit choice
+
+    @property
+    def tokens_per_cta(self) -> int:
+        return 16 * self.mt
+
+    @property
+    def threads_per_cta(self) -> int:
+        return 32 * self.nw
+
+    @property
+    def shared_bytes(self) -> int:
+        return V.kgen_k16_dx_smem(self.D, self.S, self.mt, self.nw, self.wg)
+
+    def describe(self) -> Dict:
+        return dict(name=self.name, dx_mt=self.mt, dx_warps=self.nw, dx_group_warps=self.wg, impl=self.impl,
+                    legacy_entry=self.legacy, source=self.source, status=self.status, reason=self.reason,
+                    profile=self.profile, profile_version=self.profile_version, profile_status=self.profile_status,
+                    tokens_per_cta=self.tokens_per_cta, threads_per_cta=self.threads_per_cta,
+                    fp32_slab_copies=self.nw // self.wg, shared_bytes=self.shared_bytes,
+                    validated_scope=None if self.scope is None else dict(self.scope))
+
+
+_KGEN_DX_CACHE: Dict[tuple, KgenDxDecision] = {}
+
+
+def kgen_dx_resolve(caps: DeviceCapabilities, selection: ProfileSelection, request: Optional[str], ctx, compiled,
+                    legacy_cfg: Tuple[int, int, int], library_hash: str = "", device_index: int = 0) -> KgenDxDecision:
+    """The dX launch of a K16 kgen call in the established precedence:
+
+    1. numerical requirements: ``ctx.reduction == "deterministic"`` raises (every kgen dX, legacy included, sums with
+       FP32 atomics; no deterministic kgen path exists);
+    2. legality (compiled, WG | NW, shared memory vs the device's opt-in limit) -- an illegal EXPLICIT request raises,
+       an illegal profile choice falls back to legacy with the reason;
+    3. an explicit request: "legacy" (the original sp_kg_k16 launch, A/B / troubleshooting override) or
+       "mt<MT>_nw<NW>_wg<WG>" (status "explicit, inside the validated scope" only when the selected profile is
+       hardware-validated on this device and measured exactly this tiling for this call; else "explicit, unvalidated");
+    4. "auto": the selected profile's measured choice for this call (``TuningProfile.kgen_dx_variant``; status from
+       the profile selection, e.g. "hardware-validated" or "user-forced-unvalidated");
+    5. the conservative fallback: the legacy launch (``legacy_cfg`` = (MT, NW, WG) of the compiled legacy tiling with
+       the capability-derived WG of kgen_dx_group_warps).
+
+    Cached per (device identity / index, profile name / version / forced, request, full call context incl. batch,
+    compiled variants, legacy config, library hash)."""
+    req = request or "legacy"
+    key = (device_index, caps.index, caps.uuid, caps.name, tuple(caps.cc), caps.sm_count, caps.smem_per_block_optin,
+           caps.source, selection.profile.name,
+           selection.profile.version, selection.forced, req, ctx, tuple(tuple(c) for c in compiled), tuple(legacy_cfg),
+           library_hash)
+    hit = _KGEN_DX_CACHE.get(key)
+    if hit is not None:
+        return hit
+    if ctx.reduction == "deterministic":
+        raise ValueError("reduction='deterministic' requested: every kgen dX launch (legacy and tiling variants) "
+                         "reduces with FP32 atomics, so no deterministic kgen path exists (use reduction='fast')")
+    prof = selection.profile
+
+    def make(name, mt, nw, wg, legacy, source, status, reason, scope=None):
+        return KgenDxDecision(name, mt, nw, wg, 0, legacy, source, status, reason, prof.name, prof.version,
+                              selection.status, ctx.D, ctx.S, None if scope is None else tuple(sorted(scope.items())))
+
+    lmt, lnw, lwg = legacy_cfg
+
+    def legacy(source, status, reason):
+        return make("legacy", lmt, lnw, lwg, True, source, status, reason)
+
+    if ctx.K != 16:
+        d = legacy("fixed", "legacy (only tiling compiled for this K)", f"dX tiling variants exist for K = 16 only (K = {ctx.K})")
+    elif req == "legacy":
+        d = legacy("explicit-legacy", "legacy (explicit override)", "dx_variant='legacy' requested")
+    elif req == "auto":
+        name, why, scope = prof.kgen_dx_variant(ctx)
+        if name is None:
+            d = legacy("fallback", "generic fallback", why)
+        else:
+            mt, nw, wg = kgen_dx_parse(name)
+            r = kgen_dx_variant_reason(caps, compiled, ctx.D, ctx.S, ctx.K, mt, nw, wg)
+            d = (legacy("fallback", "generic fallback", f"profile choice {name} cannot launch here: {r}") if r else
+                 make(name, mt, nw, wg, False, "profile", selection.status, why, scope))
+    else:
+        mt, nw, wg = kgen_dx_parse(req)
+        r = kgen_dx_variant_reason(caps, compiled, ctx.D, ctx.S, ctx.K, mt, nw, wg)
+        if r:
+            raise ValueError(f"dX variant {req}: {r}")
+        name, _, scope = prof.kgen_dx_variant(ctx)
+        ok = name == req and selection.performance_validated and selection.numerics_validated
+        d = make(req, mt, nw, wg, False, "explicit",
+                 "explicit, inside the validated scope" if ok else "explicit, unvalidated",
+                 "explicit request" + ("" if ok else " (no hardware validation of this tiling for this device / call)"),
+                 scope if ok else None)
+    _KGEN_DX_CACHE[key] = d
+    return d
 
 
 # ------------------------------------------------------------------- matrix adapter
