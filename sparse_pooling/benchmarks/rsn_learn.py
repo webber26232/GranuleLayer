@@ -55,12 +55,16 @@ PR_NEURONS, PR_SEED = 2048, 4243
 FINAL_TEST_SEEDS = tuple(range(19_000, 19_008))  # locked final test (weighted-support study)
 # versioned test protocols (``--test-protocol``): kwa19000 = the weighted-support study's locked test (examined in that
 # round, historical since); tkc29000 = the NEW locked test of the TopK16 / Cover-TopK round, reserved before its screen
-TEST_PROTOCOLS = dict(kwa19000=FINAL_TEST_SEEDS, tkc29000=tuple(range(29_000, 29_008)))
+TEST_PROTOCOLS = dict(kwa19000=FINAL_TEST_SEEDS, tkc29000=tuple(range(29_000, 29_008)),
+                      icdx39000=tuple(range(39_000, 39_008)))  # interaction-coverage / K16 dX round (data seeds 12..17)
+PROTOCOL_DATA_SEEDS = dict(icdx39000=range(0, 18))  # data seeds whose train batches each protocol is checked against
 
 
-def check_seed_collisions(data_seeds=range(0, 12), steps=256, protocol="kwa19000"):
+def check_seed_collisions(data_seeds=None, steps=256, protocol="kwa19000"):
     """The locked final-test seeds collide with no train / calibration / development / diagnostic seed nor with any
-    OTHER protocol's test seeds."""
+    OTHER protocol's test seeds.  ``data_seeds`` default: range(0, 12) (old protocols, unchanged), icdx39000 0..17."""
+    if data_seeds is None:
+        data_seeds = PROTOCOL_DATA_SEEDS.get(protocol, range(0, 12))
     seeds = TEST_PROTOCOLS[protocol]
     used = set(range(8_000, 8_004)) | set(range(9_000, 9_004)) | set(DIAG_TOKENS_SEEDS)
     used |= set(range(10_000, 10_000 + WARMUP + REG + 32))  # checkpoint construction batches

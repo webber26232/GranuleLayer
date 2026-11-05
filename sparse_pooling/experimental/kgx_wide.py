@@ -520,11 +520,26 @@ def build_policy_layer(args, conn, plan):
         out = lower_one_tile(lay, ms, plan)
     torch.cuda.synchronize()
     conv_s = time.perf_counter() - t0
+    dxv = f.get("dx_variant", "legacy")
+    if dxv != "legacy":  # an explicit K16 dX variant (experimental/kgen_dx_variants.py): indexed / grouped only
+        if fmt not in ("indexed", "grouped"):
+            raise SystemExit(f"dx_variant {dxv!r} needs the indexed or grouped kgen format (format {fmt!r})")
+        out.dx_variant = dxv
+        if fmt == "indexed":
+            resolved = out.dx_variant_resolved().describe()
+        else:
+            out._runtime()
+            resolved = {f"K{pk.K}": out.dx_variant_of(pk).describe() for pk in out.packs}
+    else:
+        resolved = "legacy"
     out.mask_set_stats = stats
     out.graph_stats.update(checkpoint=ck, policy=stats["policy"], format=fmt, mask_stats=stats,
                            rho_mask=stats["rho_mask"], mask_sha256=mask_sha, select_seconds=sel_s,
                            conversion_seconds=conv_s,
-                           support_fingerprint=None if sup is None else sup.fingerprint())
+                           support_fingerprint=None if sup is None else sup.fingerprint(),
+                           dx_variant=dict(request=dxv, resolved=resolved),
+                           row_energy_normalization="none (timing factories mask the checkpoint values; no row-energy "
+                                                    "restoration is applied, identically for every compared backend)")
     if fmt != "dense_masked":
         del lay, em
     torch.cuda.empty_cache()

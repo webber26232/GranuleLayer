@@ -102,18 +102,25 @@ class KgenFunction(torch.autograd.Function):
         a.c1T, a.dXT, a.dW, a.dB = c1T.data_ptr(), dxt.data_ptr(), dw.data_ptr(), db.data_ptr()
         a.items, a.chunks, a.dx_group_warps = rt.sg.items.data_ptr(), rt.sg.chunks.data_ptr(), rt.dx_group_warps
         split = int(layer.plan.grad_precision == "split")
-        n_tiles = math.ceil(B / (16 * rt.cfg[2]))
-        rt.backend.launch(L.fan_in, "dx", a, layer.level.act_id, split, rt.sg.chunks.shape[0], n_tiles, xc.device)
+        dxv = layer.dx_variant_resolved()
+        if dxv.legacy:  # the original launch (sp_kg_k<K>), byte-identical arguments
+            n_tiles = math.ceil(B / (16 * rt.cfg[2]))
+            rt.backend.launch(L.fan_in, "dx", a, layer.level.act_id, split, rt.sg.chunks.shape[0], n_tiles, xc.device)
+        else:  # an explicit K16 dX tiling variant (kgen_dx_variants.py); fwd / dW unchanged
+            a.dx_group_warps = dxv.wg
+            n_tiles = math.ceil(B / (16 * dxv.mt))
+            rt.backend.launch_dxv(a, layer.level.act_id, split, dxv.mt, dxv.nw, dxv.impl, rt.sg.chunks.shape[0], n_tiles,
+                                  xc.device)
         _mark("bwd.dx")
         a.tasks, a.chunks = rt.sg.tasks.data_ptr(), rt.sg.dw_chunks.data_ptr()
         rt.backend.launch(L.fan_in, "dw", a, layer.level.act_id, split, rt.sg.dw_chunks.shape[0], 0, xc.device)
         _mark("bwd.dw")
         layer.last_info.update(backward_backend="kgen", dx_kernel="kgen", dw_kernel="kgen",
                                grad_precision=layer.plan.grad_precision,
-                               kgen_dx=dict(ctas=rt.sg.chunks.shape[0] * n_tiles, tokens=16 * rt.cfg[2],
-                                            warps=rt.cfg[3], group_warps=rt.dx_group_warps,
-                                            reduction="fp32_atomics" if rt.dx_group_warps == 1 else
-                                            "shared_cas+fp32_atomics"),
+                               kgen_dx=dict(ctas=rt.sg.chunks.shape[0] * n_tiles, tokens=16 * dxv.mt,
+                                            warps=dxv.nw, group_warps=dxv.wg,
+                                            reduction="fp32_atomics" if dxv.wg == 1 else
+                                            "shared_cas+fp32_atomics", variant=dxv.describe()),
                                kgen_dw=dict(ctas=rt.sg.dw_chunks.shape[0], tasks=rt.sg.tasks.shape[0],
                                             tasks_per_warp=rt.cfg[4], warps=rt.cfg[5]))
         dx = dxt.t().to(ctx.x_dtype, memory_format=torch.contiguous_format)  # (as the production layer)
@@ -186,6 +193,16 @@ class KgenLayer(nn.Module):
             self._rt_key = key
             self.last_info["kgen_work_lists"] = dict(self._rt.sg.stats)
         return self._rt
+
+    def dx_variant_resolved(self):
+        """The resolved dX variant of ``self.dx_variant`` (default "legacy"; experimental/kgen_dx_variants.py)."""
+        from . import kgen_dx_variants as DXV
+
+        rt = self._runtime()
+        L = self.layout
+        dev = self.indices.device
+        return DXV.resolve(getattr(self, "dx_variant", "legacy"), rt.caps, rt.backend, L.input_dim, self.sg_feat.shape[1],
+                           L.fan_in, L.block, dev.index if dev.index is not None else 0, rt.dx_group_warps)
 
     def _check_call(self, B: int):
         from ..backends.dispatch import kgen_reason

@@ -296,7 +296,10 @@ def cover_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
     """Fixed-fan-in coverage repair of the supports env0 [n, k] (sorted) of n valid groups, group i in record rec[i] at
     rank rank[i] (module docstring, ``Cover-TopK``).  Each record is independent; records are processed in chunks of
     ``chunk_records`` (dense [chunk, gpb, S] buffers) and all records of a chunk advance one swap per round, so neither
-    the chunking nor the record order can change a result.  For a group u its cheapest removable donor
+    the chunking nor the record order can change a result.  On a CUDA device every round SYNCHRONIZES with the host
+    (the finiteness check ``bool(...)`` and the dynamic selection of the still-active records ``act``): the earlier
+    claim of "no per-swap host synchronization" was wrong (results/INTERACTION_COVERAGE_K16_DX.md section 2.2); the
+    measured GPU wall time includes these synchronizations.  For a group u its cheapest removable donor
     d*(u) = argmin {a[u, d] : d retained by u, c[d] >= 2} (first minimum = lowest d) does not depend on the target j, so
     the best swap is min over (j, u) of a[u, d*(u)] - a[u, j], flattened in (j, u) order (first minimum = lexicographic
     tie-break).  Termination / feasibility: an uncovered j with m k >= S implies a covered coordinate of count >= 2 (the
@@ -363,7 +366,8 @@ def cover_repair(a_v: torch.Tensor, env0: torch.Tensor, rec: torch.Tensor, rank:
         env[gg[valid]] = key.sort(2).values[:, :, :k][valid]
     if not torch.equal(swaps, miss0):
         raise AssertionError("Cover-TopK: swap count differs from the initial number of missing inputs")
-    work = min(chunk_records, max(nrec, 1)) * gpb * S * (8 + 8 + 1 + 1)  # A, cost, X, legal (per chunk, active <= all)
+    # accounting ESTIMATE of the main chunk buffers (A, cost, X, legal), not every live temporary
+    work = min(chunk_records, max(nrec, 1)) * gpb * S * (8 + 8 + 1 + 1)
     return dict(env=env, missing0=miss0, swaps=swaps, loss=loss, donor_position_hist=donor_pos,
                 target_position_hist=target_pos, rounds=rounds, groups_per_record=m, chunk_records=chunk_records,
                 working_buffer_bytes=work)

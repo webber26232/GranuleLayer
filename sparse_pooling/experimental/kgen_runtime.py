@@ -52,6 +52,16 @@ class KgenBackend:
                 raise RuntimeError(f"sp_kg_config({K}) failed")
             self.cfgs[K] = tuple(o)
             self.fns[K] = lib.fn(f"sp_kg_k{K}", [ctypes.POINTER(KgArgs)] + [ctypes.c_int] * 5 + [ctypes.c_void_p])
+        # K16 dX tiling variants (kgen_k16_dxv.cu; experimental/kgen_dx_variants.py)
+        self.dxv_fn = lib.fn("sp_kg_k16_dxv", [ctypes.POINTER(KgArgs)] + [ctypes.c_int] * 7 + [ctypes.c_void_p])
+        lf = lib.fn("sp_kg_k16_dxv_list", [ctypes.POINTER(ctypes.c_int), ctypes.c_int])
+        buf = (ctypes.c_int * 96)()
+        nv = lf(buf, 96)
+        if nv < 0:
+            raise RuntimeError("sp_kg_k16_dxv_list failed")
+        self.dxv_compiled = [tuple(buf[3 * i:3 * i + 3]) for i in range(nv)]
+        self._dxv_attrs = lib.fn("sp_kg_k16_dxv_attrs", [ctypes.c_int] * 5 + [ctypes.c_longlong,
+                                                                              ctypes.POINTER(ctypes.c_longlong), ctypes.c_int])
 
     def build_info(self) -> Dict:
         i = self.native.ident
@@ -62,6 +72,21 @@ class KgenBackend:
 
     def cfg_dict(self, K: int) -> Dict:
         return dict(zip(CFG_FIELDS, self.cfgs[K]))
+
+    def launch_dxv(self, a: KgArgs, act: int, split: int, mt: int, nw: int, impl: int, n_chunks: int, n_tiles: int,
+                   device):
+        err = self.dxv_fn(ctypes.byref(a), act, split, mt, nw, impl, n_chunks, n_tiles, R_._stream(device))
+        R_._check(err, f"sp_kg_k16_dxv(mt {mt}, nw {nw}, impl {impl})")
+
+    def dxv_attributes(self, mt: int, nw: int, impl: int, act: int, split: int, smem: int) -> Dict:
+        """Compiled attributes of a K16 dX variant (cudaFuncGetAttributes) and the theoretical active CTAs per SM at
+        ``smem`` dynamic shared bytes (cudaOccupancyMaxActiveBlocksPerMultiprocessor) on the CURRENT device."""
+        o = (ctypes.c_longlong * 8)()
+        n = self._dxv_attrs(mt, nw, impl, act, split, smem, o, 8)
+        if n != 8:
+            return dict(error=n)
+        return dict(registers_per_thread=o[0], local_bytes_per_thread=o[1], static_smem=o[2], max_threads_per_block=o[3],
+                    ptx_version=o[4], binary_version=o[5], active_ctas_per_sm=o[6], max_dynamic_smem_configured=o[7])
 
     def launch(self, K: int, kind: str, a: KgArgs, act: int, split: int, n_chunks: int, n_tiles: int, device):
         err = self.fns[K](ctypes.byref(a), KIND[kind], act, split, n_chunks, n_tiles, R_._stream(device))

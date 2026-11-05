@@ -46,7 +46,9 @@ import wps_interaction as WI
 FINAL_SEEDS = tuple(range(59_000, 59_008))
 # versioned interaction-test protocols (``--test-protocol``): kwa59000 = the weighted-support study's reserved batches;
 # tkc69000 = the NEW reserved batches of the TopK16 / Cover-TopK round (results/TOPK16_COVERAGE_CONSTRAINED_TOPK.md 6.2)
-TEST_PROTOCOLS = dict(kwa59000=FINAL_SEEDS, tkc69000=tuple(range(69_000, 69_008)))
+TEST_PROTOCOLS = dict(kwa59000=FINAL_SEEDS, tkc69000=tuple(range(69_000, 69_008)),
+                      icdx89000=tuple(range(89_000, 89_008)))  # interaction-coverage round (results/INTERACTION_COVERAGE_K16_DX.md)
+ANALYSIS_SEEDS = tuple(range(97_000, 97_064))  # functional-ANOVA bound analysis batches (never trained / tested on)
 
 
 @torch.no_grad()
@@ -120,6 +122,58 @@ def bf16_target_control(ids, rvalid, order, sig, dev, seeds) -> dict:
     return {f"order{o}": float(nm[order == o].mean()) for o in (1, 2, 3, 4)}
 
 
+def targets_fp64(x, ids, valid, order, sig):
+    """wps_interaction.targets evaluated in x's dtype (FP64 here; the original accumulates in FP32)."""
+    G, NB, T, _ = ids.shape
+    t = torch.zeros(x.shape[0], G, device=x.device, dtype=x.dtype)
+    for j in range(NB):
+        for u in range(T):
+            xs = x[:, ids[:, j, u]]
+            p = torch.zeros(x.shape[0], G, device=x.device, dtype=x.dtype)
+            for k in (1, 2, 3, 4):
+                sel = order == k
+                p[:, sel] = (WI._f(xs[:, sel], k) - sig[k][0]) / sig[k][1]
+            t += p * valid[:, j][None, :]
+    return t / (valid.sum(1).clamp_min(1) * T).to(x.dtype).sqrt()[None, :]
+
+
+def term_neuron_matching(E: torch.Tensor) -> dict:
+    """E [outputs, T, neurons] bool eligibility; maximum bipartite matching per output (scipy Hopcroft-Karp), each
+    neuron used by at most one term.  Returns matched terms total / per output and unmatched terms."""
+    import numpy as np
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import maximum_bipartite_matching
+
+    E = E.cpu().numpy()
+    matched = []
+    for o in range(E.shape[0]):
+        if not E[o].any():
+            matched.append(0)
+            continue
+        mt = maximum_bipartite_matching(csr_matrix(E[o].astype(np.int8)), perm_type="column")
+        matched.append(int((mt >= 0).sum()))
+    mm = np.array(matched)
+    T = E.shape[1]
+    return dict(matched_terms=int(mm.sum()), terms=int(E.shape[0] * T), unmatched_terms=int(E.shape[0] * T - mm.sum()),
+                outputs_fully_matched=int((mm == T).sum()), outputs=int(E.shape[0]),
+                matched_per_output_mean=float(mm.mean()))
+
+
+def state_identity(a, srec, ids, rvalid, order, lay) -> dict:
+    """What a saved state must match before it is resumed or evaluated: support (mask / fingerprint), graph, init,
+    target configuration (hash of the actual term inputs / orders / record validity), geometry and protocol."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for t in (ids, rvalid, order):
+        h.update(t.to(torch.int64).cpu().numpy().tobytes())
+    return dict(support=a.support, mask_sha256=srec.get("mask_sha256"), support_fingerprint=srec.get(
+        "support_fingerprint"), graph_seed=a.graph_seed, init_seed=a.init_seed, hidden=a.hidden, terms=a.terms,
+        hash_seed=WI.HASH_SEED, target_sha256=h.hexdigest(), norm=a.norm, oracle=a.oracle or None, lr=a.lr,
+        lr_readout=a.lr_readout, sr_seed=a.sr_seed, feat_sha256=hashlib.sha256(
+            lay.sg_feat.cpu().numpy().tobytes()).hexdigest())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--support", default="dense")
@@ -142,6 +196,10 @@ def main():
     ap.add_argument("--floors", default="", help="json cache of exact additive floors")
     ap.add_argument("--final-test", action="store_true", help="evaluate the reserved final test once after training")
     ap.add_argument("--test-protocol", default="kwa59000", choices=sorted(TEST_PROTOCOLS))
+    ap.add_argument("--eval-state", default="", help="evaluate a saved complete state (identity-checked) without "
+                    "training: --final-test and / or --analysis-out")
+    ap.add_argument("--analysis-out", default="", help="npz of per-batch / per-output squared error and target energy "
+                    "on the analysis batches 97_000..97_063 (functional-ANOVA bound comparison)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     from sparse_pooling.experimental import l1 as L1
@@ -193,13 +251,24 @@ def main():
         sel_o = order == o
         need = torch.arange(4, device=dev) < o
         cnt = torch.zeros(int(sel_o.sum()), loc.shape[2], device=dev)
+        oks = []
         for u in range(loc.shape[2]):
             seen = m[sel_o].gather(3, loc[sel_o][:, :, None, u, :].expand(-1, -1, L.block, 4))
             ok = (seen | ~need).all(3) & valid[sel_o]
             cnt[:, u] = ok.sum((1, 2)).float()
+            oks.append(ok.reshape(ok.shape[0], -1))
         elig[f"order{o}"] = dict(mean_neurons_per_term=float(cnt.mean()), terms_with_no_neuron=int((cnt == 0).sum()),
-                                 terms=int(cnt.numel()))
+                                 terms=int(cnt.numel()), terms_with_one_neuron=int((cnt == 1).sum()),
+                                 terms_with_multiple_neurons=int((cnt > 1).sum()),
+                                 eligible_neurons_per_term=dict(mean=float(cnt.mean()), median=float(cnt.median()),
+                                                                max=float(cnt.max())),
+                                 matching=term_neuron_matching(torch.stack(oks, 1)))
     res["term_support_eligibility"] = elig
+    res["term_support_eligibility_note"] = (
+        "per teacher term: valid neurons whose enabled support contains all its inputs (zero / one / multiple); "
+        "matching = maximum term-to-neuron matching per output, each actual neuron with capacity one (an "
+        "analysis / oracle aid, never used to build a trained candidate; a missing full-term match is not a "
+        "tight error estimate)")
     res["missing_input_floor"] = missing_input_floor(lay, em, ids, rvalid, order, sig, a.terms)
     res["bf16_input_target_control"] = bf16_target_control(ids, rvalid, order, sig, dev, WI.HELD_SEEDS)
     a_g = torch.ones(WC.G, device=dev, requires_grad=True)
@@ -249,8 +318,26 @@ def main():
         return r
 
     start = 0
+    ident = state_identity(a, srec, ids, rvalid, order, lay)
+    res["state_identity"] = ident
+    if a.eval_state:
+        a.resume = a.eval_state
     if a.resume:
         st = torch.load(a.resume, map_location=dev, weights_only=False)
+        if "identity" in st:  # states of this round carry their identity: every field must match
+            bad = {k: (st["identity"].get(k), v) for k, v in ident.items() if st["identity"].get(k) != v}
+            if bad:
+                raise SystemExit(f"resume / eval state identity mismatch: {bad}")
+            res["state_identity_checked"] = True
+        else:
+            res["state_identity_checked"] = False
+        for k_, t_ in (("weight", lay.weight), ("bias", lay.bias), ("main_grad_w", lay.weight), ("main_grad_b", lay.bias)):
+            if tuple(st[k_].shape) != tuple(t_.shape):
+                raise SystemExit(f"state {k_} shape {tuple(st[k_].shape)} != {tuple(t_.shape)}")
+        if em is not None and bool(((st["weight"] != 0) & ~em.bool()).any()):
+            raise SystemExit("state holds nonzero values outside the support mask")
+        if not st.get("opt_w") or "sr_counter" not in st or "step" not in st:
+            raise SystemExit("state lacks optimizer moments / rounding counter / step")
         with torch.no_grad():
             lay.weight.copy_(st["weight"])
             lay.bias.copy_(st["bias"])
@@ -265,8 +352,12 @@ def main():
         start = st["step"]
         if em is not None:
             opt.set_mask(lay.weight, em)
-        res["resumed_from"] = dict(path=a.resume, step=start, sha256=st.get("sha256"))
+        res["resumed_from"] = dict(path=a.resume, step=start, sha256=st.get("sha256"), sr_counter=st["sr_counter"],
+                                   moments={k: list(v.shape) for k, v in st["opt_w"].items() if torch.is_tensor(v)})
         hist = st["history"]
+        if a.eval_state:
+            a.steps = start  # evaluation only: no update
+            res["evaluation_only"] = dict(state=a.eval_state, step=start)
     else:
         if not a.oracle:
             with torch.no_grad():  # the parent's calibration rule (one batch: centered, scale 0.1 / std)
@@ -302,7 +393,7 @@ def main():
                             opt_w={k: v for k, v in opt.state[lay.weight].items()},
                             opt_b={k: v for k, v in opt.state[lay.bias].items()}, sr_counter=opt._seed,
                             opt2=opt2.state_dict(), a_g=a_g.detach(), c_g=c_g.detach(), history=list(hist),
-                            args=vars(a)), p)
+                            args=vars(a), identity=ident), p)
             import hashlib
 
             res.setdefault("saved_states", []).append(dict(step=i + 1, path=str(p),
@@ -313,10 +404,28 @@ def main():
         fs = TEST_PROTOCOLS[a.test_protocol]
         others = set().union(*(set(v) for k, v in TEST_PROTOCOLS.items() if k != a.test_protocol))
         if set(fs) & ({WI.TRAIN_SEED + i for i in range(max(a.steps, 4000))} | set(WI.HELD_SEEDS) |
-                      {WI.TRAIN_SEED - 1} | others):
+                      {WI.TRAIN_SEED - 1} | others | set(ANALYSIS_SEEDS)):
             raise SystemExit("final interaction-test seeds collide with train / held-out / other test seeds")
         res["final_test"] = dict(seeds=list(fs), protocol=a.test_protocol, evaluated_at_step=hist[-1]["step"],
                                  **evaluate(seeds=fs))
+    if a.analysis_out:  # per-batch / per-output squared error and target energy on the ANALYSIS batches
+        import numpy as np
+
+        se_b = torch.zeros((len(ANALYSIS_SEEDS), WC.G), dtype=torch.float64)
+        t2_b = torch.zeros((len(ANALYSIS_SEEDS), WC.G), dtype=torch.float64)
+        with torch.no_grad():
+            for bi, s_ in enumerate(ANALYSIS_SEEDS):
+                x = WI.xbatch(s_, dev)
+                t = targets_fp64(x.double(), ids, rvalid, order, sig)
+                se_b[bi] = ((predict(x).double() - t) ** 2).sum(0).cpu()
+                t2_b[bi] = (t ** 2).sum(0).cpu()
+        np.savez_compressed(a.analysis_out, se=se_b.numpy(), t2=t2_b.numpy(), seeds=np.array(ANALYSIS_SEEDS),
+                            order=order.cpu().numpy(), step=hist[-1]["step"])
+        nm = se_b.sum(0) / t2_b.sum(0)
+        res["analysis_batches"] = dict(path=a.analysis_out, seeds=[ANALYSIS_SEEDS[0], ANALYSIS_SEEDS[-1]],
+                                       targets="FP64 targets of the FP32 analysis inputs; the model reads BF16",
+                                       nmse_all_outputs={f"order{o}": float(nm[order.cpu() == o].mean())
+                                                         for o in (1, 2, 3, 4)})
     res["mask_preserved"] = (None if em is None else
                              bool(((lay.weight.detach() != 0) <= em.bool()).all()))
     res["wall_seconds"] = time.perf_counter() - t0

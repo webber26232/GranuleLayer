@@ -72,7 +72,9 @@ BUNDLES: Dict[str, Tuple[str, ...]] = {
     # EXPERIMENTAL generalized fan-in (K = 8 / 16 / 32 / 64) input-supergroup kernels of
     # sparse_pooling.experimental (random K/C/S/R sweep); never selected by SparsePoolingLayer
     "kgen": ("abi.cu", "experimental/kgen/kgen_abi.cu", "experimental/kgen/kgen_k8.cu", "experimental/kgen/kgen_k16.cu",
-             "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu"),
+             "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu",
+             # K16 dX tiling variants (interaction-coverage / K16 dX round; explicit selection only)
+             "experimental/kgen/kgen_k16_dxv.cu"),
     # EXPERIMENTAL K = 64 kernels of the large-C / index-free / L1-sparsity study (direct large-C, S = K
     # index-free, tile-sparse, CSR fixed mask); never selected by SparsePoolingLayer
     "kgx": ("abi.cu", "experimental/kgx/kgx_abi.cu", "experimental/kgx/kgx_fwd.cu", "experimental/kgx/kgx_dx.cu",

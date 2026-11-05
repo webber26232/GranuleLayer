@@ -179,8 +179,15 @@ class GroupedFunction(torch.autograd.Function):
             a.dW = dw.data_ptr() + 4 * pk.w_off
             a.dB = db.data_ptr() + 4 * pk.b_off
             a.items, a.chunks, a.dx_group_warps = pk.sg.items.data_ptr(), pk.sg.chunks.data_ptr(), pk.dx_group_warps
-            n_tiles = math.ceil(B / (16 * pk.cfg[2]))
-            layer.backend.launch(pk.K, "dx", a, layer.level.act_id, split, pk.sg.chunks.shape[0], n_tiles, xc.device)
+            dxv = layer.dx_variant_of(pk)
+            if dxv.legacy:
+                n_tiles = math.ceil(B / (16 * pk.cfg[2]))
+                layer.backend.launch(pk.K, "dx", a, layer.level.act_id, split, pk.sg.chunks.shape[0], n_tiles, xc.device)
+            else:  # the K16 component's explicit dX variant; every other type keeps its legacy launch
+                a.dx_group_warps = dxv.wg
+                n_tiles = math.ceil(B / (16 * dxv.mt))
+                layer.backend.launch_dxv(a, layer.level.act_id, split, dxv.mt, dxv.nw, dxv.impl, pk.sg.chunks.shape[0],
+                                         n_tiles, xc.device)
             _mark(f"bwd.dx.t{pk.K}")
             args.append(a)
         _mark("bwd.dx")
@@ -189,6 +196,7 @@ class GroupedFunction(torch.autograd.Function):
             layer.backend.launch(pk.K, "dw", a, layer.level.act_id, split, pk.sg.dw_chunks.shape[0], 0, xc.device)
             _mark(f"bwd.dw.t{pk.K}")
         _mark("bwd.dw")
+        layer.last_info["dx_variants"] = {f"K{pk.K}": layer.dx_variant_of(pk).describe() for pk in layer.packs}
         layer.last_info.update(backward_backend="kgen-grouped", dx_kernel="kgen_grouped", dw_kernel="kgen_grouped",
                                grad_precision=layer.plan.grad_precision, launches_bwd=2 * len(layer.packs),
                                dx_accumulation="one FP32 dX^T for all types, one cast")
@@ -302,6 +310,15 @@ class GroupedMixedLayer(nn.Module):
         r = _R()
         r.sg = _AllSg(self.packs)
         return r
+
+    def dx_variant_of(self, pk):
+        """Resolved dX variant of a pack: ``self.dx_variant`` applies to the K16 pack only (every other type: legacy)."""
+        from . import kgen_dx_variants as DXV
+
+        dev = self.weight.device
+        req = getattr(self, "dx_variant", "legacy") if pk.K == 16 else "legacy"
+        return DXV.resolve(req, self.caps, self.backend, self.layout.input_dim, self.sg_feat.shape[1], pk.K, 16,
+                           dev.index if dev.index is not None else 0, pk.dx_group_warps)
 
     def _check_call(self, B: int):
         from ..backends.dispatch import kgen_reason
