@@ -129,3 +129,35 @@ def dw_idx_smem(NW: int, WPW: int, ST: int, UB: int) -> int:
 
 
 SG_REDUCE_THREADS = 256
+
+# ------------------------------------------- generalized fan-in ("kgen" bundle)
+# kernels/cuda/experimental/kgen (sparse_pooling.experimental.kgen_layer): input-supergroup layers with
+# fan-in K in KGEN_K, logical C % 8 == 0 and C <= 256 neurons per shared record, Mean(ReLU / identity),
+# BF16 parameters / inputs, split or BF16 dZ operands, FP32 atomics (fast reduction only), feature-major
+# input with B % 8 == 0, S in [8, 256] with K <= S.  Tilings are compile-time per K (KgCfg in kgen.cuh,
+# reported by sp_kg_config): (fwd MT, fwd warps, dX MT, dX warps, dW tasks per warp, dW warps, dW tiles
+# per stage, dW stages).  Status "experimental": correct (tests/test_kgen.py), never selected by SparsePoolingLayer;
+# the named Cover-TopK/16 layer (sparse_pooling.cover_topk16) runs its K16 / C16 entry points.
+KGEN_K = (8, 16, 32, 64)
+KGEN_C_MAX = 256
+KGEN_S_RANGE = (8, 256)
+KGEN_STATUS = "experimental"
+
+
+def kgen_smem(kind: str, D: int, S: int, cfg, group_warps: int = 1) -> int:
+    """Dynamic shared memory of a kgen launch (kgen_dispatch.cuh); cfg = the sp_kg_config tuple."""
+    m = _map_bytes(D)
+    fwd_mt, fwd_nw, dx_mt, dx_nw, _, _, dw_ts, dw_st = cfg
+    if kind == "fwd":
+        return m + S * 16 * fwd_mt * 2
+    if kind == "dx":
+        bm = 16 * dx_mt
+        return m + S * bm * 2 + (dx_nw // group_warps) * S * bm * 4
+    return m + dw_st * dw_ts * S * 16 * 2
+
+
+def kgen_k16_dx_smem(D: int, S: int, mt: int, nw: int, wg: int) -> int:
+    """Dynamic shared memory of a K16 dX launch with token tile MT (16 MT tokens), NW warps and NW / WG FP32 slab
+    copies: align16(2 D) + 2 S (16 MT) + 4 (NW / WG) S (16 MT) (kgen_k16_dxv.cu; legacy = MT 4, NW 8)."""
+    bm = 16 * mt
+    return _map_bytes(D) + 2 * S * bm + 4 * (nw // wg) * S * bm

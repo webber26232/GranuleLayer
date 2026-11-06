@@ -21,6 +21,11 @@ This covers moving from the experiment branches (up to `c8-deterministic-reducti
 
 ## New
 
+* `CoverTopK16Layer` (`sparse_pooling.cover_topk16`, [cover_topk16.md](cover_topk16.md)): a new opt-in named layer and
+  its `kgen` bundle.  Nothing selects it automatically: the fan-in-8 `SparsePoolingLayer`, its plans and its
+  checkpoints are unchanged, and the production library compiles to the same identity
+  ([validation/cover_topk16_rtx3090_dx.md](validation/cover_topk16_rtx3090_dx.md)).  The new layer has its own packed
+  file format (`save_packed` / `load_packed`).
 * `PhysicalPlan.tuning_profile` (`"auto"`, `"rtx3090"`, `"generic_cuda"`) and the environment variable
   `SPARSE_POOL_PROFILE`. They never change the function computed.
 * `last_info["execution"]` and `SparsePoolingLayer.explain(batch)`, which report the resolved plan, device,

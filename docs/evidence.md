@@ -38,6 +38,15 @@ commits; the maintained tools in main replace them for new measurements.
 | `DW_CFG`, `DW_CFG_INDEXED`, `DW_INDEXED_STAGES`, `dx_warps` (32 at C = 64) | memory traffic |
 | `epilogue` (auto dZ epilogues) | backward compute |
 
+## Cover-TopK/16 and the RTX 3090 K16 dX tuning
+
+[validation/cover_topk16_rtx3090_dx.md](validation/cover_topk16_rtx3090_dx.md) keeps two kinds of evidence apart:
+integration-head checks, with compact records in
+[sparse_pooling/results/validation/cover_topk16_rtx3090_dx/](../sparse_pooling/results/validation/cover_topk16_rtx3090_dx/),
+and the earlier research evidence, pinned to immutable commit URLs of `interaction-coverage-k16-dx`
+(`f4c538aca3356358179078a586d55a5e473743cd`).  That document also holds the errata of the research reports (memory
+table, quota-repair synchronization counter, cohort identity validation, wording of the functional-ANOVA bound).
+
 ## This integration (`gpu-portability-cleanup`)
 
 Two kinds of evidence, kept apart:

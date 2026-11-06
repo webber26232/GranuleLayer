@@ -99,6 +99,17 @@ with FP32 moments + master weights the 6,144-unit variant fits (19.2 GiB) but th
 variants need ~23 GiB and run out of memory on this 24 GiB card with a desktop attached.  If saved winner ids would
 exceed 2 GiB (`autograd.CHECKPOINT_BUDGET`) the layer recomputes winners in token chunks.
 
+## Cover-TopK/16 (opt-in layer)
+
+`CoverTopK16Layer` (`cover_topk16.py`, guide: [docs/cover_topk16.md](../docs/cover_topk16.md)) is a separate named
+path next to the fan-in-8 `SparsePoolingLayer`, whose API and semantic defaults do not change.  Starting from an
+original K64 / C256 envelope (S64 candidate sets), every valid 16-neuron row group keeps a frozen 16-input support:
+TopK by FP64 energy, plus a per-record union cover repair so that each of the record's 64 inputs is kept at least
+once.  Execution is compact at K16 / C16 on the `kgen` kernels, with Mean(ReLU), BF16 operands, FP32 accumulation /
+`main_grad` and split dZ.  The validated model has H = 12.5M neurons and exactly 200M valid slots.  `dx_variant="auto"`
+applies the RTX 3090 profile's measured `mt4_nw8_wg4` K16 dX tiling inside its narrow validated scope, and keeps the
+legacy launch everywhere else; `dx_variant="legacy"` forces the original launch.
+
 ## Layout of the repository
 
 ```
@@ -109,6 +120,9 @@ sparse_pooling/
   autograd.py          Level1Runtime + SparsePoolFunction / SemanticPoolFunction, checkpoint policies
   supergroups.py       input-supergroup connectivity: generator, validator, bucket statistics, work lists
   optim.py             FusedAdamW (reads/zeroes FP32 main_grad, BF16|FP32 moments, master weights or SR)
+  cover_topk16.py      CoverTopK16Layer: opt-in Cover-TopK/16 (K64 envelope -> frozen K16 / C16 supports)
+  memory_accounting.py unique-storage accounting (bytes vs counts, aliases)
+  experimental/        kgen layout / graph / layer / runtime, compact lowering, local supports, row normalization
   memory.py            analytic memory model
   backends/
     capabilities.py    device / toolchain facts, ISA feature table (no tuning)
@@ -121,7 +135,7 @@ sparse_pooling/
     ops.py             launches, state merge/finalize, backward coefficients, workspace budget
     cuda_ops.py        compatibility facade of the native backend
     cuda/              native kernels (sm_80+): forward, Top-K, dX / dW recompute backward,
-                       input-supergroup kernels, deterministic reduction; experimental/, diagnostics/
+                       input-supergroup kernels, deterministic reduction; experimental/ (incl. kgen/), diagnostics/
   reference/pytorch_reference.py   materialising reference (small H), tie rules identical
   tests/               semantics, kernels, dispatch / profiles / build (CPU), harness, codegen
   benchmarks/          maintained tools: timing, repeatability, sanitizer, SASS, decision matrix
