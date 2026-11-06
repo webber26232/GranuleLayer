@@ -72,9 +72,11 @@ BUNDLES: Dict[str, Tuple[str, ...]] = {
     # K16 dX tiling variants; used by sparse_pooling.cover_topk16 (K16 / C16), never by SparsePoolingLayer
     "kgen": ("abi.cu", "experimental/kgen/kgen_abi.cu", "experimental/kgen/kgen_k8.cu", "experimental/kgen/kgen_k16.cu",
              "experimental/kgen/kgen_k32.cu", "experimental/kgen/kgen_k64.cu", "experimental/kgen/kgen_k16_dxv.cu"),
+    # learned sliding-window reduction (sparse_pooling.experimental.learned_reduction); explicit experimental API only
+    "lrd": ("abi.cu", "experimental/lrd/lrd_k16.cu"),
 }
 # id 4 ("kgx") is reserved by the research branch (k64-large-c-indexfree-l1 ... interaction-coverage-k16-dx)
-BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3}
+BUNDLE_ID = {"production": 0, "experimental": 1, "diagnostics": 2, "kgen": 3, "lrd": 5}
 KIND_ID = {"production": 0, "development": 1, "ablation": 2}
 BASE_FLAGS = ("-O3", "--use_fast_math", "-lineinfo", "-std=c++17", "-Xcompiler", "-fPIC")
 ARCH_ENV, EXTRA_ENV, CACHE_ENV, JOBS_ENV = ("SPARSE_POOL_ARCH", "SPARSE_POOL_NVCC_EXTRA", "SPARSE_POOL_CACHE_DIR",
