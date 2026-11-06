@@ -163,7 +163,7 @@ def job(a):
     peak_step = torch.cuda.max_memory_allocated()
     peak_res = torch.cuda.max_memory_reserved()
     rec = dict(schema="granule.lsw_perf/1", H=a.H, L=a.L, s=a.s, model=a.model, batch=a.batch, graph=a.graph, seed=a.seed,
-               config=cfg.describe(), dx=a.dx, dx_wg=a.dx_wg, dx_mt=a.dx_mt, dx_nw=a.dx_nw, dx_reload=a.dx_reload, wpt=a.wpt, tf32=bool(a.tf32), rounds=ROUNDS, samples_per_round=SAMPLES,
+               rep=a.rep, config=cfg.describe(), dx=a.dx, dx_wg=a.dx_wg, dx_mt=a.dx_mt, dx_nw=a.dx_nw, dx_reload=a.dx_reload, wpt=a.wpt, tf32=bool(a.tf32), rounds=ROUNDS, samples_per_round=SAMPLES,
                warmup=WARMUP, cold=dict(load_base_s=build_s, model_and_work_lists_s=model_s, first_step_wall_s=first),
                median_ms=med, dispersion_ms=disp, memory=dict(
                    steady_before_step_bytes=steady0, steady_with_optimizer_bytes=steady1, peak_forward_bytes=peak_fwd,
@@ -231,6 +231,7 @@ def main():
     j.add_argument("--dx", default="mt2_nw4_wg2")
     j.add_argument("--tf32", type=int, default=0)
     j.add_argument("--brief", type=int, default=0)
+    j.add_argument("--rep", type=int, default=0)
     j.add_argument("--out", required=True)
     s = sub.add_parser("session")
     s.add_argument("--plan", required=True)
