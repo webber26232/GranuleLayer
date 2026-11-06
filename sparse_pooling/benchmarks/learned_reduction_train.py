@@ -233,8 +233,19 @@ def replicate(a):
     from sparse_pooling import CoverTopK16Layer
     from sparse_pooling.optim import FusedAdamW
 
+    from sparse_pooling.supergroups import ConnectivityPlan
+
     dev = torch.device("cuda")
-    lay = CoverTopK16Layer.from_checkpoint(a.checkpoint, normalization="energy", device=dev, dx_variant="auto")
+    # from_envelope, not from_checkpoint: the latter's mask check (cover_topk16.py, boolean index over 805 M elements)
+    # materialises about 25.6 GiB of host indices and systemd-oomd kills the job on this 31 GiB machine
+    blob = torch.load(a.checkpoint, map_location="cpu", weights_only=False, mmap=True)
+    rec0 = blob["rec"]
+    sp = rec0["spec"]
+    conn = ConnectivityPlan(sp["S"], sp["R"], sp.get("generation", "balanced_permutation"), sp["seed"])
+    lay = CoverTopK16Layer.from_envelope(blob["weight"].to(dev), blob["bias"].to(dev), input_dim=1024, hidden_dim=int(rec0["H"]),
+                                         output_dim=1024, connectivity=conn, envelope_C=int(rec0["C"]), normalization="energy",
+                                         device=dev, dx_variant="auto")
+    del blob
     lay.enable_main_grad()
     small = torch.load(a.checkpoint.replace(".pt", "_small.pt"), map_location=dev)
     proj = torch.nn.Linear(256, 1024, device=dev)
@@ -262,7 +273,9 @@ def replicate(a):
         opt.step()
     rec = dict(schema="granule.lsw_replicate/1", checkpoint=Path(a.checkpoint).name, seed=a.seed, steps=a.steps, val_start=val0,
                val_final=held(T.VAL_SEEDS), test_icdx39000=held(tuple(range(39_000, 39_008))),
-               support=lay.metadata["support_fingerprint"], executed_dx=lay.last_info["kgen_dx"]["variant"], env=C.env_record(),
+               support=lay.metadata["support_fingerprint"],
+               support_expected="e4465520b9cca51b91cf19cbfc6ba9771f7ec988149b548425574d5eeb643a81 (graph 0 validation record)",
+               executed_dx=lay.last_info["kgen_dx"]["variant"], env=C.env_record(),
                historical="Cover-TopK/16 development 0.1713 +- 0.0042 (validation), research confirmation about 0.1697 (test, "
                           "icdx39000), dense-masked execution of the same support on another code head")
     C.atomic_json(a.out, rec)
