@@ -61,7 +61,12 @@ for cid, cfg in dict(A2=ReducerConfig("A2", "block_mean", L=s, s=s), A5=ReducerC
     m = ReductionModel(clone_base(base), cfg, output_dim=32)
     opt = FusedAdamW(m.sparse_parameters() + m.reducer_parameters(), lr=1e-3)
     x = torch.randn(40, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    m(x).float().square().mean().backward()
+    # sparse and reduction kernels + the compact tiled second stage; the dense torch.matmul readout is not exercised here
+    # (cuBLAS initialization itself trips a host-side cuCtxGetLimit report under memcheck, independent of this code)
+    U = m.features(x)
+    if m.second is not None:
+        U = m.second(U)
+    U.float().square().mean().backward()
     opt.step()
     torch.cuda.synchronize()
 print("WORKLOAD COMPLETE lrd", flush=True)
