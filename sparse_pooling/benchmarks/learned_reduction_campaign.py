@@ -17,6 +17,18 @@ Stage 5, confirmation (H = 10,485,760):
   Finalists (declared rule): A0, A1, A4, MC, and the strongest non-overlapping reducer = the one of {A2, A3, A3gelu, A3mean} with the
   lowest mean screening validation loss across the three tasks; plus A4gelu if it beats A4 on at least two of three tasks.
 Stage 6: secondary (H = 12,582,912): A0 and the leading learned reducer, compose, seed 0, 1024 updates at their primary LR.
+
+Supplementary stages, declared after the stages above had finished and their test losses had been seen, so they are not part
+of the blind plan.  What each fixes: the finalist rule compared A3mean with plain A4 (initialization confounded), left the
+fixed reducers without full-width confirmation, chose the secondary "leading reducer" from 512-update tuning, stopped at
+4096 updates while A0 was still improving, and trained every model on a pool of 256 batches.  Selection stays validation-only:
+  control_tune / control_final (H = 10,485,760): A2, A3, A5, A4mean; compose and interact; same rules as primary tune / final.
+  Leader = the non-A0 model with the lowest mean over (compose, interact) of seed-mean final validation loss, over
+  primary_final and control_final.
+  horizon: A0, leader; both tasks; seeds 0, 1, 2; 8192 updates; their primary LR, --test 1.
+  fresh: A0, leader, A4; both tasks; seeds 0, 1, 2; 4096 updates; pool 4096, so no training batch repeats; LR not re-tuned.
+  secondary_leader (H = 12,582,912): A0, leader; compose; seed 0; 4096 updates; --test 1.
+  m8192 (H = 10,485,760): A0, A4; compose; seed 0; M = 8192 from 16 distinct pool batches; 128 updates; LR selected at M = 512.
 """
 from __future__ import annotations
 
@@ -146,10 +158,65 @@ def manifest_secondary(out):
                 jobs=[dict(model=m, **trial(best[(m, "compose", "e2e")][0])) for m in ("A0", lead)], leading=lead)
 
 
+CONTROLS = ("A2", "A3", "A5", "A4mean")
+PRIMARY_TASKS = ("compose", "interact")
+
+
+def manifest_control_tune(out):
+    best = ranked(load(out, "screen_tune1") + load(out, "screen_tune2"))
+    jobs = [dict(model=m, task=t, **trial(r)) for t in PRIMARY_TASKS for m in CONTROLS for r in best[(m, t, "e2e")][:3]]
+    return dict(defaults=dict(H=H_PRIMARY, seed=0, steps=512, eval_every=128, mode="e2e"), jobs=jobs)
+
+
+def manifest_control_final(out):
+    jobs = [dict(model=m, task=t, seed=s, **trial(v[0])) for (m, t, _), v in ranked(load(out, "control_tune")).items()
+            for s in (0, 1, 2)]
+    return dict(defaults=dict(H=H_PRIMARY, steps=4096, eval_every=128, mode="e2e", test=1), jobs=jobs)
+
+
+def supplementary_best(out):
+    """Per (model, task): validation-selected LR and seed-mean final validation loss; the leader over both tasks."""
+    rs, lrs, vals = load(out, "primary_final") + load(out, "control_final"), {}, {}
+    for r in rs:
+        lrs[(r["model"], r["task"])] = trial(r)
+        vals.setdefault((r["model"], r["task"]), []).append(score(r))
+    seed_mean = {k: sum(v) / len(v) for k, v in vals.items()}
+    models = {m for m, _ in seed_mean if m != "A0"}
+    lead = min(models, key=lambda m: sum(seed_mean[(m, t)] for t in PRIMARY_TASKS))
+    return lrs, lead
+
+
+def manifest_horizon(out):
+    lrs, lead = supplementary_best(out)
+    jobs = [dict(model=m, task=t, seed=s, **lrs[(m, t)]) for m in ("A0", lead) for t in PRIMARY_TASKS for s in (0, 1, 2)]
+    return dict(defaults=dict(H=H_PRIMARY, steps=8192, eval_every=128, mode="e2e", test=1), jobs=jobs, leading=lead)
+
+
+def manifest_fresh(out):
+    lrs, lead = supplementary_best(out)
+    jobs = [dict(model=m, task=t, seed=s, **lrs[(m, t)]) for m in dict.fromkeys(("A0", lead, "A4")) for t in PRIMARY_TASKS
+            for s in (0, 1, 2)]
+    return dict(defaults=dict(H=H_PRIMARY, steps=4096, eval_every=128, mode="e2e", test=1, pool=4096), jobs=jobs, leading=lead)
+
+
+def manifest_secondary_leader(out):
+    lrs, lead = supplementary_best(out)
+    return dict(defaults=dict(H=H_SECONDARY, seed=0, steps=4096, eval_every=128, mode="e2e", task="compose", test=1),
+                jobs=[dict(model=m, **lrs[(m, "compose")]) for m in ("A0", lead)], leading=lead)
+
+
+def manifest_m8192(out):
+    lrs, _ = supplementary_best(out)
+    return dict(defaults=dict(H=H_PRIMARY, seed=0, steps=128, eval_every=32, mode="e2e", task="compose", test=1, token_mult=16),
+                jobs=[dict(model=m, **lrs[(m, "compose")]) for m in ("A0", "A4")])
+
+
 MANIFESTS = dict(screen_tune1=lambda o: manifest_tune1(), screen_tune2=manifest_tune2, screen_final=manifest_final,
                  frozen_tune=lambda o: manifest_frozen_tune(), frozen_final=manifest_frozen_final,
                  primary_smoke=manifest_primary_smoke, primary_tune=manifest_primary_tune,
-                 primary_final=manifest_primary_final, secondary=manifest_secondary)
+                 primary_final=manifest_primary_final, secondary=manifest_secondary,
+                 control_tune=manifest_control_tune, control_final=manifest_control_final, horizon=manifest_horizon,
+                 fresh=manifest_fresh, secondary_leader=manifest_secondary_leader, m8192=manifest_m8192)
 
 
 def main():

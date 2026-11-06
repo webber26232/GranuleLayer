@@ -55,7 +55,7 @@ class Run:
                 self.proj.bias.zero_()
         if frozen:
             self.proj.requires_grad_(False)
-        cal = self.batch(0)[0]
+        cal = self.tokens(0)[0]
         if self.cfg.dense and self.cfg.dense_init != "identity":
             with torch.no_grad():
                 self.model.gamma.fill_(LR.calibrate_gamma(self.model, self.proj(cal).to(torch.bfloat16)))
@@ -72,11 +72,18 @@ class Run:
             [] if frozen else list(self.proj.parameters()))
         self.small = torch.optim.AdamW(small, lr=a.lr_small, weight_decay=0.0, fused=True)
 
-    def batch(self, i):
+    def tokens(self, n):
         a = self.a
-        s = T.TRAIN_BASE + (i % T.POOL) + 1_000_000 * a.seed
+        s = T.TRAIN_BASE + (n % a.pool) + 1_000_000 * a.seed
         x0 = T.gaussian(s, T.M_TRAIN, self.task.D0, self.dev)
         return x0, self.task(x0)
+
+    def batch(self, i):
+        k = self.a.token_mult
+        if k == 1:
+            return self.tokens(i)
+        parts = [self.tokens(i * k + n) for n in range(k)]
+        return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
 
     def loss_of(self, x0, tgt):
         y = self.model(self.proj(x0).to(torch.bfloat16))
@@ -96,7 +103,7 @@ class Run:
     def train_eval(self):
         tot = 0.0
         for i in range(T.TRAIN_EVAL_BATCHES):
-            x0, tgt = self.batch(i * (T.POOL // T.TRAIN_EVAL_BATCHES))
+            x0, tgt = self.tokens(i * (self.a.pool // T.TRAIN_EVAL_BATCHES))
             tot += float(self.loss_of(x0, tgt))
         return tot / T.TRAIN_EVAL_BATCHES
 
@@ -138,11 +145,11 @@ class Run:
     def train(self):
         a = self.a
         rec = dict(schema="granule.lsw_train/1", H=a.H, L=a.L, s=a.s, model=a.model, task=a.task, seed=a.seed, mode=a.mode,
-                   steps=a.steps, lr_w=a.lr_w, lr_small=a.lr_small, p_mult=a.p_mult, batch=T.M_TRAIN, pool=T.POOL,
+                   steps=a.steps, lr_w=a.lr_w, lr_small=a.lr_small, p_mult=a.p_mult, batch=T.M_TRAIN * a.token_mult, pool=a.pool,
                    config=self.cfg.describe(), weights=self.model.weight_counts(), head_weights=T.OUT * C.G + T.OUT,
                    proj_weights=self.task.D0 * C.D + C.D, fingerprints=self.model.fingerprints(),
                    setup_seconds=self.setup_s, protocol=dict(
-                       val=T.VAL_SEEDS, test=T.LSW_TEST if a.test else None, pool=T.POOL, tf32=False,
+                       val=T.VAL_SEEDS, test=T.LSW_TEST if a.test else None, pool=a.pool, tf32=False,
                        gelu="exact" if self.cfg.psi == "gelu" else None, moments="bf16", stochastic_rounding=True,
                        optimizers="FusedAdamW W / b / P; torch AdamW fused proj / head / c / V / d", weight_decay=0.0),
                    hidden_start=self.hidden_sample())
@@ -237,7 +244,7 @@ def replicate(a):
 
     dev = torch.device("cuda")
     # from_envelope, not from_checkpoint: the latter's mask check (cover_topk16.py, boolean index over 805 M elements)
-    # materialises about 25.6 GiB of host indices and systemd-oomd kills the job on this 31 GiB machine
+    # materialises about 25.6 GB (23.8 GiB) of host indices and systemd-oomd kills the job on this 31 GiB machine
     blob = torch.load(a.checkpoint, map_location="cpu", weights_only=False, mmap=True)
     rec0 = blob["rec"]
     sp = rec0["spec"]
@@ -300,6 +307,8 @@ def main():
     j.add_argument("--lr-small", type=float, default=1e-3)
     j.add_argument("--p-mult", type=float, default=1.0)
     j.add_argument("--test", type=int, default=0)
+    j.add_argument("--pool", type=int, default=T.POOL, help="distinct training batches of 512 tokens before they repeat")
+    j.add_argument("--token-mult", type=int, default=1, help="training M = 512 x this, from distinct pool batches")
     j.add_argument("--verbose", type=int, default=0)
     j.add_argument("--out", required=True)
     s = sub.add_parser("session")

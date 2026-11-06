@@ -65,7 +65,7 @@ C16 blocks, and no record straddles a 2,048-neuron stride block.
 ## 4. Pre-existing defect found (not changed here)
 
 `CoverTopK16Layer.from_checkpoint` checks its mask with `m[valid[..., None].expand_as(m)]` (`cover_topk16.py:167`). Boolean indexing over
-805 M elements materialises 4 x int64 x 805 M = about **25.6 GiB of host memory** before `.all()`. On this 31 GiB machine that gets the
+805 M elements materialises 4 x int64 x 805 M = about **25.6 GB (23.8 GiB) of host memory** before `.all()`. On this 31 GiB machine that gets the
 process killed by the OOM killer or systemd-oomd. The fix is one line, `bool((m != 0).logical_or(~valid[..., None]).all())`. It is out of scope for this
 branch and left for review; the replication goes through `from_envelope`.
 
