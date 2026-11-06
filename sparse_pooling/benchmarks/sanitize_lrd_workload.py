@@ -50,7 +50,7 @@ for H, L, s, ch in GEOMS:
                 g = torch.randn_like(U)
                 if nonfinite:
                     g[0, 0] = float("inf")
-                    g[1, 1] = float("nan")
+                    g[1, g.shape[1] - 1] = float("nan")
                 torch.autograd.backward(U, g)
                 torch.cuda.synchronize()
         print(H, L, s, ch, tiling, wg, flush=True)
