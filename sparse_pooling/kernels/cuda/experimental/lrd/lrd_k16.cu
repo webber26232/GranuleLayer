@@ -36,13 +36,18 @@ static int lr_fwd(const LrArgs& a, int n_chunks, int n_tiles, cudaStream_t s) {
   return lr_launch(lr_fwd_kernel<16, LR_MT, LR_NW, EPI, FX>, dim3(n_tiles, n_chunks), LR_NW * 32, smem, a, s, slot);
 }
 
-template <bool SPLIT>
+template <int MT, int NW, bool SPLIT, bool RELOAD>
 static int lr_dx(const LrArgs& a, int n_chunks, int n_tiles, cudaStream_t s) {
   static LaunchSlot slot;
-  if (a.k.dx_group_warps < 1 || LR_NW % a.k.dx_group_warps) return -4;
-  const size_t BM = 16 * LR_MT;
-  size_t smem = lr_map(a) + (size_t)a.k.S * BM * 2 + (size_t)(LR_NW / a.k.dx_group_warps) * a.k.S * BM * 4;
-  return lr_launch(lr_dx_kernel<16, LR_MT, LR_NW, SPLIT>, dim3(n_tiles, n_chunks), LR_NW * 32, smem, a, s, slot);
+  if (a.k.dx_group_warps < 1 || NW % a.k.dx_group_warps) return -4;
+  const size_t BM = 16 * MT;
+  size_t smem = lr_map(a) + (size_t)a.k.S * BM * 2 + (size_t)(NW / a.k.dx_group_warps) * a.k.S * BM * 4;
+  return lr_launch(lr_dx_kernel<16, MT, NW, SPLIT, RELOAD>, dim3(n_tiles, n_chunks), NW * 32, smem, a, s, slot);
+}
+
+template <int MT, int NW, bool RELOAD>
+static int lr_dx_s(const LrArgs& a, int split, int n_chunks, int n_tiles, cudaStream_t s) {
+  return split ? lr_dx<MT, NW, true, RELOAD>(a, n_chunks, n_tiles, s) : lr_dx<MT, NW, false, RELOAD>(a, n_chunks, n_tiles, s);
 }
 
 template <int WPT, bool SPLIT, int MODE>
@@ -72,11 +77,17 @@ extern "C" int sp_lr_fwd(const LrArgs* a, int variant, int n_chunks, int n_tiles
   return -5;
 }
 
-extern "C" int sp_lr_dx(const LrArgs* a, int split, int n_chunks, int n_tiles, void* stream) {
+// dX tilings: (mt, nw, reload) in the compiled list below; n_tiles = ceil(B / (16 mt))
+static const int LR_DXV[][3] = {{4, 8, 0}, {4, 8, 1}, {2, 8, 0}, {2, 8, 1}, {2, 4, 0}, {2, 4, 1}};
+extern "C" int sp_lr_dx(const LrArgs* a, int split, int mt, int nw, int reload, int n_chunks, int n_tiles, void* stream) {
   cudaStream_t s = (cudaStream_t)stream;
   if (!lr_ok(a)) return -2;
   if (n_chunks == 0) return 0;
-  return split ? lr_dx<true>(*a, n_chunks, n_tiles, s) : lr_dx<false>(*a, n_chunks, n_tiles, s);
+#define LR_DX(M, N, R) \
+  if (mt == M && nw == N && reload == R) return lr_dx_s<M, N, (bool)R>(*a, split, n_chunks, n_tiles, s);
+  LR_DX(4, 8, 0) LR_DX(4, 8, 1) LR_DX(2, 8, 0) LR_DX(2, 8, 1) LR_DX(2, 4, 0) LR_DX(2, 4, 1)
+#undef LR_DX
+  return -5;
 }
 
 // mode: LR_DO_DW | LR_DO_DP; wpt: dW tasks per warp (4 or 2)
@@ -98,7 +109,7 @@ extern "C" int sp_lr_dw(const LrArgs* a, int split, int mode, int wpt, int n_chu
 
 // Compiled attributes (register use, spills) of a kernel + theoretical active CTAs per SM.  out: numRegs,
 // localSizeBytes, sharedSizeBytes (static), maxThreadsPerBlock, active CTAs per SM (-1 unknown), max dynamic smem.
-// kind 0 fwd(variant, FX), 1 dx(split), 2 dw(split, mode, wpt)
+// kind 0 fwd(variant, FX), 1 dx(split, mt * 16 + nw, reload), 2 dw(split, mode, wpt)
 template <typename Kern>
 static int lr_attr(Kern k, int threads, long long smem, long long* out) {
   cudaFuncAttributes fa;
@@ -131,8 +142,14 @@ extern "C" int sp_lr_attrs(int kind, int v0, int v1, int v2, long long smem, lon
     if (v1 <= 5) return lr_attr(lr_fwd_kernel<16, LR_MT, LR_NW, LR_SIMT, 5>, T, smem, out);
     return lr_attr(lr_fwd_kernel<16, LR_MT, LR_NW, LR_SIMT, 8>, T, smem, out);
   }
-  if (kind == 1) return v0 ? lr_attr(lr_dx_kernel<16, LR_MT, LR_NW, true>, T, smem, out)
-                           : lr_attr(lr_dx_kernel<16, LR_MT, LR_NW, false>, T, smem, out);
+  if (kind == 1) {  // v0 split, v1 mt * 16 + nw, v2 reload
+#define LR_B(M, N, R) \
+  if (v1 == M * 16 + N && v2 == R) return v0 ? lr_attr(lr_dx_kernel<16, M, N, true, (bool)R>, N * 32, smem, out) \
+                                             : lr_attr(lr_dx_kernel<16, M, N, false, (bool)R>, N * 32, smem, out);
+    LR_B(4, 8, 0) LR_B(4, 8, 1) LR_B(2, 8, 0) LR_B(2, 8, 1) LR_B(2, 4, 0) LR_B(2, 4, 1)
+#undef LR_B
+    return -5;
+  }
   if (kind == 2) {
 #define LR_A(W, M) \
   if (v2 == W && v1 == M) return v0 ? lr_attr(lr_dw_kernel<16, W, LR_NW, LR_TS, LR_ST, true, M>, T, smem, out) \

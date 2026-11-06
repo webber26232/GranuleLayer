@@ -24,7 +24,9 @@ Execution:
 Numerics: BF16 x / W / b / P operands, FP32 accumulation and FP32 main_grad, BF16 hi + lo split of h and Delta (plan
 "split"), FusedAdamW for W / b / P; FP32 V / d / c, ordinary autograd, torch.optim.AdamW.  FP32 atomics: not bitwise
 deterministic; reduction="deterministic" is rejected.  No dispatch or tuning entry is inherited from Cover-TopK/16:
-``mt4_nw8_wg4`` here is an explicit, unvalidated request.
+the K16 dX tilings used here are explicit, unvalidated requests.  The lrd defaults (mma_split, dX MT 2 / NW 4 / WG 2, fused
+dW + dP with 2 tasks per warp) come from measurements at H = 2,621,440 and 10,485,760, M = 8192 (experiment records);
+the other compiled variants stay selectable for A/B comparisons.
 """
 from __future__ import annotations
 
@@ -79,15 +81,16 @@ class LrdBackend:
             raise RuntimeError(f"{lib.path}: LrArgs layout mismatch (native {list(buf[:max(n, 0)])}, ctypes {want})")
         A = ctypes.POINTER(LrArgs)
         self._fwd = lib.fn("sp_lr_fwd", [A, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p])
-        self._dx = lib.fn("sp_lr_dx", [A, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p])
+        self._dx = lib.fn("sp_lr_dx", [A] + [ctypes.c_int] * 6 + [ctypes.c_void_p])
         self._dw = lib.fn("sp_lr_dw", [A, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p])
         self._attrs = lib.fn("sp_lr_attrs", [ctypes.c_int] * 4 + [ctypes.c_longlong, ctypes.POINTER(ctypes.c_longlong)])
 
     def fwd(self, a, variant, n_chunks, n_tiles, device):
         self._R._check(self._fwd(ctypes.byref(a), variant, n_chunks, n_tiles, self._R._stream(device)), "sp_lr_fwd")
 
-    def dx(self, a, split, n_chunks, n_tiles, device):
-        self._R._check(self._dx(ctypes.byref(a), split, n_chunks, n_tiles, self._R._stream(device)), "sp_lr_dx")
+    def dx(self, a, split, mt, nw, reload, n_chunks, n_tiles, device):
+        self._R._check(self._dx(ctypes.byref(a), split, mt, nw, reload, n_chunks, n_tiles, self._R._stream(device)),
+                       f"sp_lr_dx(mt {mt}, nw {nw}, reload {reload})")
 
     def dw(self, a, split, mode, wpt, n_chunks, device):
         self._R._check(self._dw(ctypes.byref(a), split, mode, wpt, n_chunks, self._R._stream(device)), "sp_lr_dw")
@@ -235,7 +238,8 @@ class LearnedReductionFunction(torch.autograd.Function):
         if need_x:
             a.k.dXT = dxt.data_ptr()
             a.k.items, a.k.chunks, a.k.dx_group_warps = ex.items.data_ptr(), ex.chunks.data_ptr(), red.dx_group_warps
-            be.dx(a, split, ex.chunks.shape[0], math.ceil(B / (16 * red.MT)), xc.device)
+            be.dx(a, split, red.dx_mt, red.dx_nw, red.dx_reload, ex.chunks.shape[0], math.ceil(B / (16 * red.dx_mt)),
+                  xc.device)
         _mark("bwd.dx")
         do_w = need_w or need_b
         mg_w, mg_b = getattr(w, "main_grad", None), getattr(b, "main_grad", None)
@@ -266,6 +270,7 @@ class LearnedReductionFunction(torch.autograd.Function):
         sp.last_info.update(backward_backend="lrd", grad_precision=sp.plan.grad_precision,
                             reduction_backward=dict(dp_mode=red.dp_mode, wpt=red.wpt, dx=bool(need_x), dw=bool(do_w),
                                                     dp=bool(need_p), dx_group_warps=red.dx_group_warps,
+                                                    dx_tiling=(red.dx_mt, red.dx_nw, red.dx_reload),
                                                     recomputations_of_z=int(bool(need_x)) + (
                                                         1 if red.dp_mode == "fused" else int(do_w) + int(bool(need_p)))))
         dx = dxt.t().to(ctx.x_dtype, memory_format=torch.contiguous_format) if need_x else None
@@ -281,8 +286,8 @@ class LearnedReducer(nn.Module):
     MT = 4  # compile-time token tile of the lrd forward / dX (lrd_k16.cu)
 
     def __init__(self, sparse: KgenLayer, spec: ReductionSpec, init: str = "random", seed: int = 0, gain: float = 1.0,
-                 trainable: bool = True, epilogue: str = "mma_split", dp_mode: str = "separate", wpt: int = 4,
-                 dx_group_warps: int = 4, allow_uncovered: bool = False):
+                 trainable: bool = True, epilogue: str = "mma_split", dp_mode: str = "fused", wpt: int = 2,
+                 dx_group_warps: int = 2, allow_uncovered: bool = False, dx_tiling: tuple = (2, 4, 0)):
         super().__init__()
         L = sparse.layout
         if L.fan_in != 16:
@@ -295,8 +300,11 @@ class LearnedReducer(nn.Module):
             raise ValueError(f"dp_mode {dp_mode!r} (one of {DP_MODES})")
         if wpt not in (2, 4):
             raise ValueError("wpt must be 2 or 4")
-        if dx_group_warps not in (1, 2, 4, 8):
-            raise ValueError("dx_group_warps must divide 8")
+        self.dx_mt, self.dx_nw, self.dx_reload = dx_tiling
+        if tuple(dx_tiling) not in {(4, 8, 0), (4, 8, 1), (2, 8, 0), (2, 8, 1), (2, 4, 0), (2, 4, 1)}:
+            raise ValueError(f"dx_tiling {dx_tiling}: (MT, NW, reload) is not compiled")
+        if dx_group_warps not in (1, 2, 4, 8) or self.dx_nw % dx_group_warps:
+            raise ValueError(f"dx_group_warps {dx_group_warps} must divide NW = {self.dx_nw}")
         if sparse.plan.grad_precision not in ("split", "bf16"):
             raise ValueError("grad_precision must be 'split' or 'bf16'")
         self.sparse = sparse
@@ -402,9 +410,11 @@ class LearnedReducer(nn.Module):
         D, S = self.sparse.layout.input_dim, self.sparse.sg_feat.shape[1]
         map_b = (D * 2 + 15) & ~15
         smem = dict(fwd=map_b + S * 16 * self.MT * 2,
-                    dx=map_b + S * 16 * self.MT * 2 + (8 // self.dx_group_warps) * S * 16 * self.MT * 4,
+                    dx=map_b + S * 16 * self.dx_mt * 2 + (self.dx_nw // self.dx_group_warps) * S * 16 * self.dx_mt * 4,
                     dw=map_b + 3 * 2 * S * 16 * 2)
-        rec = dict(backend="lrd", status="experimental, unvalidated", kernel_tiling=dict(MT=self.MT, NW=8, WPT=self.wpt),
+        rec = dict(backend="lrd", status="experimental, unvalidated",
+                   kernel_tiling=dict(fwd_MT=self.MT, fwd_NW=8, dx_MT=self.dx_mt, dx_NW=self.dx_nw, dx_reload=self.dx_reload,
+                                      WPT=self.wpt),
                    epilogue=self.epilogue, dp_mode=self.dp_mode, dx_group_warps=self.dx_group_warps,
                    shared_bytes=smem, work_lists=dict(ex.stats), routing=self.routing.report(),
                    reduction="fp32_atomics (not bitwise deterministic)", build=be.build_info())
@@ -413,7 +423,7 @@ class LearnedReducer(nn.Module):
             sim = self.epilogue == "simt"
             rec["kernel_attributes"] = dict(
                 fwd=be.attributes(0, EPILOGUES[self.epilogue], self.F if sim else 1, 0, smem["fwd"]),
-                dx=be.attributes(1, split, 0, 0, smem["dx"]),
+                dx=be.attributes(1, split, self.dx_mt * 16 + self.dx_nw, self.dx_reload, smem["dx"]),
                 dw=be.attributes(2, split, 1, self.wpt, smem["dw"]),
                 dp=be.attributes(2, split, 2, self.wpt, smem["dw"]),
                 dw_dp_fused=be.attributes(2, split, 3, self.wpt, smem["dw"]))
@@ -422,7 +432,7 @@ class LearnedReducer(nn.Module):
 
 # --------------------------------------------------------------------------- virtual stride view (A2, A5)
 @torch.no_grad()
-def stride_view(base: KgenLayer, s: int, dx_variant: str = "mt4_nw8_wg4") -> KgenLayer:
+def stride_view(base: KgenLayer, s: int, dx_variant: str = "mt2_nw4_wg2") -> KgenLayer:
     """A KgenLayer whose 'outputs' are the stride blocks [q s, (q + 1) s) of ``base``'s neuron stream, over the SAME
     storage (weight / bias views, same records and input sets): its Mean is the fixed mean of s neurons, computed by the
     unchanged K16 kernels.  Requires contiguous storage: equal per-output counts, C divides them, C divides s, s
@@ -545,7 +555,7 @@ class ReducerConfig:
     dense: bool = True
     dense_init: str = "normal"  # "normal" (std 1 / sqrt(J), rule shared by the J != O reducers) or "identity"
     epilogue: str = "mma_split"
-    dp_mode: str = "separate"
+    dp_mode: str = "fused"
     second: Optional[tuple] = None  # (L2, s2, psi2)
     backend_note: str = ""
 

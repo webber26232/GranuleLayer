@@ -174,7 +174,9 @@ __global__ void __launch_bounds__(NW * 32) lr_fwd_kernel(LrArgs ar) {
 // ============================================================================
 // dX: dh from Delta and P, then the kgen dA / slab / atomic path
 // ============================================================================
-template <int K, int MT, int NW, bool SPLIT>
+// RELOAD: read the Delta fragments once per block instead of keeping them in registers across an item's blocks (fewer
+// long-lived registers, more loads); the register count decides the active CTAs per SM (kernel_attributes in the records).
+template <int K, int MT, int NW, bool SPLIT, bool RELOAD>
 __global__ void __launch_bounds__(NW * 32) lr_dx_kernel(LrArgs ar) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
   const KgArgs& a = ar.k;
@@ -199,7 +201,6 @@ __global__ void __launch_bounds__(NW * 32) lr_dx_kernel(LrArgs ar) {
     const int n_g = a.counts[g];
     const int j0 = fb0 - g * a.NB;
     // Delta fragments of the item: A operand of m16n8k8 (rows = tokens, k = slots), hi + lo per m16 tile
-    uint32_t dh_[MT][2], dl_[MT][2];
     bool tv[MT][2];
     const int f0 = 2 * t4;
     const float* d0 = ar.Dl + (long long)(w0 + min(f0, F - 1) + ar.PAD) * a.B;
@@ -207,13 +208,20 @@ __global__ void __launch_bounds__(NW * 32) lr_dx_kernel(LrArgs ar) {
 #pragma unroll
     for (int mt = 0; mt < MT; mt++)
 #pragma unroll
-      for (int h = 0; h < 2; h++) {
-        const int tok = t0 + 16 * mt + 8 * h + g4;
-        tv[mt][h] = tok < a.B;
-        const int ts = tv[mt][h] ? tok : 0;
-        const float v0 = __ldg(d0 + ts), v1 = __ldg(d1 + ts);
-        split_bf16(tv[mt][h] && f0 < F ? v0 : 0.f, tv[mt][h] && f0 + 1 < F ? v1 : 0.f, dh_[mt][h], dl_[mt][h]);
-      }
+      for (int h = 0; h < 2; h++) tv[mt][h] = t0 + 16 * mt + 8 * h + g4 < a.B;
+    auto load_delta = [&](int mt, int h, uint32_t& hi_, uint32_t& lo_) {
+      const int tok = t0 + 16 * mt + 8 * h + g4;
+      const int ts = tv[mt][h] ? tok : 0;
+      const float v0 = __ldg(d0 + ts), v1 = __ldg(d1 + ts);
+      split_bf16(tv[mt][h] && f0 < F ? v0 : 0.f, tv[mt][h] && f0 + 1 < F ? v1 : 0.f, hi_, lo_);
+    };
+    uint32_t dh_[RELOAD ? 1 : MT][2], dl_[RELOAD ? 1 : MT][2];
+    if constexpr (!RELOAD) {
+#pragma unroll
+      for (int mt = 0; mt < MT; mt++)
+#pragma unroll
+        for (int h = 0; h < 2; h++) load_delta(mt, h, dh_[mt][h], dl_[mt][h]);
+    }
     for (int bi = 0; bi < nb; bi++) {
       const long long fb = fb0 + bi;
       const int nval = min(C, n_g - (j0 + bi) * C);
@@ -255,6 +263,13 @@ __global__ void __launch_bounds__(NW * 32) lr_dx_kernel(LrArgs ar) {
 #pragma unroll
         for (int mt = 0; mt < MT; mt++) {
           float dz[2][4];
+          uint32_t ad[2], al_[2];
+          if constexpr (RELOAD) {
+            load_delta(mt, 0, ad[0], al_[0]);
+            load_delta(mt, 1, ad[1], al_[1]);
+          } else {
+            ad[0] = dh_[mt][0]; ad[1] = dh_[mt][1]; al_[0] = dl_[mt][0]; al_[1] = dl_[mt][1];
+          }
 #pragma unroll
           for (int h = 0; h < 2; h++) {
             const int cc = (2 * c16 + h) * 8 + 2 * t4;
@@ -264,8 +279,8 @@ __global__ void __launch_bounds__(NW * 32) lr_dx_kernel(LrArgs ar) {
             }
             float d[4], e[4] = {0.f, 0.f, 0.f, 0.f};
             kg_z<K, MT>(d, af, mt, wf[h], bx[h], by[h]);
-            mma_m16n8k8_bf16(e, dh_[mt][0], dh_[mt][1], pf[h], e[0], e[1], e[2], e[3]);
-            if (SPLIT) mma_m16n8k8_bf16(e, dl_[mt][0], dl_[mt][1], pf[h], e[0], e[1], e[2], e[3]);
+            mma_m16n8k8_bf16(e, ad[0], ad[1], pf[h], e[0], e[1], e[2], e[3]);
+            if (SPLIT) mma_m16n8k8_bf16(e, al_[0], al_[1], pf[h], e[0], e[1], e[2], e[3]);
 #pragma unroll
             for (int i = 0; i < 4; i++) {
               float v = dz_f<P_MEAN, A_RELU, 0>(d[i], e[i], 0.f, 0.f, 1.f, 0.f);

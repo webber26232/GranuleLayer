@@ -7,7 +7,8 @@
 #            default: all four.  kgen (generalized fan-in kernels K8 / K16 / K32 / K64, sanitize_kgen_workload.py)
 #            and cover (the named Cover-TopK/16 layer: indexed K16 / C16, legacy + every compiled K16 dX tiling incl.
 #            the profile-selected mt4_nw8_wg4, token / neuron tails, FusedAdamW, packed reload;
-#            sanitize_cover_workload.py) run only when named.  (The research branch's kgx / kgw / rsn / kwa / tkc /
+#            sanitize_cover_workload.py) and lrd (learned sliding-window reduction kernels,
+#            sanitize_lrd_workload.py) run only when named.  (The research branch's kgx / kgw / rsn / kwa / tkc /
 #            icdx workloads stay on interaction-coverage-k16-dx with their modules.)
 # --jobs N      (workload, tool) runs in parallel (default: CPUs - 1).  Each instrumented process is
 #               bound by one CPU core and uses little GPU memory.
@@ -95,12 +96,12 @@ ERR_EXIT=97  # --error-exitcode: sanitizer-detected errors
 script_of() {
   case $1 in
     generic) echo sanitize_workload.py ;;
-    sg|dx_scatter|det|kgen|cover) echo "sanitize_$1_workload.py" ;;
+    sg|dx_scatter|det|kgen|cover|lrd) echo "sanitize_$1_workload.py" ;;
     *) return 1 ;;
   esac
 }
 for wl in "${WL[@]}"; do
-  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det kgen cover)" >&2; exit 2; }
+  script=$(script_of "$wl") || { echo "unknown workload '$wl' (generic sg dx_scatter det kgen cover lrd)" >&2; exit 2; }
   [ -f "$WDIR/$script" ] || { echo "workload script missing: $WDIR/$script" >&2; exit 2; }
 done
 if [ -z "$OUT" ]; then
