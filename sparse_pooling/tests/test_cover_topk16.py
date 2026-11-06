@@ -394,6 +394,43 @@ def test_research_checkpoint_format(tmp_path):
         CoverTopK16Layer.from_checkpoint(tmp_path / "masked.pt", input_dim=D, output_dim=G)
 
 
+class _MaskAccepted(Exception):
+    """Raised in place of the GPU work that follows from_checkpoint's mask check."""
+
+
+def _pack_mask_bits(enabled):
+    """The research checkpoint's LSB-first bit packing of a per-slot mask."""
+    return (enabled.reshape(-1, 8).to(torch.uint8) << torch.arange(8, dtype=torch.uint8)).sum(1, dtype=torch.uint8)
+
+
+@pytest.mark.parametrize("case", ["all_valid_enabled", "one_valid_disabled", "only_padded_disabled"])
+def test_checkpoint_mask_check_needs_only_valid_slots(tmp_path, monkeypatch, case):
+    """CPU only: the check runs before any device work, so an accepted mask stops at Envelope.generate."""
+    from sparse_pooling import CoverTopK16Layer
+    from sparse_pooling.cover_topk16 import CKPT_SCHEMA, tensor_sha256
+    from sparse_pooling.experimental.kgen_layout import KLayout
+    from sparse_pooling.experimental.kgen_lowered import Envelope
+
+    def accepted(*args, **kwargs):
+        raise _MaskAccepted
+
+    monkeypatch.setattr(Envelope, "generate", accepted)
+    w, b = envelope_values(device="cpu")
+    valid = KLayout(D, H, G, 64, C).valid_mask("cpu")
+    assert valid.any() and not valid.all()  # the ragged H must leave padded slots for this test to mean anything
+    enabled = torch.ones_like(w, dtype=torch.bool)
+    if case == "one_valid_disabled":
+        enabled[tuple(valid.nonzero()[-1].tolist()) + (63,)] = False
+    elif case == "only_padded_disabled":
+        enabled[tuple((~valid).nonzero()[0].tolist()) + (0,)] = False
+    rec = dict(schema=CKPT_SCHEMA, spec=dict(K=64, S=64, R=2, seed=1), C=C, H=H,
+               weight_sha256=tensor_sha256(w.view(torch.int16)), bias_sha256=tensor_sha256(b.view(torch.int16)))
+    torch.save(dict(rec=rec, weight=w, bias=b, mask_bits=_pack_mask_bits(enabled)), tmp_path / "ck.pt")
+    expected = (ValueError, "disables valid slots") if case == "one_valid_disabled" else (_MaskAccepted, None)
+    with pytest.raises(expected[0], match=expected[1]):
+        CoverTopK16Layer.from_checkpoint(tmp_path / "ck.pt", input_dim=D, output_dim=G, device="cpu")
+
+
 @requires_cuda_backend
 def test_device_move_and_reload_invalidate_runtime():
     lay, _, _ = build()
