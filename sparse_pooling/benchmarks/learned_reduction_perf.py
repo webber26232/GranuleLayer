@@ -4,7 +4,8 @@ One JOB (fresh process) = one (H, reducer, M, variant): packed sparse base, warm
 ROUNDS rounds of SAMPLES complete training steps with canonical restore between rounds.  A step = forward + readout +
 loss y.float().square().mean() + backward + FusedAdamW (W, b, P: BF16 moments, stochastic rounding) + torch AdamW
 (V, d, c: FP32).  Phases come from CUDA events; memory peaks from a separate pass (forward / backward / full step).
-Compilation and graph construction are excluded from steady-state timing and reported separately.  CUDA Graph mode is not
+Historical harness, kept to reproduce the original tables: its GPU parameter snapshot is included in the absolute memory
+totals.  Use lrf_perf.py for memory.  Compilation and graph construction are excluded from steady-state timing and reported separately.  CUDA Graph mode is not
 measured: per-call scratch tensors have fresh addresses, so these layers do not support capture (eager only, for every
 model).
 

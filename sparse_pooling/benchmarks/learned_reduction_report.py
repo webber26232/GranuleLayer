@@ -193,6 +193,29 @@ def primary_tables(rs):
     return "\n".join(out)
 
 
+def perf_row(r):
+    """One perf.csv row.  The dX request and the dX kernel time have separate names: a record's dx is the request string and
+    median_ms["dx"] is the kernel time (earlier exports wrote both to one column, and the timing overwrote the request)."""
+    d = dict(H=r["H"], model=r["model"], batch=r["batch"], dx_request=r["dx"], dx_resolved_variant=dx_resolved(r),
+             epilogue=r["config"]["epilogue"], dp_mode=r["config"]["dp_mode"], wpt=r["wpt"], dx_mt=r["dx_mt"], dx_nw=r["dx_nw"],
+             dx_wg=r["dx_wg"], dx_reload=r["dx_reload"], tf32=r["tf32"], rep=r.get("rep", 0))
+    for k, v in r["median_ms"].items():
+        d["dx_kernel_ms" if k == "dx" else f"{k}_ms"] = v
+    d.update({k: v for k, v in r["memory"].items() if k.endswith("bytes")})
+    return d
+
+
+def dx_resolved(r):
+    """The tiling that actually executed: lrd records carry (MT, NW, reload), K16 records the resolved kgen variant."""
+    info = r.get("last_info") or {}
+    if "kgen_dx" in info:
+        v = info["kgen_dx"].get("variant")
+        return v.get("name", json.dumps(v, sort_keys=True)) if isinstance(v, dict) else v
+    if "reduction_backward" in info:
+        return "lrd_mt{}_nw{}_r{}_wg{}".format(*info["reduction_backward"]["dx_tiling"], info["reduction_backward"]["dx_group_warps"])
+    return None
+
+
 def perf_tables(rs):
     out = []
     phases = ["sparse_and_reduction", "compact_and_readout", "loss_and_dense_backward", "dx", "dw_db", "dp", "fused_optimizer", "dense_optimizer", "step"]
@@ -379,11 +402,7 @@ def main():
         tx.append(perf_tables(perf))
         rows = []
         for r in perf:
-            d = dict(H=r["H"], model=r["model"], batch=r["batch"], dx=r["dx"], epilogue=r["config"]["epilogue"], dp_mode=r["config"]["dp_mode"], wpt=r["wpt"],
-                     dx_mt=r["dx_mt"], dx_nw=r["dx_nw"], dx_wg=r["dx_wg"], dx_reload=r["dx_reload"], tf32=r["tf32"], rep=r.get("rep", 0))
-            d.update(r["median_ms"])
-            d.update({k: v for k, v in r["memory"].items() if k.endswith("bytes")})
-            rows.append(d)
+            rows.append(perf_row(r))
         keys = sorted({k for d in rows for k in d})
         write_csv(dest / "csv" / "perf.csv", rows, keys)
         with gzip.open(dest / "raw_perf.jsonl.gz", "wt") as f:

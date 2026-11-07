@@ -1,0 +1,44 @@
+{
+ "schema": "granule.lrf_manifest/1",
+ "study": "a3mean_followup/1",
+ "status": "preregistered before any tuning or long run of this study; the earlier study's test losses have already been inspected, so this is a new follow-up, not a blind extension",
+ "start_commit": "a3ad071eb1a8092aeda45d3aa1abd757e7180721",
+ "shape": {"D": 1024, "G": 1024, "O": 1024, "H": 10485760, "K": 16, "L": 2048, "s": 2048, "J": 5120},
+ "models": {"A0": "existing group Mean(ReLU), common head", "A2": "fixed mean L = s = 2048, dense 5120 -> 1024, common head", "A3mean": "learned L = s = 2048, P = 1 / 2048 at start, same dense and head"},
+ "numerics": {"intermediate_activation": "identity", "tf32": false, "moments": "bf16", "stochastic_rounding": true, "weight_decay": 0.0, "lr_schedule": "constant", "dx_policy": "request mt2_nw4_wg2 for K16 models and lrd (MT 2, NW 4, WG 2): experimental, unvalidated, the same across the matrix; mt4_nw8_wg4 measured for A0 in perf only and labelled as production-validated"},
+ "gamma": "1 / RMS(U + c) on one calibration block of the proj output, per student seed, identical across execution modes, frozen, never recalibrated at M = 8192 or after a resume",
+ "seeds": {"student_graph_init_data": [0, 1, 2], "note": "teacher parameters are fixed across student seeds (31, 41, 51): seeds do not measure variation across teachers or real tasks"},
+ "data": {"stream": "sparse_pooling/benchmarks/lrf_stream.py", "block_rows": 512, "regime": "fresh: no wrap-around, unique_samples_seen = samples_seen", "validation_blocks": 8, "test_blocks": 16, "direct_batch": "16 consecutive canonical blocks", "synthetic": "independent input vectors, no temporal relationship"},
+ "execution_modes": {"small": {"M_phys": 512, "accum_steps": 1, "M_eff": 512}, "direct_large": {"M_phys": 8192, "accum_steps": 1, "M_eff": 8192}, "accumulated_large": {"M_phys": 512, "accum_steps": 16, "M_eff": 8192}},
+ "primary": {
+  "comparisons": ["A3mean - A0, Compose, test, 16384 M_eff = 512 updates, final weights", "A3mean - A0, Interact, test, 16384 M_eff = 512 updates, final weights"],
+  "hypotheses": "H1, H2: A3mean's mean test loss differs from A0's at the long endpoint, on Compose and on Interact respectively",
+  "analysis": "paired per-seed differences, ordinary 95 % t interval (n = 3), two-sided p with df 2, Holm adjustment across the two primary tests; all per-seed values reported",
+  "everything_else": "secondary or exploratory; the earlier study's contrasts are not confirmatory evidence here"
+ },
+ "descriptive_rule": "a quality difference below about 2 % is called small for this study's scope and shown with its cost; it is not a universal threshold, and a non-significant contrast is inconclusive, not equivalence",
+ "selection": {"metric": "mean validation loss over the last four scheduled evaluations", "non_finite": "score infinity, reported, never deleted", "test_lock": "test blocks are read only by lrf_train.py evaluate, which needs test_unlock.json; that file is written after every selection and the extension decision; test results of milestones are evaluated together; no test-based choice exists anywhere"},
+ "stages": {
+  "A": {"what": "fresh-data LR tuning, M_eff = 512", "cells": "A0, A2, A3mean x compose, interact", "seed": 0, "updates": 2048, "eval_every": 128, "candidates": "prior (lr_w, lr_small) x {1/3, 1, 3}, prior p_mult retained", "edge_rule": "if the best is at an edge, one further candidate x 1/9 or x 9; at most four trials per cell, applied uniformly"},
+  "B": {"what": "primary long horizon", "cells": "A0, A2, A3mean x compose, interact x seeds 0, 1, 2 (18 runs)", "M_eff": 512, "updates": 16384, "samples_per_run": 8388608, "eval_every": 256, "milestones": [1024, 2048, 4096, 8192, 12288, 16384], "stopping": "run the full horizon unless a genuine failure occurs"},
+  "C": {"what": "support-local confirmation", "cells": "A0, A2, A3mean x local x seeds 0, 1, 2", "tuning": "same rule as A, from the screening-selected LR recovered from raw records", "updates": 8192, "eval_every": 256, "milestones": [1024, 2048, 4096, 6144, 8192], "note": "task definition unchanged; proj initialized to the identity and trainable"},
+  "D_tune": {"what": "large-batch LR, direct M_phys 8192", "seed": 0, "updates": 256, "samples": 2097152, "eval_every": 16, "candidates": "Stage A selected pair x {1, 4, 16}, p_mult retained, no extension"},
+  "D": {"what": "large-batch confirmation", "modes": ["direct 8192 x 1", "accumulated 512 x 16"], "cells": "A0, A2, A3mean x compose, interact x seeds 0, 1, 2 (36 runs)", "updates": 1024, "samples_per_run": 8388608, "eval_every": 64, "milestones": [64, 128, 256, 512, 768, 1024], "lr": "exactly the D_tune selection in both modes"},
+  "perf": {"plan": "perf_plan.json", "rounds": 5, "samples_per_round": 8, "warmup": 3, "jobs": "three interleaved repetitions in shuffled order, seed 20261107", "harness": "lrf_perf.py"}
+ },
+ "gates": {
+  "before_tuning": ["tests/test_lrf_followup.py and tests/test_learned_reduction.py pass", "lrf_gate.py passes at H = 10485760", "lrd sanitizer passes"],
+  "tolerances_direct_vs_accum_relative_L2": {"W_b_P": 1e-4, "V_c_d_head": 1e-4, "proj_via_bf16_dx": 2e-3, "loss": 1e-5, "one_update_fp32_params": 1e-4, "one_update_bf16_params": 4e-3},
+  "resume": "exactly the next canonical blocks; parameter difference at most max(10 x the difference of two uninterrupted repeats, 1e-2)"
+ },
+ "after_mandatory_stages_budget_permitting": {
+  "order": ["anchor", "secondary", "B_ext"],
+  "anchor": "if tuning changed the historical LR of A0 or A3mean on a task: seed 0, 8192 updates at the historical LR, milestones 4096, 8192",
+  "secondary": "H = 12582912, A0 and A3mean, compose, interact, seeds 0, 1, 2, 8192 updates, primary-width LR, no inherited validation status",
+  "B_ext": "extend all 18 Stage B runs together to 32768 updates if, on validation, seed-mean loss of any cell dropped at least 2 % from update 12288 to 16384, and if the projected total stays within 24 GPU-hours; decided before the test unlock; the primary endpoint stays at 16384",
+  "not_planned": "A4mean anchor, D continuation to 2048 updates, CUDA Graphs, new tilings, new reducers"
+ },
+ "budget": {"soft_gpu_hours": 24, "pilot_estimate_gpu_hours": {"gates_and_perf": 0.6, "A": 0.6, "B": 4.0, "C": 1.3, "D_tune": 0.85, "D_direct": 3.3, "D_accum": 3.6, "anchor": 0.4, "secondary": 1.5, "B_ext": 4.0}, "deferral": "if over budget: finish in priority order, report deferred cells; no seed is cut and no small-H result substitutes for a full-H one"},
+ "decision_options": ["retain A0", "offer A2 as a cheap alternative", "continue A3mean toward real-task validation", "keep several options because the tradeoff depends on task or data regime"],
+ "real_data": "no real dataset exists in this repository or the project tree (searched at the start); the optional pilot is not planned, and no real-world claim will be made"
+}

@@ -80,6 +80,9 @@ GEOMS = [  # H, G, L, s, channels, description
 @pytest.mark.parametrize("H,G,L,s,ch,desc", GEOMS, ids=[g[-1].replace(" ", "_") for g in GEOMS])
 @pytest.mark.parametrize("M", [8, 40, 136])
 def test_forward_and_gradients_match_oracle(H, G, L, s, ch, desc, M):
+    # Seeded: about 1 draw in 300 puts a (row, neuron) within FP32 rounding of z = 0 (seen: |z| = 1.9e-9).  FP32 and the FP64 oracle then
+    # take different sides of the ReLU kink: one neuron holds 99.98 % of the dW residual, and dP is unaffected.
+    torch.manual_seed(H + 7 * G + 11 * L + 13 * s + 17 * ch + 19 * M)
     base = build_base(H, G)
     cfg = ReducerConfig("t", "learned", L=L, s=s, channels=ch)
     m = ReductionModel(base, cfg, output_dim=32)

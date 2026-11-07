@@ -686,8 +686,7 @@ class ReductionModel(nn.Module):
         if self.c is not None:
             U = U + self.c
         A = apply_psi(U, self.cfg.psi)
-        if float(self.gamma) != 1.0:
-            A = A * self.gamma
+        A = A * self.gamma  # device-side: no host read of the frozen scalar in the training path
         if self.second is not None:
             A = self.second(A)
         _mark("readout.begin")
