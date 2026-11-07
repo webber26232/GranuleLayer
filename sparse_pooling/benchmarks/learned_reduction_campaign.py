@@ -29,6 +29,12 @@ fixed reducers without full-width confirmation, chose the secondary "leading red
   fresh: A0, leader, A4; both tasks; seeds 0, 1, 2; 4096 updates; pool 4096, so no training batch repeats; LR not re-tuned.
   secondary_leader (H = 12,582,912): A0, leader; compose; seed 0; 4096 updates; --test 1.
   m8192 (H = 10,485,760): A0, A4; compose; seed 0; M = 8192 from 16 distinct pool batches; 128 updates; LR selected at M = 512.
+
+Second supplementary round, declared after the first one's results (fresh data had reversed the pool's ranking, and pool size
+and horizon had only been varied separately).  Same LR as the pool runs, not re-tuned for fresh data:
+  fresh_matrix: A1, A2, A3mean, A5, MC, MCmean; both tasks; seeds 0, 1, 2; 4096 updates; pool 4096.  MCmean (the initialization
+  control for A4mean vs MC) was not screened; it takes A4mean's LR per task.
+  fresh_horizon: A0, leader; both tasks; seeds 0, 1, 2; 8192 updates; pool 8192.
 """
 from __future__ import annotations
 
@@ -211,12 +217,28 @@ def manifest_m8192(out):
                 jobs=[dict(model=m, **lrs[(m, "compose")]) for m in ("A0", "A4")])
 
 
+def manifest_fresh_matrix(out):
+    lrs, _ = supplementary_best(out)
+    for t in PRIMARY_TASKS:
+        lrs[("MCmean", t)] = lrs[("A4mean", t)]
+    jobs = [dict(model=m, task=t, seed=s, **lrs[(m, t)]) for m in ("A1", "A2", "A3mean", "A5", "MC", "MCmean")
+            for t in PRIMARY_TASKS for s in (0, 1, 2)]
+    return dict(defaults=dict(H=H_PRIMARY, steps=4096, eval_every=128, mode="e2e", test=1, pool=4096), jobs=jobs)
+
+
+def manifest_fresh_horizon(out):
+    lrs, lead = supplementary_best(out)
+    jobs = [dict(model=m, task=t, seed=s, **lrs[(m, t)]) for m in ("A0", lead) for t in PRIMARY_TASKS for s in (0, 1, 2)]
+    return dict(defaults=dict(H=H_PRIMARY, steps=8192, eval_every=128, mode="e2e", test=1, pool=8192), jobs=jobs, leading=lead)
+
+
 MANIFESTS = dict(screen_tune1=lambda o: manifest_tune1(), screen_tune2=manifest_tune2, screen_final=manifest_final,
                  frozen_tune=lambda o: manifest_frozen_tune(), frozen_final=manifest_frozen_final,
                  primary_smoke=manifest_primary_smoke, primary_tune=manifest_primary_tune,
                  primary_final=manifest_primary_final, secondary=manifest_secondary,
                  control_tune=manifest_control_tune, control_final=manifest_control_final, horizon=manifest_horizon,
-                 fresh=manifest_fresh, secondary_leader=manifest_secondary_leader, m8192=manifest_m8192)
+                 fresh=manifest_fresh, secondary_leader=manifest_secondary_leader, m8192=manifest_m8192,
+                 fresh_matrix=manifest_fresh_matrix, fresh_horizon=manifest_fresh_horizon)
 
 
 def main():

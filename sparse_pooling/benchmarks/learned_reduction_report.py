@@ -248,6 +248,65 @@ def perf_tables(rs):
     return "\n".join(out)
 
 
+CONTROL_PAIRS = [("A1", "A0"), ("A2", "A0"), ("A3", "A0"), ("A3mean", "A0"), ("A4", "A0"), ("A4mean", "A0"), ("A5", "A0"), ("MC", "A0"),
+                 ("A2", "A1"), ("A5", "A1"), ("A5", "A2"), ("A3", "A2"), ("A3mean", "A2"), ("A4", "A5"), ("A4mean", "A5"), ("A3mean", "A3"),
+                 ("A4mean", "A4"), ("A4", "A3"), ("A4mean", "A3mean"), ("A4", "MC"), ("A4mean", "MC")]
+
+
+def contrast_table(rows):
+    return md(rows, [("task", lambda r: r["task"]), ("a - b", lambda r: f"{r['a']} - {r['b']}"), ("per seed", lambda r: r["per_seed"]),
+                     ("mean", lambda r: f"{r['mean']:+.5f}"), ("sd", lambda r: fmt(r["sd"], 5)),
+                     ("95 % CI", lambda r: f"[{r['ci_low']:+.5f}, {r['ci_high']:+.5f}]"), ("% of b", lambda r: f"{r['rel_percent']:+.2f}")])
+
+
+def supplementary_tables(allr, dest):
+    """Stages declared after the main campaign's test losses were seen; see learned_reduction_campaign.py."""
+    out = []
+    if allr["control_final"]:
+        both = allr["primary_final"] + allr["control_final"]
+        out.append("\n## Supplementary (declared after the main campaign's test losses were seen)\n")
+        out.append("\n### Full matrix, H = 10,485,760, three paired seeds, 4096 updates (primary_final + control_final)\n")
+        out.append(primary_tables(both))
+        out.append(equal_views(both, "Full matrix, equal steps and equal GPU time (validation loss, mean over seeds)"))
+        rows = contrast_rows(both, CONTROL_PAIRS)
+        write_csv(dest / "csv" / "matrix_contrasts.csv", rows, list(rows[0].keys()))
+        out.append("\n### Full matrix, paired test-loss contrasts (a - b; negative: a better; 95 % t interval, n = 3; not adjusted for multiple comparisons)\n")
+        out.append(contrast_table(rows))
+    if allr["control_tune"]:
+        out.append("\n### Control tuning, 512 updates, validation\n")
+        out.append(md(sorted(allr["control_tune"], key=lambda r: (r["task"], ORDER.index(r["model"]), r["final_val"])), [
+            ("task", lambda r: r["task"]), ("model", lambda r: r["model"]), ("lr W / small / Pm", lambda r: f"{r['lr_w']:g} / {r['lr_small']:g} / {r['p_mult']:g}"),
+            ("val", lambda r: fmt(r["final_val"], 5))]))
+    if allr["horizon"]:
+        models = sorted({r["model"] for r in allr["horizon"]}, key=ORDER.index)
+        out.append(f"\n### Longer horizon, H = 10,485,760, three paired seeds, 8192 updates: {' and '.join(models)}\n")
+        out.append(primary_tables(allr["horizon"]))
+        out.append(equal_views(allr["horizon"], "Longer horizon, equal steps and equal GPU time", steps=(1024, 2048, 4096, 6144, 8192)))
+        rows = contrast_rows(allr["horizon"], [(m, "A0") for m in models if m != "A0"])
+        write_csv(dest / "csv" / "horizon_contrasts.csv", rows, list(rows[0].keys()))
+        out.append("\n**Paired test-loss contrasts at 8192 updates:**\n")
+        out.append(contrast_table(rows))
+    if allr["fresh"]:
+        models = sorted({r["model"] for r in allr["fresh"]}, key=ORDER.index)
+        out.append(f"\n### Fresh data, H = 10,485,760, three paired seeds, 4096 updates, no repeated training batch (pool 4096): {', '.join(models)}; LR not re-tuned\n")
+        out.append(primary_tables(allr["fresh"]))
+        out.append(equal_views(allr["fresh"], "Fresh data, equal steps and equal GPU time"))
+        rows = contrast_rows(allr["fresh"], [(a, b) for i, a in enumerate(models) for b in models[:i]])
+        write_csv(dest / "csv" / "fresh_contrasts.csv", rows, list(rows[0].keys()))
+        out.append("\n**Paired test-loss contrasts on fresh data:**\n")
+        out.append(contrast_table(rows))
+    for name, title in (("secondary_leader", "Winner at the secondary width, H = 12,582,912, compose, seed 0, 4096 updates"),
+                        ("m8192", "Training at M = 8,192 (16 distinct pool batches per step), H = 10,485,760, compose, seed 0, 128 updates, LR selected at M = 512")):
+        if allr[name]:
+            out.append(f"\n### {title}\n")
+            out.append(md(sorted(allr[name], key=lambda r: ORDER.index(r["model"])), [
+                ("model", lambda r: r["model"]), ("J", lambda r: f"{r['weights']['final_intermediate']:,}"), ("added weights", lambda r: f"{r['weights']['added_weights']:,}"),
+                ("val start", lambda r: fmt(r["curve"][0]["val"], 5)), ("val end", lambda r: fmt(r["final_val"], 5)), ("train end", lambda r: fmt(r["final_train"], 5)),
+                ("test", lambda r: fmt(r.get("test"), 5)), ("ms/step", lambda r: fmt(r["ms_per_step"], 1)), ("peak alloc GiB", lambda r: fmt(r["peak_alloc_bytes"] / 2 ** 30, 2)),
+                ("finite", lambda r: r["finite"])]))
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -256,7 +315,8 @@ def main():
     root, dest = Path(a.out), Path(a.dest)
     dest.mkdir(parents=True, exist_ok=True)
     tx = ["# Learned sliding-window reduction: generated tables\n\nGenerated by `learned_reduction_report.py` from the raw per-job records.\n"]
-    stages = ("screen_tune1", "screen_tune2", "screen_final", "frozen_tune", "frozen_final", "primary_smoke", "primary_tune", "primary_final", "secondary")
+    stages = ("screen_tune1", "screen_tune2", "screen_final", "frozen_tune", "frozen_final", "primary_smoke", "primary_tune", "primary_final", "secondary",
+              "control_tune", "control_final", "horizon", "fresh", "secondary_leader", "m8192")
     allr = {s: load(root, s) for s in stages}
     for s, rs in allr.items():
         if rs:
@@ -296,6 +356,7 @@ def main():
         tx.append(md(allr["secondary"], [("model", lambda r: r["model"]), ("J", lambda r: f"{r['weights']['final_intermediate']:,}"),
                                          ("added weights", lambda r: f"{r['weights']['added_weights']:,}"), ("val", lambda r: fmt(r["final_val"], 5)),
                                          ("test", lambda r: fmt(r.get("test"), 5)), ("ms/step", lambda r: fmt(r["ms_per_step"], 1))]))
+    tx.append(supplementary_tables(allr, dest))
     perf = load(root, "perf")
     if perf:
         tx.append("\n### Performance and memory (eager; one workload at a time)\n")

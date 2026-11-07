@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command reproduction of the learned-reduction study (docs/experiments/learned_sliding_window_reduction.md).
 #   bash sparse_pooling/benchmarks/run_learned_reduction.sh <python> <results-root> <stage> [stage ...]
-# stages: correctness sanitizer replicate screen frozen primary secondary perf supplementary report
+# stages: correctness sanitizer replicate screen frozen primary secondary perf supplementary supplementary2 report
 # Every stage is resumable (per-job atomic JSON); run it detached, serialized, one workload per GPU:
 #   systemd-run --user --unit=lsw -p MemoryHigh=20G -p MemoryMax=24G --working-directory=$PWD --setenv=PATH="$PATH" \
 #       bash sparse_pooling/benchmarks/run_learned_reduction.sh python /path/results screen frozen primary perf
@@ -28,6 +28,7 @@ for s in "$@"; do
     secondary) stage secondary ;;
     supplementary) for x in control_tune control_final horizon fresh secondary_leader m8192; do stage $x; done ;;
     perf) "$PY" learned_reduction_perf.py session --plan "$HERE/../../configs/learned_reduction/perf_plan.json" --root "$PACKED" --out "$OUT/perf" --order-seed 20261106 ;;
+    supplementary2) for x in fresh_matrix fresh_horizon; do stage $x; done ;;
     report) "$PY" learned_reduction_report.py --out "$OUT" ;;
     *) echo "unknown stage $s"; exit 2 ;;
   esac

@@ -582,6 +582,7 @@ def core_configs(H: int, L: int = 10_240, s: int = 2_048, **kw) -> Dict[str, Red
     }
     if H % L == 0:
         c["MC"] = ReducerConfig("MC", "learned", L=L, s=L, channels=L // s, **kw)
+        c["MCmean"] = ReducerConfig("MCmean", "learned", L=L, s=L, channels=L // s, init="mean", **kw)
     c["TS_id"] = ReducerConfig("TS_id", "learned", L=L, s=s, second=(256, 4, "identity"), **kw)
     c["TS_gelu"] = ReducerConfig("TS_gelu", "learned", L=L, s=s, psi="gelu", second=(256, 4, "gelu"), **kw)
     return c
