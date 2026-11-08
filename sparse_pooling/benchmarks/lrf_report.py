@@ -508,11 +508,28 @@ def main():
     if a.historical:
         historical_perf_csv(a.historical, dest / "csv" / "historical_perf_corrected.csv")
     acc = []
+    base = {r["_file"]: r for r in R["B"]}
     for s, rs in R.items():
-        acc.append(dict(stage=s, jobs=len(rs), train_h=sum(r["train_s"] for r in rs) / 3600, wall_h=sum(r["wall_s"] for r in rs) / 3600, failures=len((root / s / "failures.jsonl").read_text().splitlines()) if (root / s / "failures.jsonl").exists() else 0, diverged=sum(not r["finite"] for r in rs)))
-    tx.append("\n### Campaign accounting\n")
+        # B_ext records resume from Stage B and carry its cumulative times: count only the extension's own share
+        prior = [base.get(r["_file"]) for r in rs] if s == "B_ext" else []
+        own = lambda f: sum(r[f] for r in rs) - sum(p[f] for p in prior if p)
+        acc.append(dict(stage=s, jobs=len(rs), train_h=own("train_s") / 3600, wall_h=own("wall_s") / 3600, failures=len((root / s / "failures.jsonl").read_text().splitlines()) if (root / s / "failures.jsonl").exists() else 0, diverged=sum(not r["finite"] for r in rs)))
+    tx.append("\n### Campaign accounting (B_ext: the extension's own time, excluding the resumed Stage B part)\n")
     tx.append(md(acc, [("stage", lambda r: r["stage"]), ("jobs", lambda r: r["jobs"]), ("training h", lambda r: fmt(r["train_h"], 2)), ("job wall h", lambda r: fmt(r["wall_h"], 2)), ("failed", lambda r: r["failures"]), ("non-finite", lambda r: r["diverged"])]))
     summary["accounting"] = acc
+    ck = {}
+    for s, rs in R.items():
+        for r in rs:
+            for u, m in r.get("milestones", {}).items():
+                ck.setdefault(m["path"], dict(kind="model-only milestone", stage=s, job=r["_file"][:-5], update=int(u), path=m["path"], bytes=m["bytes"], sha256=m["sha256"]))
+    full = root / "full_checkpoints.sha256"
+    if full.exists():
+        for ln in full.read_text().splitlines():
+            h, p = ln.split(maxsplit=1)
+            rel = p.removeprefix("./")
+            ck.setdefault(rel, dict(kind="full resumable (weights, optimizer, RNG, stream position)", stage=rel.split("/")[0], job=rel.split("/")[1], update=int(rel.split("full_u")[1].split(".")[0]), path=f"<ckpt-root>/{rel}", bytes=None, sha256=h))
+    write_csv(dest / "csv" / "checkpoints.csv", sorted(ck.values(), key=lambda d: (d["stage"], d["job"], d["update"], d["kind"])), ["stage", "job", "update", "kind", "bytes", "sha256", "path"])
+    tx.append(f"\n{len(ck)} checkpoints listed with SHA-256 in `csv/checkpoints.csv`.\n")
     (dest / "tables.md").write_text("\n".join(tx))
     (dest / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
     print("\n".join(tx))
