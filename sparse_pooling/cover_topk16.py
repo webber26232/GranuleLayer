@@ -164,7 +164,8 @@ class CoverTopK16Layer(LoweredLocal):
             bits = blob["mask_bits"]
             m = ((bits[:, None] >> torch.arange(8, dtype=torch.uint8)) & 1).reshape(-1)[:w.numel()].view(w.shape)
             valid = KLayout(input_dim, int(rec["H"]), output_dim, 64, int(rec["C"])).valid_mask("cpu")
-            if not bool(m[valid[..., None].expand_as(m)].all()):
+            # never m[bool_mask]: boolean indexing materialises int64 coordinates for every selected slot first
+            if not bool(((m != 0) | ~valid[..., None]).all()):
                 raise ValueError(f"{path}: the checkpoint's mask disables valid slots; Cover-TopK/16 selects from the "
                                  "unpruned envelope values")
             mask_note = "mask present, every valid slot enabled (unpruned envelope)"
